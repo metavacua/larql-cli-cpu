@@ -1,0 +1,17 @@
+[package]
+name = "larql-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "CLI for LARQL knowledge graph extraction and querying"
+
+[[bin]]
+name = "larql"
+path = "src/main.rs"
+
+[dependencies]
+larql-core = { path = "../larql-core" }
+clap = { version = "4", features = ["derive"] }
+indicatif = "0.17"
+serde_json = { workspace = true }
