@@ -37,6 +37,14 @@ pub fn apply_rope(
     out
 }
 
+/// Per-head attention weights for the last token position.
+/// `weights[head]` = vec of attention scores over all positions.
+pub struct AttentionWeights {
+    /// Per-head attention distribution for the last sequence position.
+    /// `heads[h][j]` = attention weight from last token to position j.
+    pub heads: Vec<Vec<f32>>,
+}
+
 /// Grouped-query attention with causal masking.
 ///
 /// q: (seq, num_q * head_dim), k: (seq, num_kv * head_dim), v: same as k
@@ -51,7 +59,31 @@ pub fn gqa_attention(
     scale: f64,
     seq_len: usize,
 ) -> Array2<f32> {
+    let (out, _) = gqa_attention_with_weights(q, k, v, num_q, head_dim, reps, scale, seq_len, false);
+    out
+}
+
+/// GQA attention that optionally captures per-head attention weights for the last token.
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_attention_with_weights(
+    q: &Array2<f32>,
+    k: &Array2<f32>,
+    v: &Array2<f32>,
+    num_q: usize,
+    head_dim: usize,
+    reps: usize,
+    scale: f64,
+    seq_len: usize,
+    capture: bool,
+) -> (Array2<f32>, Option<AttentionWeights>) {
     let mut out = Array2::<f32>::zeros((seq_len, num_q * head_dim));
+    let mut captured_heads: Vec<Vec<f32>> = if capture {
+        Vec::with_capacity(num_q)
+    } else {
+        Vec::new()
+    };
+
+    let last_pos = seq_len - 1;
 
     for h in 0..num_q {
         let kv_h = h / reps;
@@ -89,6 +121,12 @@ pub fn gqa_attention(
             }
         }
 
+        // Capture last-token attention weights
+        if capture {
+            let row_start = last_pos * seq_len;
+            captured_heads.push(scores[row_start..row_start + seq_len].to_vec());
+        }
+
         // Weighted sum of V
         for i in 0..seq_len {
             for d in 0..head_dim {
@@ -101,5 +139,13 @@ pub fn gqa_attention(
         }
     }
 
-    out
+    let weights = if capture {
+        Some(AttentionWeights {
+            heads: captured_heads,
+        })
+    } else {
+        None
+    };
+
+    (out, weights)
 }

@@ -5,9 +5,12 @@ pub mod capture;
 pub mod error;
 pub mod ffn;
 pub mod forward;
+pub mod graph_ffn;
 pub mod model;
+pub mod route_ffn;
 pub mod residual;
 pub mod tokenizer;
+pub mod vector_index;
 pub mod walker;
 
 // Re-export dependencies for downstream crates.
@@ -22,9 +25,16 @@ pub use capture::{
 };
 pub use error::InferenceError;
 pub use ffn::{FfnBackend, LayerFfnRouter, SparseFfn, WeightFfn};
+pub use attention::AttentionWeights;
 pub use forward::{
     capture_residuals, predict, predict_with_ffn, predict_with_router, trace_forward,
-    trace_forward_with_ffn, PredictResult, TraceResult,
+    trace_forward_full, trace_forward_with_ffn, LayerAttentionCapture, PredictResult, TraceResult,
+};
+pub use graph_ffn::{GateIndex, GraphFfn, IndexBuildCallbacks, SilentIndexCallbacks};
+pub use route_ffn::{RouteFfn, RouteGuidedFfn, RouteTable};
+pub use vector_index::{
+    load_model_weights_from_vindex, load_vindex_config, load_vindex_embeddings,
+    load_vindex_tokenizer, write_model_weights, VectorIndex, VindexConfig, WalkFfn, WalkTrace,
 };
 pub use model::{load_model_dir, resolve_model_path, ModelWeights};
 pub use tokenizer::{decode_token, load_tokenizer};

@@ -1,6 +1,6 @@
 # chuk-larql-rs
 
-Knowledge graphs extracted from neural network weights. Five crates, one binary, one graph format.
+Knowledge graphs extracted from neural network weights. Six crates, one binary, one graph format.
 
 LARQL extracts knowledge from language models through three complementary methods:
 
@@ -39,7 +39,7 @@ larql stats knowledge.larql.json
 
 ## Architecture
 
-Five crates. Five concerns. Clean boundaries.
+Six crates. Six concerns. Clean boundaries.
 
 ```
 larql-models      what the model IS     (config, traits, tensor keys)
@@ -100,7 +100,7 @@ SurrealDB integration. Reads NDJSON vector files, generates schema DDL with HNSW
 
 ### larql-cli
 
-CLI binary connecting all crates. 14 commands.
+CLI binary connecting all crates. 21 commands.
 
 ## Documentation
 
@@ -233,7 +233,7 @@ chuk-larql-rs/
 │   ├── larql-core/       Graph engine — edges, queries, algorithms, serialization
 │   ├── larql-inference/  Inference — forward pass, extraction, walkers, capture
 │   ├── larql-surreal/    SurrealDB — vector loading, schemas, SQL generation
-│   ├── larql-cli/        CLI binary — 14 commands over all crates
+│   ├── larql-cli/        CLI binary — 21 commands over all crates
 │   └── larql-python/     PyO3 binding — native Python extension
 ├── docs/
 │   ├── cli.md            CLI reference
@@ -321,9 +321,9 @@ make python-build   # build Python extension (requires virtualenv)
 - **Core graph engine** — full indexed graph with select, walk, search, subgraph, merge, shortest path, PageRank, BFS/DFS, diff.
 - **BFS extraction** — template-based probing with multi-token chaining.
 - **Serialization** — JSON and MessagePack with format auto-detection.
-- **CLI** — 14 commands: weight-extract, attention-extract, predict, vector-extract, vector-import, vector-load, vector-export-surql, residuals, bfs, stats, query, describe, validate, merge.
+- **CLI** — 21 commands: weight-extract, attention-extract, vector-extract, residuals, predict, index-gates, extract-routes, walk, attention-capture, qk-templates, ov-gate, extract-index, bfs, vector-load, vector-import, vector-export-surql, query, describe, stats, validate, merge.
 - **PyO3 binding** — full Python API parity.
-- **Tests** — 191 Rust tests across 5 crates. Zero clippy warnings.
+- **Tests** — 191 Rust tests across 6 crates. Zero clippy warnings.
 - **Benchmarks** — component-level and end-to-end for graph engine, inference, and SQL generation.
 - **Examples** — 10 runnable examples across 4 crates demonstrating all functionality.
 

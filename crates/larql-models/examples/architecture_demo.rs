@@ -45,7 +45,7 @@ fn main() {
 
     // ── Tensor key comparison ──
     println!("=== Tensor Key Comparison (Layer 5) ===\n");
-    println!("{:<25} {:<45} {}", "Key", "Gemma 3", "Generic/Llama");
+    println!("{:<25} {:<45} Generic/Llama", "Key", "Gemma 3");
     println!("{}", "-".repeat(100));
 
     let keys: Vec<(&str, Box<dyn Fn(&dyn ModelArchitecture) -> String>)> = vec![

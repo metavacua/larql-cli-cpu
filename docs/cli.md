@@ -111,6 +111,193 @@ larql predict google/gemma-3-4b-it --prompt "The largest planet is" -k 3
 larql predict google/gemma-3-4b-it -p "Water freezes at" -k 10
 ```
 
+### `larql index-gates`
+
+Build a precomputed gate index for graph-based FFN. Offline step — run once per model. Eliminates the gate matmul at inference time.
+
+```
+larql index-gates <MODEL> --output <OUTPUT> [OPTIONS]
+```
+
+| Flag | Description |
+|---|---|
+| `<MODEL>` | Model path or HuggingFace model ID |
+| `-o, --output <OUTPUT>` | Output index file (`.gate-index.jsonl`) |
+| `--features-per-token <N>` | Features to index per token per layer [default: 100] |
+| `--top-tokens <N>` | Top tokens to match at runtime [default: 10] |
+| `--layers <LAYERS>` | Layers to index (e.g. `0-33` or `26,27,28`). Default: all |
+
+**Examples:**
+
+```bash
+larql index-gates google/gemma-3-4b-it -o gates.gate-index.jsonl
+larql index-gates google/gemma-3-4b-it -o gates.gate-index.jsonl --layers 24-33
+```
+
+### `larql extract-routes`
+
+Extract attention routing patterns from forward passes. Captures which FFN features activate for each entity/relation combination.
+
+```
+larql extract-routes <MODEL> --output <OUTPUT> [OPTIONS]
+```
+
+| Flag | Description |
+|---|---|
+| `<MODEL>` | Model path or HuggingFace model ID |
+| `-o, --output <OUTPUT>` | Output JSON file for the routing table |
+| `--top-k <N>` | Top features to capture per layer per forward pass [default: 50] |
+| `--min-activation <F>` | Minimum absolute activation to record [default: 1.0] |
+| `-e, --entities <ENTITIES>` | Comma-separated entities (overrides defaults) |
+| `--layers <LAYERS>` | Comma-separated layers to capture. Default: all |
+
+**Examples:**
+
+```bash
+larql extract-routes google/gemma-3-4b-it -o routes.json
+larql extract-routes google/gemma-3-4b-it -o routes.json --entities "France,Germany,Japan" --layers 25,26,27
+```
+
+### `larql walk`
+
+Walk the model as a local vector index — gate KNN followed by down token lookup. No forward pass needed when using a `.vindex`.
+
+```
+larql walk --prompt <PROMPT> [OPTIONS]
+```
+
+| Flag | Description |
+|---|---|
+| `-p, --prompt <PROMPT>` | Prompt text to walk through the model |
+| `--index <PATH>` | Path to a `.vindex` directory (self-contained, no model needed) |
+| `-m, --model <MODEL>` | Model path or HuggingFace model ID |
+| `--gate-vectors <PATH>` | Path to extracted ffn_gate vectors (alternative to `--index`) |
+| `--down-vectors <PATH>` | Path to extracted ffn_down vectors (alternative to `--index`) |
+| `-k, --top-k <N>` | Top-K features per layer for gate KNN [default: 10] |
+| `-l, --layers <LAYERS>` | Layers to walk. Comma-separated or range. Default: all |
+| `--predict-top-k <N>` | Number of top predictions to show [default: 10] |
+| `--predict` | Run full forward pass with walk FFN and show predictions (requires `--model`) |
+| `--compare` | Compare walk FFN predictions against dense ground truth (requires `--model`) |
+| `--down-top-k <N>` | Number of down tokens to show per feature [default: 5] |
+| `-v, --verbose` | Show verbose loading and timing info |
+
+**Examples:**
+
+```bash
+# Walk with a pre-built .vindex
+larql walk --prompt "The capital of France is" --index model.vindex
+
+# Walk with loose vector files
+larql walk --prompt "The capital of France is" \
+    --gate-vectors vectors/ffn_gate.vectors.jsonl \
+    --down-vectors vectors/ffn_down.vectors.jsonl
+
+# Walk + compare against ground truth
+larql walk --prompt "The capital of France is" --index model.vindex --model google/gemma-3-4b-it --compare
+```
+
+### `larql attention-capture`
+
+Capture and compare attention patterns across multiple prompts. Shows which heads attend similarly or differently.
+
+```
+larql attention-capture <MODEL> --prompts <PROMPTS> [OPTIONS]
+```
+
+| Flag | Description |
+|---|---|
+| `<MODEL>` | Model path or HuggingFace model ID |
+| `-p, --prompts <PROMPTS>` | Prompts to compare (comma-separated) |
+| `-l, --layers <LAYERS>` | Layers to capture. Comma-separated or range. Default: all |
+| `--threshold <F>` | Attention threshold — only show heads with max attention above this [default: 0.1] |
+| `-v, --verbose` | Show verbose per-head details |
+
+**Examples:**
+
+```bash
+larql attention-capture google/gemma-3-4b-it \
+    --prompts "The capital of France is,The capital of Germany is,The capital of Japan is"
+
+larql attention-capture google/gemma-3-4b-it \
+    --prompts "The capital of France is,The language of France is" \
+    --layers 20-33 --threshold 0.2
+```
+
+### `larql qk-templates`
+
+Extract attention template circuits from QK weight decomposition. Identifies which heads are "fixed" (same pattern regardless of entity) vs "variable".
+
+```
+larql qk-templates <MODEL> [OPTIONS]
+```
+
+| Flag | Description |
+|---|---|
+| `<MODEL>` | Model path or HuggingFace model ID |
+| `-t, --templates <TEMPLATES>` | Template prompts (format: `relation:prompt`, comma-separated). Uses built-in templates if omitted |
+| `-l, --layers <LAYERS>` | Layers to analyze. Default: all |
+| `--threshold <F>` | Correlation threshold below which a head is "variable" [default: 0.95] |
+| `--top-components <N>` | Number of top SVD components to show per head [default: 5] |
+
+**Examples:**
+
+```bash
+larql qk-templates google/gemma-3-4b-it
+larql qk-templates google/gemma-3-4b-it --layers 20-33 --threshold 0.90
+```
+
+### `larql ov-gate`
+
+Map attention OV circuits to FFN gate features. Shows what each attention head activates in the next layer's FFN.
+
+```
+larql ov-gate <MODEL> [OPTIONS]
+```
+
+| Flag | Description |
+|---|---|
+| `<MODEL>` | Model path or HuggingFace model ID |
+| `-l, --layers <LAYERS>` | Layers to analyze. Default: all |
+| `-k, --top-k <N>` | Top-K gate features to show per head [default: 10] |
+| `--heads <HEADS>` | Only show specific heads (for focused analysis) |
+| `-v, --verbose` | Show verbose per-feature details |
+
+**Examples:**
+
+```bash
+larql ov-gate google/gemma-3-4b-it --layers 25,26,27
+larql ov-gate google/gemma-3-4b-it --layers 26 --heads 0,1,2 -k 20 -v
+```
+
+### `larql extract-index`
+
+Build a `.vindex` — the model decompiled to a standalone vector index. Can be used with `larql walk` without needing the original model.
+
+```
+larql extract-index [MODEL] --output <OUTPUT> [OPTIONS]
+```
+
+| Flag | Description |
+|---|---|
+| `<MODEL>` | Model path or HuggingFace model ID (not needed with `--from-vectors`) |
+| `-o, --output <OUTPUT>` | Output path for the `.vindex` directory |
+| `--from-vectors <PATH>` | Build from already-extracted NDJSON vector files instead of model weights |
+| `--down-top-k <N>` | Top-K tokens per feature in down metadata [default: 10] |
+| `--include-weights` | Include full model weights for self-contained inference |
+
+**Examples:**
+
+```bash
+# Build from model directly
+larql extract-index google/gemma-3-4b-it -o model.vindex
+
+# Build from pre-extracted vectors
+larql extract-index -o model.vindex --from-vectors vectors/
+
+# Include weights for self-contained predict
+larql extract-index google/gemma-3-4b-it -o model.vindex --include-weights
+```
+
 ### `larql vector-extract`
 
 Extract full weight vectors to intermediate NDJSON files for SurrealDB ingestion.
@@ -157,7 +344,7 @@ larql vector-load <INPUT> --ns <NS> --db <DB> [OPTIONS]
 | `--pass <PASS>` | Password [default: `root`] |
 | `--tables <TABLES>` | Tables to load (comma-separated). Default: all |
 | `--layers <LAYERS>` | Layers to load (comma-separated). Default: all |
-| `--batch-size <N>` | Batch size for INSERT transactions [default: 500] |
+| `--batch-size <N>` | Batch size for INSERT transactions [default: 50] |
 | `--resume` | Resume interrupted load (skips completed layers) |
 | `--schema-only` | Create schema only (no data load) |
 
@@ -249,8 +436,10 @@ larql residuals capture <MODEL> --entities <ENTITIES> --output <OUTPUT> [OPTIONS
 | `-e, --entities <ENTITIES>` | Comma-separated entities, or path to a text file (one per line) |
 | `-l, --layer <LAYER>` | Layer(s) to capture at. Can specify multiple times. [default: 25] |
 | `--all-layers` | Capture at every layer |
-| `-o, --output <OUTPUT>` | Output NDJSON file |
+| `-o, --output <OUTPUT>` | Output directory for NDJSON files |
 | `--template <TEMPLATE>` | Prompt template. `{entity}` is replaced. Default: bare entity name |
+| `--activations` | Also capture sparse FFN activations (top-K features per layer) |
+| `--activation-top-k <N>` | Number of top features to record per layer [default: 50] |
 
 **How it works:** Tokenizes each entity, runs a full forward pass through the transformer up to the target layer(s), and saves the last-token hidden state as a vector in NDJSON format. The output is compatible with `vector-load` for SurrealDB ingestion.
 
@@ -382,6 +571,27 @@ larql validate <GRAPH>
 
 ```bash
 larql validate knowledge.larql.json
+```
+
+### `larql merge`
+
+Merge multiple graph files into one.
+
+```
+larql merge <INPUT>... --output <OUTPUT> [OPTIONS]
+```
+
+| Flag | Description |
+|---|---|
+| `<INPUT>...` | Input graph files to merge (at least 2) |
+| `-o, --output <OUTPUT>` | Output merged graph file |
+| `--strategy <STRATEGY>` | Merge strategy: `union`, `max_confidence`, `source_priority` [default: `union`] |
+
+**Examples:**
+
+```bash
+larql merge weights.larql.json attention.larql.json -o combined.larql.json
+larql merge weights.larql.json bfs.larql.json -o combined.larql.json --strategy max_confidence
 ```
 
 ## Templates format

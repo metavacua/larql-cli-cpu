@@ -37,6 +37,27 @@ enum Commands {
     /// Run full forward pass and predict next token.
     Predict(predict_cmd::PredictArgs),
 
+    /// Build gate index for graph-based FFN (offline, run once per model).
+    IndexGates(index_gates_cmd::IndexGatesArgs),
+
+    /// Extract attention routing patterns from forward passes.
+    ExtractRoutes(extract_routes_cmd::ExtractRoutesArgs),
+
+    /// Walk the model as a local vector index — gate KNN + down token lookup.
+    Walk(walk_cmd::WalkArgs),
+
+    /// Capture and compare attention patterns across prompts.
+    AttentionCapture(attention_capture_cmd::AttentionCaptureArgs),
+
+    /// Extract attention template circuits from QK weight decomposition.
+    QkTemplates(qk_templates_cmd::QkTemplatesArgs),
+
+    /// Map attention OV circuits to FFN gate features (what each head activates).
+    OvGate(ov_gate_cmd::OvGateArgs),
+
+    /// Build a .vindex — the model decompiled to a standalone vector index.
+    ExtractIndex(extract_index_cmd::ExtractIndexArgs),
+
     /// BFS extraction from a model endpoint.
     Bfs(bfs_cmd::BfsArgs),
 
@@ -77,6 +98,13 @@ fn main() {
         Commands::VectorExtract(args) => vector_extract_cmd::run(args),
         Commands::Residuals(args) => residuals_cmd::run(args),
         Commands::Predict(args) => predict_cmd::run(args),
+        Commands::IndexGates(args) => index_gates_cmd::run(args),
+        Commands::AttentionCapture(args) => attention_capture_cmd::run(args),
+        Commands::QkTemplates(args) => qk_templates_cmd::run(args),
+        Commands::OvGate(args) => ov_gate_cmd::run(args),
+        Commands::ExtractRoutes(args) => extract_routes_cmd::run(args),
+        Commands::Walk(args) => walk_cmd::run(args),
+        Commands::ExtractIndex(args) => extract_index_cmd::run(args),
         Commands::Bfs(args) => bfs_cmd::run(args),
         // SurrealDB
         Commands::VectorLoad(args) => vector_load_cmd::run(args),

@@ -1,6 +1,13 @@
+pub mod attention_capture_cmd;
 pub mod attention_walk_cmd;
 pub mod bfs_cmd;
+pub mod extract_index_cmd;
+pub mod extract_routes_cmd;
+pub mod index_gates_cmd;
+pub mod ov_gate_cmd;
 pub mod predict_cmd;
+pub mod qk_templates_cmd;
 pub mod residuals_cmd;
 pub mod vector_extract_cmd;
+pub mod walk_cmd;
 pub mod weight_walk_cmd;

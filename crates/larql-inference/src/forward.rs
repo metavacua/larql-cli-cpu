@@ -6,10 +6,18 @@
 
 use ndarray::Array2;
 
-use crate::attention::{apply_rope, gqa_attention};
+use crate::attention::{apply_rope, gqa_attention_with_weights, AttentionWeights};
 use crate::ffn::{FfnBackend, LayerFfnRouter, WeightFfn};
 use crate::model::ModelWeights;
 use crate::residual::{rms_norm, rms_norm_heads};
+
+/// Per-head attention pattern for the last token at one layer.
+pub struct LayerAttentionCapture {
+    pub layer: usize,
+    /// Per-head attention weights for the last token.
+    /// `heads[h][j]` = how much the last token attends to position j.
+    pub weights: AttentionWeights,
+}
 
 /// Result of a forward trace — residuals and optional sparse activations.
 pub struct TraceResult {
@@ -18,6 +26,8 @@ pub struct TraceResult {
     /// (layer, top-K (feature_index, activation_magnitude)) for each capture layer.
     /// Only populated if capture_activations=true.
     pub activations: Vec<(usize, Vec<(usize, f32)>)>,
+    /// Per-layer attention weight captures. Only populated if capture_attention=true.
+    pub attention: Vec<LayerAttentionCapture>,
 }
 
 /// Prediction result from a full forward pass.
@@ -44,6 +54,17 @@ fn embed_tokens(weights: &ModelWeights, token_ids: &[u32]) -> Array2<f32> {
 
 /// Run attention for a single layer. Returns the post-attention residual.
 fn run_attention(weights: &ModelWeights, h: &Array2<f32>, layer: usize) -> Option<Array2<f32>> {
+    let (h_post_attn, _) = run_attention_inner(weights, h, layer, false)?;
+    Some(h_post_attn)
+}
+
+/// Run attention with optional per-head weight capture.
+fn run_attention_inner(
+    weights: &ModelWeights,
+    h: &Array2<f32>,
+    layer: usize,
+    capture_attention: bool,
+) -> Option<(Array2<f32>, Option<AttentionWeights>)> {
     let head_dim = weights.head_dim;
     let num_q = weights.num_q_heads;
     let num_kv = weights.num_kv_heads;
@@ -86,8 +107,8 @@ fn run_attention(weights: &ModelWeights, h: &Array2<f32>, layer: usize) -> Optio
     let q_rope = apply_rope(&q_normed, num_q, head_dim, weights.rope_base);
     let k_rope = apply_rope(&k_normed, num_kv, head_dim, weights.rope_base);
 
-    let attn_out = gqa_attention(
-        &q_rope, &k_rope, &v_full, num_q, head_dim, reps, scale, seq_len,
+    let (attn_out, attn_weights) = gqa_attention_with_weights(
+        &q_rope, &k_rope, &v_full, num_q, head_dim, reps, scale, seq_len, capture_attention,
     );
     let attn_projected = attn_out.dot(&w_o.t());
 
@@ -104,7 +125,7 @@ fn run_attention(weights: &ModelWeights, h: &Array2<f32>, layer: usize) -> Optio
         h + &attn_projected
     };
 
-    Some(h_post_attn)
+    Some((h_post_attn, attn_weights))
 }
 
 /// Run FFN for a single layer using the given backend. Returns the post-FFN residual.
@@ -162,6 +183,20 @@ fn run_layer_with_ffn(
     let h_post_attn = run_attention(weights, h, layer)?;
     let (h_out, activation) = run_ffn(weights, &h_post_attn, layer, ffn, capture_activation);
     Some((h_out, activation))
+}
+
+/// Run a single transformer layer, optionally capturing attention weights.
+fn run_layer_with_capture(
+    weights: &ModelWeights,
+    h: &Array2<f32>,
+    layer: usize,
+    ffn: &dyn FfnBackend,
+    capture_activation: bool,
+    capture_attention: bool,
+) -> Option<(Array2<f32>, Option<Array2<f32>>, Option<AttentionWeights>)> {
+    let (h_post_attn, attn_weights) = run_attention_inner(weights, h, layer, capture_attention)?;
+    let (h_out, activation) = run_ffn(weights, &h_post_attn, layer, ffn, capture_activation);
+    Some((h_out, activation, attn_weights))
 }
 
 /// Project the final hidden state to logits and return top-k predictions.
@@ -255,24 +290,43 @@ pub fn trace_forward_with_ffn(
     activation_top_k: usize,
     ffn: &dyn FfnBackend,
 ) -> TraceResult {
+    trace_forward_full(
+        weights, token_ids, capture_layers, capture_activations,
+        activation_top_k, false, ffn,
+    )
+}
+
+/// Run a forward pass capturing residuals, activations, and optionally attention weights.
+pub fn trace_forward_full(
+    weights: &ModelWeights,
+    token_ids: &[u32],
+    capture_layers: &[usize],
+    capture_activations: bool,
+    activation_top_k: usize,
+    capture_attention: bool,
+    ffn: &dyn FfnBackend,
+) -> TraceResult {
     let seq_len = token_ids.len();
     let max_layer = *capture_layers.iter().max().unwrap_or(&0);
 
     let mut h = embed_tokens(weights, token_ids);
     let mut results = Vec::new();
     let mut activations: Vec<(usize, Vec<(usize, f32)>)> = Vec::new();
+    let mut attention_captures: Vec<LayerAttentionCapture> = Vec::new();
 
     for layer in 0..=max_layer {
-        let need_activation = capture_activations && capture_layers.contains(&layer);
+        let is_capture_layer = capture_layers.contains(&layer);
+        let need_activation = capture_activations && is_capture_layer;
+        let need_attention = capture_attention && is_capture_layer;
 
-        let (h_new, activation) = match run_layer_with_ffn(weights, &h, layer, ffn, need_activation)
-        {
-            Some(result) => result,
-            None => continue,
-        };
+        let (h_new, activation, attn_weights) =
+            match run_layer_with_capture(weights, &h, layer, ffn, need_activation, need_attention) {
+                Some(result) => result,
+                None => continue,
+            };
         h = h_new;
 
-        if capture_layers.contains(&layer) {
+        if is_capture_layer {
             let last_row = h.row(seq_len - 1);
             results.push((layer, last_row.to_vec()));
 
@@ -283,12 +337,20 @@ pub fn trace_forward_with_ffn(
                 indexed.truncate(activation_top_k);
                 activations.push((layer, indexed));
             }
+
+            if let Some(weights) = attn_weights {
+                attention_captures.push(LayerAttentionCapture {
+                    layer,
+                    weights,
+                });
+            }
         }
     }
 
     TraceResult {
         residuals: results,
         activations,
+        attention: attention_captures,
     }
 }
 

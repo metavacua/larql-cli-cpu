@@ -274,6 +274,6 @@ pub fn ffn_forward_with_activation(
     ffn_forward_dense_with_activation(x, w_gate, w_up, w_down)
 }
 
-fn sigmoid(x: f32) -> f32 {
+pub fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
 }

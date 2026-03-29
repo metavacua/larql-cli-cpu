@@ -128,7 +128,7 @@ impl WeightWalker {
     /// Confidence scoring:
     /// - `c_in`: raw gate projection score (input selectivity)
     /// - `c_out`: raw down projection score (output strength)
-    /// - `c`: normalized `c_in × c_out`, scaled to [0,1] per layer
+    /// - `c`: normalized `c_in × c_out`, scaled to `[0,1]` per layer
     pub fn walk_layer(
         &self,
         layer: usize,

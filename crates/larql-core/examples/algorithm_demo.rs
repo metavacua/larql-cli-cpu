@@ -116,7 +116,7 @@ fn main() {
     ];
 
     for (start, rels) in &walks {
-        match graph.walk(start, &rels.iter().map(|s| *s).collect::<Vec<_>>()) {
+        match graph.walk(start, &rels.to_vec()) {
             Some((dest, _)) => println!("  {start} → [{}] → {dest}", rels.join(" → ")),
             None => println!("  {start} → [{}] → DEAD END", rels.join(" → ")),
         }
