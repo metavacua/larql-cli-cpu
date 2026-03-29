@@ -1,5 +1,5 @@
-use larql_core::walker::utils::*;
-use larql_core::walker::weight_walker::ThresholdCounts;
+use larql_inference::walker::utils::*;
+use larql_inference::walker::weight_walker::ThresholdCounts;
 
 #[test]
 fn test_round4() {
@@ -45,7 +45,7 @@ fn test_partial_top_k_k_zero() {
 
 #[test]
 fn test_partial_top_k_column() {
-    let matrix = ndarray::array![[1.0, 4.0], [3.0, 2.0], [5.0, 6.0]];
+    let matrix = ndarray::array![[1.0f32, 4.0], [3.0, 2.0], [5.0, 6.0]];
     // Column 0: [1, 3, 5] → top-2 = [(2, 5.0), (1, 3.0)]
     let top = partial_top_k_column(&matrix, 0, 2);
     assert_eq!(top.len(), 2);
@@ -62,9 +62,9 @@ fn test_partial_top_k_column() {
 #[test]
 fn test_top_entities() {
     let mut counts = std::collections::HashMap::new();
-    counts.insert("France".to_string(), (10, 5.0));  // avg conf = 0.5
+    counts.insert("France".to_string(), (10, 5.0)); // avg conf = 0.5
     counts.insert("Germany".to_string(), (20, 8.0)); // avg conf = 0.4
-    counts.insert("Japan".to_string(), (5, 4.0));    // avg conf = 0.8
+    counts.insert("Japan".to_string(), (5, 4.0)); // avg conf = 0.8
 
     let top2 = top_entities(&counts, 2);
     assert_eq!(top2.len(), 2);
@@ -113,5 +113,5 @@ fn test_current_date_format() {
     assert_eq!(date.chars().nth(7), Some('-'));
     // Year should be reasonable
     let year: u32 = date[0..4].parse().unwrap();
-    assert!(year >= 2024 && year <= 2030);
+    assert!((2024..=2030).contains(&year));
 }

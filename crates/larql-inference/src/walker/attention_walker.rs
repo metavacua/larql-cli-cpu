@@ -11,13 +11,14 @@
 //!
 //! Zero forward passes. Pure matrix multiplication.
 
-use crate::core::edge::Edge;
-use crate::core::enums::SourceType;
-use crate::core::graph::Graph;
+use larql_core::core::edge::Edge;
+use larql_core::core::enums::SourceType;
+use larql_core::core::graph::Graph;
 
-use super::safetensors_loader::{ModelWeights, WalkerError};
 use super::utils::{count_threshold, decode_token, partial_top_k, top_entities};
-use super::weight_walker::{resolve_model_path, LayerResult, LayerStats, WalkCallbacks, WalkConfig};
+use super::weight_walker::{LayerResult, LayerStats, WalkCallbacks, WalkConfig};
+use crate::error::InferenceError;
+use crate::model::{resolve_model_path, ModelWeights};
 
 /// Result of walking attention heads at a single layer.
 #[derive(Debug, Clone)]
@@ -48,18 +49,18 @@ pub struct AttentionWalker {
 }
 
 impl AttentionWalker {
-    pub fn load(model: &str) -> Result<Self, WalkerError> {
+    pub fn load(model: &str) -> Result<Self, InferenceError> {
         let model_path = resolve_model_path(model)?;
-        let weights = super::safetensors_loader::load_model_dir(&model_path)?;
+        let weights = crate::model::load_model_dir(&model_path)?;
 
         let tokenizer_path = model_path.join("tokenizer.json");
         if !tokenizer_path.exists() {
-            return Err(WalkerError::MissingTensor(
+            return Err(InferenceError::MissingTensor(
                 "tokenizer.json not found".into(),
             ));
         }
         let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path)
-            .map_err(|e| WalkerError::Parse(e.to_string()))?;
+            .map_err(|e| InferenceError::Parse(e.to_string()))?;
 
         let head_dim = weights.head_dim;
 
@@ -81,7 +82,7 @@ impl AttentionWalker {
         config: &WalkConfig,
         graph: &mut Graph,
         callbacks: &mut dyn WalkCallbacks,
-    ) -> Result<AttentionLayerResult, WalkerError> {
+    ) -> Result<AttentionLayerResult, InferenceError> {
         let start = std::time::Instant::now();
 
         let prefix = format!("layers.{layer}.self_attn.");
@@ -89,12 +90,12 @@ impl AttentionWalker {
             .weights
             .tensors
             .get(&format!("{prefix}v_proj.weight"))
-            .ok_or_else(|| WalkerError::MissingTensor(format!("{prefix}v_proj.weight")))?;
+            .ok_or_else(|| InferenceError::MissingTensor(format!("{prefix}v_proj.weight")))?;
         let w_o = self
             .weights
             .tensors
             .get(&format!("{prefix}o_proj.weight"))
-            .ok_or_else(|| WalkerError::MissingTensor(format!("{prefix}o_proj.weight")))?;
+            .ok_or_else(|| InferenceError::MissingTensor(format!("{prefix}o_proj.weight")))?;
 
         let num_kv_heads = w_v.shape()[0] / self.head_dim;
         callbacks.on_layer_start(layer, num_kv_heads);
@@ -213,18 +214,28 @@ impl AttentionWalker {
             sum_sel += selectivity;
             sum_cin += raw.c_in as f64;
             sum_cout += raw.c_out as f64;
-            if confidence > max_conf { max_conf = confidence; }
-            if confidence < min_conf { min_conf = confidence; }
-            if selectivity > max_sel { max_sel = selectivity; }
-            if raw.subject == raw.object { self_loops += 1; }
+            if confidence > max_conf {
+                max_conf = confidence;
+            }
+            if confidence < min_conf {
+                min_conf = confidence;
+            }
+            if selectivity > max_sel {
+                max_sel = selectivity;
+            }
+            if raw.subject == raw.object {
+                self_loops += 1;
+            }
 
             count_threshold(&mut conf_thresholds, confidence);
             count_threshold(&mut sel_thresholds, selectivity);
 
             let se = subj_counts.entry(raw.subject.clone()).or_insert((0, 0.0));
-            se.0 += 1; se.1 += confidence;
+            se.0 += 1;
+            se.1 += confidence;
             let oe = obj_counts.entry(raw.object.clone()).or_insert((0, 0.0));
-            oe.0 += 1; oe.1 += confidence;
+            oe.0 += 1;
+            oe.1 += confidence;
 
             let edge = Edge::new(&raw.subject, &raw.relation, &raw.object)
                 .with_confidence(confidence)
@@ -252,7 +263,11 @@ impl AttentionWalker {
                 mean_selectivity: sum_sel / n as f64,
                 max_selectivity: max_sel,
                 self_loop_count: self_loops,
-                self_loop_pct: if n > 0 { (self_loops as f64 / n as f64) * 100.0 } else { 0.0 },
+                self_loop_pct: if n > 0 {
+                    (self_loops as f64 / n as f64) * 100.0
+                } else {
+                    0.0
+                },
                 top_subjects,
                 top_objects,
                 threshold_counts: conf_thresholds,
@@ -282,4 +297,3 @@ impl AttentionWalker {
         })
     }
 }
-

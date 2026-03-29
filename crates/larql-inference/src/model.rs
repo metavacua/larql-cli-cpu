@@ -1,15 +1,21 @@
-//! Load weight tensors from safetensors files in a model directory.
+//! Load model weights from safetensors files.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use ndarray::Array2;
 
-/// A loaded model's weight tensors and config.
+use larql_models::ModelArchitecture;
+
+use crate::error::InferenceError;
+
+/// A loaded model's weight tensors, configuration, and architecture.
 pub struct ModelWeights {
     pub tensors: HashMap<String, Array2<f32>>,
     pub vectors: HashMap<String, Vec<f32>>,
     pub embed: Array2<f32>,
+    pub arch: Box<dyn ModelArchitecture>,
+    // Cached from arch.config() for convenience — these are hot-path values.
     pub num_layers: usize,
     pub hidden_size: usize,
     pub intermediate_size: usize,
@@ -21,26 +27,30 @@ pub struct ModelWeights {
 }
 
 /// Load all safetensors files from a model directory.
-/// Strips `language_model.model.` prefix from keys (Gemma 3 convention).
-pub fn load_model_dir(path: impl AsRef<Path>) -> Result<ModelWeights, WalkerError> {
+/// Detects architecture from config.json and uses the architecture trait
+/// for key prefix stripping and embed key resolution.
+pub fn load_model_dir(path: impl AsRef<Path>) -> Result<ModelWeights, InferenceError> {
     let path = path.as_ref();
     if !path.is_dir() {
-        return Err(WalkerError::NotADirectory(path.to_path_buf()));
+        return Err(InferenceError::NotADirectory(path.to_path_buf()));
     }
+
+    // Detect architecture from config.json
+    let arch = larql_models::detect_architecture(path)
+        .map_err(|e| InferenceError::Parse(e.to_string()))?;
+
+    let prefixes = arch.key_prefixes_to_strip();
 
     // Find safetensors files
     let mut st_files: Vec<PathBuf> = std::fs::read_dir(path)?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| {
-            p.extension()
-                .is_some_and(|ext| ext == "safetensors")
-        })
+        .filter(|p| p.extension().is_some_and(|ext| ext == "safetensors"))
         .collect();
     st_files.sort();
 
     if st_files.is_empty() {
-        return Err(WalkerError::NoSafetensors(path.to_path_buf()));
+        return Err(InferenceError::NoSafetensors(path.to_path_buf()));
     }
 
     // Load all tensors
@@ -51,17 +61,17 @@ pub fn load_model_dir(path: impl AsRef<Path>) -> Result<ModelWeights, WalkerErro
         let file = std::fs::File::open(st_path)?;
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
         let st = safetensors::SafeTensors::deserialize(&mmap)
-            .map_err(|e| WalkerError::Parse(e.to_string()))?;
+            .map_err(|e| InferenceError::Parse(e.to_string()))?;
 
         for (name, view) in st.tensors() {
-            let key = normalize_key(&name);
+            let key = normalize_key(&name, prefixes);
             let shape = view.shape();
             let data = tensor_to_f32(&view)?;
 
             match shape.len() {
                 2 => {
                     let arr = Array2::from_shape_vec((shape[0], shape[1]), data)
-                        .map_err(|e| WalkerError::Parse(e.to_string()))?;
+                        .map_err(|e| InferenceError::Parse(e.to_string()))?;
                     tensors.insert(key, arr);
                 }
                 1 => {
@@ -72,37 +82,30 @@ pub fn load_model_dir(path: impl AsRef<Path>) -> Result<ModelWeights, WalkerErro
         }
     }
 
-    // Load config
-    let config_path = path.join("config.json");
-    let config = if config_path.exists() {
-        let text = std::fs::read_to_string(&config_path)?;
-        serde_json::from_str::<serde_json::Value>(&text)
-            .map_err(|e| WalkerError::Parse(e.to_string()))?
-    } else {
-        serde_json::json!({})
-    };
-    let text_config = config.get("text_config").unwrap_or(&config);
-
-    let num_layers = text_config["num_hidden_layers"].as_u64().unwrap_or(32) as usize;
-    let hidden_size = text_config["hidden_size"].as_u64().unwrap_or(2048) as usize;
-    let intermediate_size = text_config["intermediate_size"].as_u64().unwrap_or(8192) as usize;
-    let head_dim = text_config["head_dim"].as_u64().unwrap_or(256) as usize;
-    let num_q_heads = text_config["num_attention_heads"].as_u64().unwrap_or(8) as usize;
-    let num_kv_heads = text_config["num_key_value_heads"].as_u64().unwrap_or(4) as usize;
-    let rope_base = text_config["rope_theta"].as_f64().unwrap_or(10000.0);
-
-    // Find embedding matrix
+    // Find embedding matrix using architecture's embed key
+    let embed_key = arch.embed_key();
     let embed = tensors
-        .get("embed_tokens.weight")
-        .ok_or_else(|| WalkerError::MissingTensor("embed_tokens.weight".into()))?
+        .get(embed_key)
+        .ok_or_else(|| InferenceError::MissingTensor(embed_key.into()))?
         .clone();
 
     let vocab_size = embed.shape()[0];
+
+    // Cache config values
+    let cfg = arch.config();
+    let num_layers = cfg.num_layers;
+    let hidden_size = cfg.hidden_size;
+    let intermediate_size = cfg.intermediate_size;
+    let head_dim = cfg.head_dim;
+    let num_q_heads = cfg.num_q_heads;
+    let num_kv_heads = cfg.num_kv_heads;
+    let rope_base = cfg.rope_base;
 
     Ok(ModelWeights {
         tensors,
         vectors,
         embed,
+        arch,
         num_layers,
         hidden_size,
         intermediate_size,
@@ -114,17 +117,51 @@ pub fn load_model_dir(path: impl AsRef<Path>) -> Result<ModelWeights, WalkerErro
     })
 }
 
-/// Strip common prefixes from tensor keys.
-fn normalize_key(key: &str) -> String {
-    let key = key
-        .strip_prefix("language_model.model.")
-        .or_else(|| key.strip_prefix("model."))
-        .unwrap_or(key);
+/// Resolve a HuggingFace model ID or path to a local directory.
+pub fn resolve_model_path(model: &str) -> Result<PathBuf, InferenceError> {
+    let path = PathBuf::from(model);
+    if path.is_dir() {
+        return Ok(path);
+    }
+
+    // Try HuggingFace cache
+    let cache_name = format!("models--{}", model.replace('/', "--"));
+    let hf_cache = dirs_or_home().join(format!(".cache/huggingface/hub/{cache_name}/snapshots"));
+
+    if hf_cache.is_dir() {
+        if let Some(snapshot) = std::fs::read_dir(&hf_cache)
+            .ok()
+            .and_then(|mut d| d.next())
+            .and_then(|e| e.ok())
+        {
+            let snapshot_path = snapshot.path();
+            if snapshot_path.is_dir() {
+                return Ok(snapshot_path);
+            }
+        }
+    }
+
+    Err(InferenceError::NotADirectory(path))
+}
+
+fn dirs_or_home() -> PathBuf {
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// Strip known prefixes from tensor keys using the architecture's prefix list.
+fn normalize_key(key: &str, prefixes: &[&str]) -> String {
+    for prefix in prefixes {
+        if let Some(stripped) = key.strip_prefix(prefix) {
+            return stripped.to_string();
+        }
+    }
     key.to_string()
 }
 
 /// Convert a safetensors tensor view to Vec<f32>.
-fn tensor_to_f32(view: &safetensors::tensor::TensorView<'_>) -> Result<Vec<f32>, WalkerError> {
+fn tensor_to_f32(view: &safetensors::tensor::TensorView<'_>) -> Result<Vec<f32>, InferenceError> {
     match view.dtype() {
         safetensors::Dtype::F32 => {
             let bytes = view.data();
@@ -153,7 +190,7 @@ fn tensor_to_f32(view: &safetensors::tensor::TensorView<'_>) -> Result<Vec<f32>,
                 })
                 .collect())
         }
-        other => Err(WalkerError::UnsupportedDtype(format!("{other:?}"))),
+        other => Err(InferenceError::UnsupportedDtype(format!("{other:?}"))),
     }
 }
 
@@ -166,7 +203,6 @@ fn half_to_f32(bits: u16) -> f32 {
         if mant == 0 {
             return f32::from_bits(sign);
         }
-        // Denormalized
         let mut e = 1u32;
         let mut m = mant;
         while (m & 0x400) == 0 {
@@ -190,20 +226,4 @@ fn half_to_f32(bits: u16) -> f32 {
 
 fn bf16_to_f32(bits: u16) -> f32 {
     f32::from_bits((bits as u32) << 16)
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum WalkerError {
-    #[error("not a directory: {0}")]
-    NotADirectory(PathBuf),
-    #[error("no safetensors files in {0}")]
-    NoSafetensors(PathBuf),
-    #[error("missing tensor: {0}")]
-    MissingTensor(String),
-    #[error("parse error: {0}")]
-    Parse(String),
-    #[error("unsupported dtype: {0}")]
-    UnsupportedDtype(String),
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
 }

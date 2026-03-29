@@ -4,7 +4,6 @@
 //! intermediate_size=4, vocab_size=16, head_dim=4, 2 attention heads.
 //! Tests the full pipeline: load → walk → edges.
 
-#[cfg(feature = "walker")]
 mod walker_tests {
     use std::collections::HashMap;
     use std::path::Path;
@@ -31,10 +30,7 @@ mod walker_tests {
         );
 
         // Final norm
-        tensors.insert(
-            "norm.weight".into(),
-            (vec![0.0f32; hidden], vec![hidden]),
-        );
+        tensors.insert("norm.weight".into(), (vec![0.0f32; hidden], vec![hidden]));
 
         for layer in 0..num_layers {
             let p = format!("layers.{layer}");
@@ -46,10 +42,7 @@ mod walker_tests {
                 "pre_feedforward_layernorm.weight",
                 "post_feedforward_layernorm.weight",
             ] {
-                tensors.insert(
-                    format!("{p}.{norm}"),
-                    (vec![0.0f32; hidden], vec![hidden]),
-                );
+                tensors.insert(format!("{p}.{norm}"), (vec![0.0f32; hidden], vec![hidden]));
             }
 
             // Q/K norms (head_dim)
@@ -121,7 +114,9 @@ mod walker_tests {
 
         // Write config.json
         let config = serde_json::json!({
+            "model_type": "gemma3",
             "text_config": {
+                "model_type": "gemma3_text",
                 "num_hidden_layers": num_layers,
                 "hidden_size": hidden,
                 "intermediate_size": intermediate,
@@ -146,7 +141,9 @@ mod walker_tests {
         let mut vals = Vec::with_capacity(n);
         let mut x = seed as u64 * 2654435761 + 1;
         for _ in 0..n {
-            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let f = ((x >> 33) as f32) / (u32::MAX as f32) * 2.0 - 1.0;
             vals.push(f * 0.1); // small values
         }
@@ -168,12 +165,8 @@ mod walker_tests {
             let bytes = &byte_bufs[name];
             data_map.insert(
                 name.clone(),
-                safetensors::tensor::TensorView::new(
-                    safetensors::Dtype::F32,
-                    shape.clone(),
-                    bytes,
-                )
-                .unwrap(),
+                safetensors::tensor::TensorView::new(safetensors::Dtype::F32, shape.clone(), bytes)
+                    .unwrap(),
             );
         }
 
@@ -183,8 +176,8 @@ mod walker_tests {
 
     fn write_mock_tokenizer(dir: &Path, vocab_size: usize) {
         let tokens = [
-            "the", "a", "is", "of", "France", "Paris", "Germany", "Berlin",
-            "capital", "Europe", "language", "French", "city", "country", "and", "in",
+            "the", "a", "is", "of", "France", "Paris", "Germany", "Berlin", "capital", "Europe",
+            "language", "French", "city", "country", "and", "in",
         ];
 
         let mut vocab = serde_json::Map::new();
@@ -221,7 +214,8 @@ mod walker_tests {
         create_mock_model(&dir);
 
         let walker =
-            larql_core::walker::weight_walker::WeightWalker::load(dir.to_str().unwrap()).unwrap();
+            larql_inference::walker::weight_walker::WeightWalker::load(dir.to_str().unwrap())
+                .unwrap();
         assert_eq!(walker.num_layers(), 2);
 
         std::fs::remove_dir_all(&dir).ok();
@@ -234,15 +228,18 @@ mod walker_tests {
         create_mock_model(&dir);
 
         let walker =
-            larql_core::walker::weight_walker::WeightWalker::load(dir.to_str().unwrap()).unwrap();
-        let config = larql_core::walker::weight_walker::WalkConfig {
+            larql_inference::walker::weight_walker::WeightWalker::load(dir.to_str().unwrap())
+                .unwrap();
+        let config = larql_inference::walker::weight_walker::WalkConfig {
             top_k: 3,
             min_score: 0.0,
         };
         let mut graph = larql_core::Graph::new();
-        let mut callbacks = larql_core::walker::weight_walker::SilentWalkCallbacks;
+        let mut callbacks = larql_inference::walker::weight_walker::SilentWalkCallbacks;
 
-        let result = walker.walk_layer(0, &config, &mut graph, &mut callbacks).unwrap();
+        let result = walker
+            .walk_layer(0, &config, &mut graph, &mut callbacks)
+            .unwrap();
 
         assert_eq!(result.layer, 0);
         assert_eq!(result.features_scanned, 4); // intermediate_size
@@ -275,14 +272,14 @@ mod walker_tests {
         let _ = std::fs::remove_dir_all(&dir);
         create_mock_model(&dir);
 
-        let config = larql_core::walker::weight_walker::WalkConfig {
+        let config = larql_inference::walker::weight_walker::WalkConfig {
             top_k: 2,
             min_score: 0.0,
         };
         let mut graph = larql_core::Graph::new();
-        let mut callbacks = larql_core::walker::weight_walker::SilentWalkCallbacks;
+        let mut callbacks = larql_inference::walker::weight_walker::SilentWalkCallbacks;
 
-        let results = larql_core::walk_model(
+        let results = larql_inference::walk_model(
             dir.to_str().unwrap(),
             None,
             &config,
@@ -330,15 +327,18 @@ mod walker_tests {
         create_mock_model(&dir);
 
         let walker =
-            larql_core::walker::weight_walker::WeightWalker::load(dir.to_str().unwrap()).unwrap();
-        let config = larql_core::walker::weight_walker::WalkConfig {
+            larql_inference::walker::weight_walker::WeightWalker::load(dir.to_str().unwrap())
+                .unwrap();
+        let config = larql_inference::walker::weight_walker::WalkConfig {
             top_k: 3,
             min_score: 0.0,
         };
         let mut graph = larql_core::Graph::new();
-        let mut callbacks = larql_core::walker::weight_walker::SilentWalkCallbacks;
+        let mut callbacks = larql_inference::walker::weight_walker::SilentWalkCallbacks;
 
-        let result = walker.walk_layer(0, &config, &mut graph, &mut callbacks).unwrap();
+        let result = walker
+            .walk_layer(0, &config, &mut graph, &mut callbacks)
+            .unwrap();
 
         let stats = &result.stats;
         assert!(stats.mean_confidence >= 0.0);
@@ -359,7 +359,7 @@ mod walker_tests {
         create_mock_model(&dir);
 
         let walker =
-            larql_core::walker::attention_walker::AttentionWalker::load(dir.to_str().unwrap())
+            larql_inference::walker::attention_walker::AttentionWalker::load(dir.to_str().unwrap())
                 .unwrap();
         assert_eq!(walker.num_layers(), 2);
 
@@ -373,16 +373,18 @@ mod walker_tests {
         create_mock_model(&dir);
 
         let walker =
-            larql_core::walker::attention_walker::AttentionWalker::load(dir.to_str().unwrap())
+            larql_inference::walker::attention_walker::AttentionWalker::load(dir.to_str().unwrap())
                 .unwrap();
-        let config = larql_core::walker::weight_walker::WalkConfig {
+        let config = larql_inference::walker::weight_walker::WalkConfig {
             top_k: 2,
             min_score: 0.0,
         };
         let mut graph = larql_core::Graph::new();
-        let mut callbacks = larql_core::walker::weight_walker::SilentWalkCallbacks;
+        let mut callbacks = larql_inference::walker::weight_walker::SilentWalkCallbacks;
 
-        let result = walker.walk_layer(0, &config, &mut graph, &mut callbacks).unwrap();
+        let result = walker
+            .walk_layer(0, &config, &mut graph, &mut callbacks)
+            .unwrap();
 
         assert_eq!(result.layer, 0);
         assert_eq!(result.heads_walked, 2); // num_kv_heads
@@ -408,7 +410,7 @@ mod walker_tests {
         create_mock_model(&dir);
 
         let extractor =
-            larql_core::walker::vector_extractor::VectorExtractor::load(dir.to_str().unwrap())
+            larql_inference::walker::vector_extractor::VectorExtractor::load(dir.to_str().unwrap())
                 .unwrap();
         assert_eq!(extractor.num_layers(), 2);
         assert_eq!(extractor.hidden_size(), 8);
@@ -416,12 +418,12 @@ mod walker_tests {
         let output_dir = dir.join("output");
         std::fs::create_dir_all(&output_dir).unwrap();
 
-        let config = larql_core::walker::vector_extractor::ExtractConfig {
+        let config = larql_inference::walker::vector_extractor::ExtractConfig {
             components: vec!["ffn_down".to_string()],
             layers: Some(vec![0]),
             top_k: 3,
         };
-        let mut callbacks = larql_core::walker::vector_extractor::SilentExtractCallbacks;
+        let mut callbacks = larql_inference::walker::vector_extractor::SilentExtractCallbacks;
 
         let summary = extractor
             .extract_all(&config, &output_dir, false, &mut callbacks)
@@ -445,18 +447,18 @@ mod walker_tests {
         create_mock_model(&dir);
 
         let extractor =
-            larql_core::walker::vector_extractor::VectorExtractor::load(dir.to_str().unwrap())
+            larql_inference::walker::vector_extractor::VectorExtractor::load(dir.to_str().unwrap())
                 .unwrap();
 
         let output_dir = dir.join("output");
         std::fs::create_dir_all(&output_dir).unwrap();
 
-        let config = larql_core::walker::vector_extractor::ExtractConfig {
+        let config = larql_inference::walker::vector_extractor::ExtractConfig {
             components: vec!["embeddings".to_string()],
             layers: None,
             top_k: 3,
         };
-        let mut callbacks = larql_core::walker::vector_extractor::SilentExtractCallbacks;
+        let mut callbacks = larql_inference::walker::vector_extractor::SilentExtractCallbacks;
 
         let summary = extractor
             .extract_all(&config, &output_dir, false, &mut callbacks)
@@ -475,7 +477,7 @@ mod walker_tests {
         let _ = std::fs::remove_dir_all(&dir);
         create_mock_model(&dir);
 
-        let weights = larql_core::walker::safetensors_loader::load_model_dir(&dir).unwrap();
+        let weights = larql_inference::model::load_model_dir(&dir).unwrap();
 
         assert_eq!(weights.num_layers, 2);
         assert_eq!(weights.hidden_size, 8);
@@ -487,8 +489,12 @@ mod walker_tests {
         assert_eq!(weights.embed.shape(), &[16, 8]);
 
         // Check 2D tensors exist
-        assert!(weights.tensors.contains_key("layers.0.mlp.gate_proj.weight"));
-        assert!(weights.tensors.contains_key("layers.1.mlp.down_proj.weight"));
+        assert!(weights
+            .tensors
+            .contains_key("layers.0.mlp.gate_proj.weight"));
+        assert!(weights
+            .tensors
+            .contains_key("layers.1.mlp.down_proj.weight"));
         assert!(weights
             .tensors
             .contains_key("layers.0.self_attn.q_proj.weight"));
@@ -504,8 +510,7 @@ mod walker_tests {
 
     #[test]
     fn test_loader_missing_directory() {
-        let result =
-            larql_core::walker::safetensors_loader::load_model_dir("/nonexistent/path/model");
+        let result = larql_inference::model::load_model_dir("/nonexistent/path/model");
         assert!(result.is_err());
     }
 
@@ -517,12 +522,12 @@ mod walker_tests {
         let _ = std::fs::remove_dir_all(&dir);
         create_mock_model(&dir);
 
-        let weights = larql_core::walker::safetensors_loader::load_model_dir(&dir).unwrap();
+        let weights = larql_inference::model::load_model_dir(&dir).unwrap();
 
         // Token IDs within vocab range
         let token_ids = vec![4u32, 5, 0]; // "France", "Paris", "the"
 
-        let residuals = larql_core::walker::forward::capture_residuals(&weights, &token_ids, &[0, 1]);
+        let residuals = larql_inference::forward::capture_residuals(&weights, &token_ids, &[0, 1]);
 
         assert_eq!(residuals.len(), 2); // captured at layer 0 and 1
         assert_eq!(residuals[0].0, 0); // layer 0
@@ -542,8 +547,8 @@ mod walker_tests {
         let _ = std::fs::remove_dir_all(&dir);
         create_mock_model(&dir);
 
-        let weights = larql_core::walker::safetensors_loader::load_model_dir(&dir).unwrap();
-        let residuals = larql_core::walker::forward::capture_residuals(&weights, &[0], &[1]);
+        let weights = larql_inference::model::load_model_dir(&dir).unwrap();
+        let residuals = larql_inference::forward::capture_residuals(&weights, &[0], &[1]);
 
         assert_eq!(residuals.len(), 1);
         assert_eq!(residuals[0].1.len(), 8);

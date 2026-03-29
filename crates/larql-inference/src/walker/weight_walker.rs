@@ -7,14 +7,13 @@
 //!
 //! Zero forward passes. Pure matrix multiplication.
 
-use std::path::{Path, PathBuf};
+use larql_core::core::edge::Edge;
+use larql_core::core::enums::SourceType;
+use larql_core::core::graph::Graph;
 
-use crate::core::edge::Edge;
-use crate::core::enums::SourceType;
-use crate::core::graph::Graph;
-
-use super::safetensors_loader::{load_model_dir, ModelWeights, WalkerError};
 use super::utils::{count_threshold, decode_token, partial_top_k_column, top_entities};
+use crate::error::InferenceError;
+use crate::model::{load_model_dir, resolve_model_path, ModelWeights};
 
 /// Result of walking a single layer.
 #[derive(Debug, Clone)]
@@ -84,40 +83,7 @@ pub trait WalkCallbacks {
 pub struct SilentWalkCallbacks;
 impl WalkCallbacks for SilentWalkCallbacks {}
 
-/// Resolve a model string to a local directory path.
-pub fn resolve_model_path(model: &str) -> Result<PathBuf, WalkerError> {
-    let as_path = Path::new(model);
-    if as_path.is_dir() {
-        return Ok(as_path.to_path_buf());
-    }
-
-    if model.contains('/') {
-        let cache_name = format!("models--{}", model.replace('/', "--"));
-        let hf_hub = hf_cache_dir().join(&cache_name).join("snapshots");
-        if hf_hub.is_dir() {
-            if let Some(snap) = std::fs::read_dir(&hf_hub)
-                .ok()
-                .and_then(|rd| {
-                    rd.filter_map(|e| e.ok())
-                        .map(|e| e.path())
-                        .find(|p| p.is_dir())
-                })
-            {
-                return Ok(snap);
-            }
-        }
-    }
-
-    Err(WalkerError::NotADirectory(PathBuf::from(model)))
-}
-
-fn hf_cache_dir() -> PathBuf {
-    if let Ok(hf_home) = std::env::var("HF_HOME") {
-        return PathBuf::from(hf_home).join("hub");
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".cache/huggingface/hub")
-}
+// resolve_model_path is re-exported from crate::model via the import above.
 
 /// A loaded model ready for weight walking.
 pub struct WeightWalker {
@@ -137,18 +103,18 @@ struct RawEdge {
 }
 
 impl WeightWalker {
-    pub fn load(model: &str) -> Result<Self, WalkerError> {
+    pub fn load(model: &str) -> Result<Self, InferenceError> {
         let model_path = resolve_model_path(model)?;
         let weights = load_model_dir(&model_path)?;
 
         let tokenizer_path = model_path.join("tokenizer.json");
         if !tokenizer_path.exists() {
-            return Err(WalkerError::MissingTensor(
+            return Err(InferenceError::MissingTensor(
                 "tokenizer.json not found".into(),
             ));
         }
         let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path)
-            .map_err(|e| WalkerError::Parse(e.to_string()))?;
+            .map_err(|e| InferenceError::Parse(e.to_string()))?;
 
         Ok(Self { weights, tokenizer })
     }
@@ -169,7 +135,7 @@ impl WeightWalker {
         config: &WalkConfig,
         graph: &mut Graph,
         callbacks: &mut dyn WalkCallbacks,
-    ) -> Result<LayerResult, WalkerError> {
+    ) -> Result<LayerResult, InferenceError> {
         let start = std::time::Instant::now();
 
         let prefix = format!("layers.{layer}.mlp.");
@@ -177,12 +143,12 @@ impl WeightWalker {
             .weights
             .tensors
             .get(&format!("{prefix}gate_proj.weight"))
-            .ok_or_else(|| WalkerError::MissingTensor(format!("{prefix}gate_proj.weight")))?;
+            .ok_or_else(|| InferenceError::MissingTensor(format!("{prefix}gate_proj.weight")))?;
         let w_down = self
             .weights
             .tensors
             .get(&format!("{prefix}down_proj.weight"))
-            .ok_or_else(|| WalkerError::MissingTensor(format!("{prefix}down_proj.weight")))?;
+            .ok_or_else(|| InferenceError::MissingTensor(format!("{prefix}down_proj.weight")))?;
 
         let n_features = w_down.shape()[1];
         callbacks.on_layer_start(layer, n_features);
@@ -306,15 +272,11 @@ impl WeightWalker {
             count_threshold(&mut sel_thresholds, selectivity);
 
             // Track entity frequencies
-            let se = subj_counts
-                .entry(raw.subject.clone())
-                .or_insert((0, 0.0));
+            let se = subj_counts.entry(raw.subject.clone()).or_insert((0, 0.0));
             se.0 += 1;
             se.1 += confidence;
 
-            let oe = obj_counts
-                .entry(raw.object.clone())
-                .or_insert((0, 0.0));
+            let oe = obj_counts.entry(raw.object.clone()).or_insert((0, 0.0));
             oe.0 += 1;
             oe.1 += confidence;
 
@@ -323,18 +285,9 @@ impl WeightWalker {
                 .with_source(SourceType::Parametric)
                 .with_metadata("layer", serde_json::Value::from(raw.layer as u64))
                 .with_metadata("feature", serde_json::Value::from(raw.feature as u64))
-                .with_metadata(
-                    "c_in",
-                    serde_json::Value::from(raw.c_in as f64),
-                )
-                .with_metadata(
-                    "c_out",
-                    serde_json::Value::from(raw.c_out as f64),
-                )
-                .with_metadata(
-                    "selectivity",
-                    serde_json::Value::from(selectivity),
-                );
+                .with_metadata("c_in", serde_json::Value::from(raw.c_in as f64))
+                .with_metadata("c_out", serde_json::Value::from(raw.c_out as f64))
+                .with_metadata("selectivity", serde_json::Value::from(selectivity));
             graph.add_edge(edge);
         }
 
@@ -389,7 +342,7 @@ pub fn walk_model(
     config: &WalkConfig,
     graph: &mut Graph,
     callbacks: &mut dyn WalkCallbacks,
-) -> Result<Vec<LayerResult>, WalkerError> {
+) -> Result<Vec<LayerResult>, InferenceError> {
     let walker = WeightWalker::load(model)?;
 
     let layer_indices: Vec<usize> = match layers {
@@ -405,4 +358,3 @@ pub fn walk_model(
 
     Ok(results)
 }
-

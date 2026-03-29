@@ -1,18 +1,10 @@
 //! Shared utilities for walker modules.
-//!
-//! Eliminates duplication of decode_token, round4, top_entities,
-//! count_threshold, current_date, and top-k helpers across
-//! weight_walker, attention_walker, vector_extractor, and residuals.
 
 use super::weight_walker::ThresholdCounts;
 
 /// Decode a single token ID to a trimmed string.
 pub fn decode_token(tokenizer: &tokenizers::Tokenizer, id: u32) -> Option<String> {
-    tokenizer
-        .decode(&[id], true)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    crate::tokenizer::decode_token(tokenizer, id)
 }
 
 /// Round to 4 decimal places.
@@ -76,7 +68,6 @@ pub fn current_date() -> String {
 // ── Top-K utilities ──
 
 /// Top-k (index, value) from a flat slice using partial sort.
-/// O(n) average via select_nth_unstable.
 pub fn partial_top_k(data: &[f32], k: usize) -> Vec<(usize, f32)> {
     let mut indexed: Vec<(usize, f32)> = data.iter().copied().enumerate().collect();
     let k = k.min(indexed.len());
@@ -93,8 +84,7 @@ pub fn partial_top_k(data: &[f32], k: usize) -> Vec<(usize, f32)> {
     indexed
 }
 
-/// Top-k from a matrix column. Copies the column first since ndarray
-/// column views aren't contiguous.
+/// Top-k from a matrix column.
 pub fn partial_top_k_column(
     matrix: &ndarray::Array2<f32>,
     col: usize,

@@ -14,58 +14,16 @@ use std::collections::HashSet;
 use std::io::{BufRead, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use super::safetensors_loader::{load_model_dir, ModelWeights, WalkerError};
-use super::utils::{decode_token, current_date, partial_top_k_column, partial_top_k};
-use super::weight_walker::resolve_model_path;
+use super::utils::{current_date, decode_token, partial_top_k, partial_top_k_column};
+use crate::error::InferenceError;
+use crate::model::{load_model_dir, resolve_model_path, ModelWeights};
 
-// Component name constants — strings, not enums.
-pub const COMPONENT_FFN_DOWN: &str = "ffn_down";
-pub const COMPONENT_FFN_GATE: &str = "ffn_gate";
-pub const COMPONENT_FFN_UP: &str = "ffn_up";
-pub const COMPONENT_ATTN_OV: &str = "attn_ov";
-pub const COMPONENT_ATTN_QK: &str = "attn_qk";
-pub const COMPONENT_EMBEDDINGS: &str = "embeddings";
-
-pub const ALL_COMPONENTS: &[&str] = &[
-    COMPONENT_FFN_DOWN,
-    COMPONENT_FFN_GATE,
+// Re-export shared vector types from larql-models.
+pub use larql_models::{
+    TopKEntry, VectorFileHeader, VectorRecord, ALL_COMPONENTS, COMPONENT_ATTN_OV,
+    COMPONENT_ATTN_QK, COMPONENT_EMBEDDINGS, COMPONENT_FFN_DOWN, COMPONENT_FFN_GATE,
     COMPONENT_FFN_UP,
-    COMPONENT_ATTN_OV,
-    COMPONENT_ATTN_QK,
-    COMPONENT_EMBEDDINGS,
-];
-
-/// A single extracted vector with metadata.
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct VectorRecord {
-    pub id: String,
-    pub layer: usize,
-    pub feature: usize,
-    pub vector: Vec<f32>,
-    pub dim: usize,
-    pub top_token: String,
-    pub top_token_id: u32,
-    pub c_score: f32,
-    pub top_k: Vec<TopKEntry>,
-}
-
-/// A top-k token entry with logit score.
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct TopKEntry {
-    pub token: String,
-    pub token_id: u32,
-    pub logit: f32,
-}
-
-/// Header line written as first line of each NDJSON file.
-#[derive(serde::Serialize, serde::Deserialize)]
-pub struct VectorFileHeader {
-    pub _header: bool,
-    pub component: String,
-    pub model: String,
-    pub dimension: usize,
-    pub extraction_date: String,
-}
+};
 
 /// Configuration for vector extraction.
 pub struct ExtractConfig {
@@ -126,7 +84,7 @@ pub struct VectorWriter {
 
 impl VectorWriter {
     /// Create a new writer, truncating any existing file.
-    pub fn create(path: &Path) -> Result<Self, WalkerError> {
+    pub fn create(path: &Path) -> Result<Self, InferenceError> {
         let file = std::fs::File::create(path)?;
         Ok(Self {
             writer: BufWriter::new(file),
@@ -135,7 +93,7 @@ impl VectorWriter {
     }
 
     /// Open an existing file for appending and count existing records.
-    pub fn append(path: &Path) -> Result<(Self, usize), WalkerError> {
+    pub fn append(path: &Path) -> Result<(Self, usize), InferenceError> {
         // Count existing lines (excluding header)
         let existing = if path.exists() {
             let file = std::fs::File::open(path)?;
@@ -164,23 +122,23 @@ impl VectorWriter {
     }
 
     /// Write the metadata header as the first line.
-    pub fn write_header(&mut self, header: &VectorFileHeader) -> Result<(), WalkerError> {
+    pub fn write_header(&mut self, header: &VectorFileHeader) -> Result<(), InferenceError> {
         serde_json::to_writer(&mut self.writer, header)
-            .map_err(|e| WalkerError::Parse(e.to_string()))?;
+            .map_err(|e| InferenceError::Parse(e.to_string()))?;
         self.writer.write_all(b"\n")?;
         Ok(())
     }
 
     /// Write a single vector record as one NDJSON line.
-    pub fn write_record(&mut self, record: &VectorRecord) -> Result<(), WalkerError> {
+    pub fn write_record(&mut self, record: &VectorRecord) -> Result<(), InferenceError> {
         serde_json::to_writer(&mut self.writer, record)
-            .map_err(|e| WalkerError::Parse(e.to_string()))?;
+            .map_err(|e| InferenceError::Parse(e.to_string()))?;
         self.writer.write_all(b"\n")?;
         self.count += 1;
         Ok(())
     }
 
-    pub fn flush(&mut self) -> Result<(), WalkerError> {
+    pub fn flush(&mut self) -> Result<(), InferenceError> {
         self.writer.flush()?;
         Ok(())
     }
@@ -191,7 +149,7 @@ impl VectorWriter {
 }
 
 /// Scan an existing NDJSON file for completed layer numbers.
-pub fn scan_completed_layers(path: &Path) -> Result<HashSet<usize>, WalkerError> {
+pub fn scan_completed_layers(path: &Path) -> Result<HashSet<usize>, InferenceError> {
     let mut layers = HashSet::new();
     if !path.exists() {
         return Ok(layers);
@@ -223,18 +181,18 @@ pub struct VectorExtractor {
 }
 
 impl VectorExtractor {
-    pub fn load(model: &str) -> Result<Self, WalkerError> {
+    pub fn load(model: &str) -> Result<Self, InferenceError> {
         let model_path = resolve_model_path(model)?;
         let weights = load_model_dir(&model_path)?;
 
         let tokenizer_path = model_path.join("tokenizer.json");
         if !tokenizer_path.exists() {
-            return Err(WalkerError::MissingTensor(
+            return Err(InferenceError::MissingTensor(
                 "tokenizer.json not found".into(),
             ));
         }
         let tokenizer = tokenizers::Tokenizer::from_file(&tokenizer_path)
-            .map_err(|e| WalkerError::Parse(e.to_string()))?;
+            .map_err(|e| InferenceError::Parse(e.to_string()))?;
 
         Ok(Self {
             weights,
@@ -266,13 +224,13 @@ impl VectorExtractor {
         config: &ExtractConfig,
         writer: &mut VectorWriter,
         callbacks: &mut dyn ExtractCallbacks,
-    ) -> Result<usize, WalkerError> {
+    ) -> Result<usize, InferenceError> {
         let prefix = format!("layers.{layer}.mlp.");
         let w_down = self
             .weights
             .tensors
             .get(&format!("{prefix}down_proj.weight"))
-            .ok_or_else(|| WalkerError::MissingTensor(format!("{prefix}down_proj.weight")))?;
+            .ok_or_else(|| InferenceError::MissingTensor(format!("{prefix}down_proj.weight")))?;
 
         // w_down shape: (hidden, intermediate)
         let n_features = w_down.shape()[1];
@@ -340,13 +298,13 @@ impl VectorExtractor {
         config: &ExtractConfig,
         writer: &mut VectorWriter,
         callbacks: &mut dyn ExtractCallbacks,
-    ) -> Result<usize, WalkerError> {
+    ) -> Result<usize, InferenceError> {
         let prefix = format!("layers.{layer}.mlp.");
         let w_gate = self
             .weights
             .tensors
             .get(&format!("{prefix}gate_proj.weight"))
-            .ok_or_else(|| WalkerError::MissingTensor(format!("{prefix}gate_proj.weight")))?;
+            .ok_or_else(|| InferenceError::MissingTensor(format!("{prefix}gate_proj.weight")))?;
 
         // w_gate shape: (intermediate, hidden)
         let n_features = w_gate.shape()[0];
@@ -411,13 +369,13 @@ impl VectorExtractor {
         config: &ExtractConfig,
         writer: &mut VectorWriter,
         callbacks: &mut dyn ExtractCallbacks,
-    ) -> Result<usize, WalkerError> {
+    ) -> Result<usize, InferenceError> {
         let prefix = format!("layers.{layer}.mlp.");
         let w_up = self
             .weights
             .tensors
             .get(&format!("{prefix}up_proj.weight"))
-            .ok_or_else(|| WalkerError::MissingTensor(format!("{prefix}up_proj.weight")))?;
+            .ok_or_else(|| InferenceError::MissingTensor(format!("{prefix}up_proj.weight")))?;
 
         let n_features = w_up.shape()[0];
         callbacks.on_layer_start(COMPONENT_FFN_UP, layer, n_features);
@@ -480,18 +438,18 @@ impl VectorExtractor {
         config: &ExtractConfig,
         writer: &mut VectorWriter,
         callbacks: &mut dyn ExtractCallbacks,
-    ) -> Result<usize, WalkerError> {
+    ) -> Result<usize, InferenceError> {
         let prefix = format!("layers.{layer}.self_attn.");
         let w_v = self
             .weights
             .tensors
             .get(&format!("{prefix}v_proj.weight"))
-            .ok_or_else(|| WalkerError::MissingTensor(format!("{prefix}v_proj.weight")))?;
+            .ok_or_else(|| InferenceError::MissingTensor(format!("{prefix}v_proj.weight")))?;
         let w_o = self
             .weights
             .tensors
             .get(&format!("{prefix}o_proj.weight"))
-            .ok_or_else(|| WalkerError::MissingTensor(format!("{prefix}o_proj.weight")))?;
+            .ok_or_else(|| InferenceError::MissingTensor(format!("{prefix}o_proj.weight")))?;
 
         let head_dim = self.weights.head_dim;
         let hidden = self.weights.hidden_size;
@@ -575,18 +533,18 @@ impl VectorExtractor {
         _config: &ExtractConfig,
         writer: &mut VectorWriter,
         callbacks: &mut dyn ExtractCallbacks,
-    ) -> Result<usize, WalkerError> {
+    ) -> Result<usize, InferenceError> {
         let prefix = format!("layers.{layer}.self_attn.");
         let w_q = self
             .weights
             .tensors
             .get(&format!("{prefix}q_proj.weight"))
-            .ok_or_else(|| WalkerError::MissingTensor(format!("{prefix}q_proj.weight")))?;
+            .ok_or_else(|| InferenceError::MissingTensor(format!("{prefix}q_proj.weight")))?;
         let w_k = self
             .weights
             .tensors
             .get(&format!("{prefix}k_proj.weight"))
-            .ok_or_else(|| WalkerError::MissingTensor(format!("{prefix}k_proj.weight")))?;
+            .ok_or_else(|| InferenceError::MissingTensor(format!("{prefix}k_proj.weight")))?;
 
         let head_dim = self.weights.head_dim;
         let hidden = self.weights.hidden_size;
@@ -661,7 +619,7 @@ impl VectorExtractor {
         _config: &ExtractConfig,
         writer: &mut VectorWriter,
         callbacks: &mut dyn ExtractCallbacks,
-    ) -> Result<usize, WalkerError> {
+    ) -> Result<usize, InferenceError> {
         let vocab_size = self.weights.vocab_size;
         callbacks.on_layer_start(COMPONENT_EMBEDDINGS, 0, vocab_size);
 
@@ -676,8 +634,7 @@ impl VectorExtractor {
             let vector: Vec<f32> = self.weights.embed.row(tok_id).to_vec();
             let norm: f32 = vector.iter().map(|x| x * x).sum::<f32>().sqrt();
 
-            let token = decode_token(&self.tokenizer, tok_id as u32)
-                .unwrap_or_default();
+            let token = decode_token(&self.tokenizer, tok_id as u32).unwrap_or_default();
 
             writer.write_record(&VectorRecord {
                 id: format!("T{tok_id}"),
@@ -707,7 +664,7 @@ impl VectorExtractor {
         output_dir: &Path,
         resume: bool,
         callbacks: &mut dyn ExtractCallbacks,
-    ) -> Result<ExtractSummary, WalkerError> {
+    ) -> Result<ExtractSummary, InferenceError> {
         std::fs::create_dir_all(output_dir)?;
         let overall_start = std::time::Instant::now();
         let mut summaries = Vec::new();
@@ -843,4 +800,3 @@ impl VectorExtractor {
         })
     }
 }
-
