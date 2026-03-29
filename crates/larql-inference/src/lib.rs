@@ -21,7 +21,11 @@ pub use capture::{
     CaptureCallbacks, CaptureConfig, InferenceModel, TopKEntry, VectorFileHeader, VectorRecord,
 };
 pub use error::InferenceError;
-pub use forward::{capture_residuals, predict, trace_forward, PredictResult, TraceResult};
+pub use ffn::{FfnBackend, LayerFfnRouter, SparseFfn, WeightFfn};
+pub use forward::{
+    capture_residuals, predict, predict_with_ffn, predict_with_router, trace_forward,
+    trace_forward_with_ffn, PredictResult, TraceResult,
+};
 pub use model::{load_model_dir, resolve_model_path, ModelWeights};
 pub use tokenizer::{decode_token, load_tokenizer};
 

@@ -1,12 +1,13 @@
 //! Full transformer forward pass.
 //!
 //! Runs tokens through embedding → layers → final norm → logits.
-//! Uses the ModelArchitecture trait for all model-specific behavior.
+//! Uses the ModelArchitecture trait for model-specific behavior
+//! and FfnBackend trait for swappable FFN computation.
 
 use ndarray::Array2;
 
 use crate::attention::{apply_rope, gqa_attention};
-use crate::ffn::{ffn_forward, ffn_forward_with_activation};
+use crate::ffn::{FfnBackend, LayerFfnRouter, WeightFfn};
 use crate::model::ModelWeights;
 use crate::residual::{rms_norm, rms_norm_heads};
 
@@ -41,13 +42,8 @@ fn embed_tokens(weights: &ModelWeights, token_ids: &[u32]) -> Array2<f32> {
     h
 }
 
-/// Run a single transformer layer, returning the updated hidden state.
-fn run_layer(
-    weights: &ModelWeights,
-    h: &Array2<f32>,
-    layer: usize,
-    capture_activation: bool,
-) -> Option<(Array2<f32>, Option<Array2<f32>>)> {
+/// Run attention for a single layer. Returns the post-attention residual.
+fn run_attention(weights: &ModelWeights, h: &Array2<f32>, layer: usize) -> Option<Array2<f32>> {
     let head_dim = weights.head_dim;
     let num_q = weights.num_q_heads;
     let num_kv = weights.num_kv_heads;
@@ -57,7 +53,6 @@ fn run_layer(
     let norm_offset = weights.arch.norm_weight_offset();
     let arch = &*weights.arch;
 
-    // ── Attention ──
     let h_norm = rms_norm(
         h,
         weights.vectors.get(&arch.input_layernorm_key(layer)),
@@ -73,7 +68,6 @@ fn run_layer(
     let k_full = h_norm.dot(&w_k.t());
     let v_full = h_norm.dot(&w_v.t());
 
-    // QK norm (Gemma 3) — architecture tells us whether it exists.
     let q_normed = match arch
         .attn_q_norm_key(layer)
         .and_then(|k| weights.vectors.get(&k))
@@ -97,7 +91,6 @@ fn run_layer(
     );
     let attn_projected = attn_out.dot(&w_o.t());
 
-    // Post-attention: architecture decides whether there's a post-attention norm.
     let h_post_attn = if arch.has_post_norms() {
         let normed = rms_norm(
             &attn_projected,
@@ -111,31 +104,38 @@ fn run_layer(
         h + &attn_projected
     };
 
-    // ── FFN ──
-    // Pre-FFN norm: Gemma has pre_feedforward_layernorm, Llama uses post_attention_layernorm.
+    Some(h_post_attn)
+}
+
+/// Run FFN for a single layer using the given backend. Returns the post-FFN residual.
+fn run_ffn(
+    weights: &ModelWeights,
+    h_post_attn: &Array2<f32>,
+    layer: usize,
+    ffn: &dyn FfnBackend,
+    capture_activation: bool,
+) -> (Array2<f32>, Option<Array2<f32>>) {
+    let norm_offset = weights.arch.norm_weight_offset();
+    let arch = &*weights.arch;
+
     let pre_ffn_key = if arch.has_post_norms() {
         arch.pre_feedforward_layernorm_key(layer)
     } else {
         Some(arch.post_attention_layernorm_key(layer))
     };
     let h_ffn = rms_norm(
-        &h_post_attn,
+        h_post_attn,
         pre_ffn_key.and_then(|k| weights.vectors.get(&k)),
         norm_offset,
     );
 
-    let w_gate = weights.tensors.get(&arch.ffn_gate_key(layer)).unwrap();
-    let w_up = weights.tensors.get(&arch.ffn_up_key(layer)).unwrap();
-    let w_down = weights.tensors.get(&arch.ffn_down_key(layer)).unwrap();
-
     let (ffn_out, activation) = if capture_activation {
-        let (out, act) = ffn_forward_with_activation(&h_ffn, w_gate, w_up, w_down);
+        let (out, act) = ffn.forward_with_activation(layer, &h_ffn);
         (out, Some(act))
     } else {
-        (ffn_forward(&h_ffn, w_gate, w_up, w_down), None)
+        (ffn.forward(layer, &h_ffn), None)
     };
 
-    // Post-FFN norm (Gemma has it, Llama doesn't).
     let h_out = if arch.has_post_norms() {
         let normed = rms_norm(
             &ffn_out,
@@ -143,13 +143,78 @@ fn run_layer(
                 .and_then(|k| weights.vectors.get(&k)),
             norm_offset,
         );
-        &h_post_attn + &normed
+        h_post_attn + &normed
     } else {
-        &h_post_attn + &ffn_out
+        h_post_attn + &ffn_out
     };
 
+    (h_out, activation)
+}
+
+/// Run a single transformer layer with the given FFN backend.
+fn run_layer_with_ffn(
+    weights: &ModelWeights,
+    h: &Array2<f32>,
+    layer: usize,
+    ffn: &dyn FfnBackend,
+    capture_activation: bool,
+) -> Option<(Array2<f32>, Option<Array2<f32>>)> {
+    let h_post_attn = run_attention(weights, h, layer)?;
+    let (h_out, activation) = run_ffn(weights, &h_post_attn, layer, ffn, capture_activation);
     Some((h_out, activation))
 }
+
+/// Project the final hidden state to logits and return top-k predictions.
+fn logits_to_predictions(
+    weights: &ModelWeights,
+    h: &Array2<f32>,
+    tokenizer: &tokenizers::Tokenizer,
+    top_k: usize,
+) -> PredictResult {
+    let seq_len = h.shape()[0];
+    let norm_offset = weights.arch.norm_weight_offset();
+
+    let h_final = rms_norm(
+        h,
+        weights.vectors.get(weights.arch.final_norm_key()),
+        norm_offset,
+    );
+
+    let last = h_final.row(seq_len - 1);
+    let mut logits: Vec<f32> = Vec::with_capacity(weights.vocab_size);
+    for tok_id in 0..weights.vocab_size {
+        let emb_row = weights.embed.row(tok_id);
+        let dot: f32 = last.iter().zip(emb_row.iter()).map(|(a, b)| a * b).sum();
+        logits.push(dot);
+    }
+
+    let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let exp_sum: f32 = logits.iter().map(|l| (l - max_logit).exp()).sum();
+    let probs: Vec<f32> = logits
+        .iter()
+        .map(|l| (l - max_logit).exp() / exp_sum)
+        .collect();
+
+    let mut indexed: Vec<(usize, f32)> = probs.iter().copied().enumerate().collect();
+    let k = top_k.min(indexed.len());
+    indexed.select_nth_unstable_by(k, |a, b| b.1.partial_cmp(&a.1).unwrap());
+    indexed.truncate(k);
+    indexed.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+
+    let predictions = indexed
+        .into_iter()
+        .filter_map(|(idx, prob)| {
+            tokenizer
+                .decode(&[idx as u32], true)
+                .ok()
+                .map(|s| (s.trim().to_string(), prob as f64))
+        })
+        .collect();
+
+    PredictResult { predictions }
+}
+
+// ── Public API ──
 
 /// Run a forward pass through layers 0..=max_layer and return the
 /// last-token residual at each requested capture layer.
@@ -170,6 +235,26 @@ pub fn trace_forward(
     capture_activations: bool,
     activation_top_k: usize,
 ) -> TraceResult {
+    let ffn = WeightFfn { weights };
+    trace_forward_with_ffn(
+        weights,
+        token_ids,
+        capture_layers,
+        capture_activations,
+        activation_top_k,
+        &ffn,
+    )
+}
+
+/// Run a forward pass with a custom FFN backend.
+pub fn trace_forward_with_ffn(
+    weights: &ModelWeights,
+    token_ids: &[u32],
+    capture_layers: &[usize],
+    capture_activations: bool,
+    activation_top_k: usize,
+    ffn: &dyn FfnBackend,
+) -> TraceResult {
     let seq_len = token_ids.len();
     let max_layer = *capture_layers.iter().max().unwrap_or(&0);
 
@@ -180,7 +265,8 @@ pub fn trace_forward(
     for layer in 0..=max_layer {
         let need_activation = capture_activations && capture_layers.contains(&layer);
 
-        let (h_new, activation) = match run_layer(weights, &h, layer, need_activation) {
+        let (h_new, activation) = match run_layer_with_ffn(weights, &h, layer, ffn, need_activation)
+        {
             Some(result) => result,
             None => continue,
         };
@@ -207,65 +293,56 @@ pub fn trace_forward(
 }
 
 /// Run a full forward pass and return the top-k next token predictions.
+/// Uses dense WeightFfn (ground truth).
 pub fn predict(
     weights: &ModelWeights,
     tokenizer: &tokenizers::Tokenizer,
     token_ids: &[u32],
     top_k: usize,
 ) -> PredictResult {
-    let seq_len = token_ids.len();
-    let num_layers = weights.num_layers;
-    let norm_offset = weights.arch.norm_weight_offset();
+    let ffn = WeightFfn { weights };
+    predict_with_ffn(weights, tokenizer, token_ids, top_k, &ffn)
+}
 
+/// Run a full forward pass with a custom FFN backend for all layers.
+pub fn predict_with_ffn(
+    weights: &ModelWeights,
+    tokenizer: &tokenizers::Tokenizer,
+    token_ids: &[u32],
+    top_k: usize,
+    ffn: &dyn FfnBackend,
+) -> PredictResult {
+    let num_layers = weights.num_layers;
     let mut h = embed_tokens(weights, token_ids);
 
     for layer in 0..num_layers {
-        h = match run_layer(weights, &h, layer, false) {
+        h = match run_layer_with_ffn(weights, &h, layer, ffn, false) {
             Some((h_new, _)) => h_new,
             None => continue,
         };
     }
 
-    // Final norm
-    let h_final = rms_norm(
-        &h,
-        weights.vectors.get(weights.arch.final_norm_key()),
-        norm_offset,
-    );
+    logits_to_predictions(weights, &h, tokenizer, top_k)
+}
 
-    // Project last token against embeddings: logits = h_final[-1] @ embed.T
-    let last = h_final.row(seq_len - 1);
-    let mut logits: Vec<f32> = Vec::with_capacity(weights.vocab_size);
-    for tok_id in 0..weights.vocab_size {
-        let emb_row = weights.embed.row(tok_id);
-        let dot: f32 = last.iter().zip(emb_row.iter()).map(|(a, b)| a * b).sum();
-        logits.push(dot);
+/// Run a full forward pass with per-layer FFN backend selection.
+pub fn predict_with_router(
+    weights: &ModelWeights,
+    tokenizer: &tokenizers::Tokenizer,
+    token_ids: &[u32],
+    top_k: usize,
+    router: &LayerFfnRouter,
+) -> PredictResult {
+    let num_layers = weights.num_layers;
+    let mut h = embed_tokens(weights, token_ids);
+
+    for layer in 0..num_layers {
+        let ffn = router.get(layer);
+        h = match run_layer_with_ffn(weights, &h, layer, ffn, false) {
+            Some((h_new, _)) => h_new,
+            None => continue,
+        };
     }
 
-    // Softmax
-    let max_logit = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let exp_sum: f32 = logits.iter().map(|l| (l - max_logit).exp()).sum();
-    let probs: Vec<f32> = logits
-        .iter()
-        .map(|l| (l - max_logit).exp() / exp_sum)
-        .collect();
-
-    // Top-k
-    let mut indexed: Vec<(usize, f32)> = probs.iter().copied().enumerate().collect();
-    let k = top_k.min(indexed.len());
-    indexed.select_nth_unstable_by(k, |a, b| b.1.partial_cmp(&a.1).unwrap());
-    indexed.truncate(k);
-    indexed.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-
-    let predictions = indexed
-        .into_iter()
-        .filter_map(|(idx, prob)| {
-            tokenizer
-                .decode(&[idx as u32], true)
-                .ok()
-                .map(|s| (s.trim().to_string(), prob as f64))
-        })
-        .collect();
-
-    PredictResult { predictions }
+    logits_to_predictions(weights, &h, tokenizer, top_k)
 }
