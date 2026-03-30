@@ -8,7 +8,8 @@
 use std::time::Instant;
 
 use larql_inference::attention::{apply_rope, gqa_attention};
-use larql_inference::ffn::{ffn_forward, ffn_forward_with_activation};
+use larql_inference::ffn::WeightFfn;
+use larql_inference::ffn::FfnBackend;
 use larql_inference::model::{load_model_dir, resolve_model_path};
 use larql_inference::residual::{rms_norm, rms_norm_heads};
 use larql_inference::{capture_residuals, predict, InferenceModel};
@@ -94,16 +95,14 @@ fn main() {
         let _ = gqa_attention(&q, &k, &v, num_q, head_dim, reps, scale, seq_len);
     });
 
-    // FFN
-    let w_gate = weights.tensors.get(&weights.arch.ffn_gate_key(0)).unwrap();
-    let w_up = weights.tensors.get(&weights.arch.ffn_up_key(0)).unwrap();
-    let w_down = weights.tensors.get(&weights.arch.ffn_down_key(0)).unwrap();
+    // FFN (architecture-correct via WeightFfn)
+    let weight_ffn = WeightFfn { weights: &weights };
     bench("FFN forward (seq=6)", 100, || {
-        let _ = ffn_forward(&x, w_gate, w_up, w_down);
+        let _ = weight_ffn.forward(0, &x);
     });
 
     bench("FFN forward + activation (seq=6)", 100, || {
-        let _ = ffn_forward_with_activation(&x, w_gate, w_up, w_down);
+        let _ = weight_ffn.forward_with_activation(0, &x);
     });
 
     // ── Full forward pass benchmarks ──

@@ -2,6 +2,7 @@ extern crate blas_src;
 
 pub mod attention;
 pub mod capture;
+pub mod clustering;
 pub mod error;
 pub mod ffn;
 pub mod forward;
@@ -32,7 +33,14 @@ pub use forward::{
     trace_forward, trace_forward_full, trace_forward_with_ffn, LayerAttentionCapture, LayerMode,
     PredictResult, TraceResult,
 };
-pub use graph_ffn::{CachedFfn, ClusteredFfn, ClusteredGateIndex, DownClusteredFfn, DownClusteredIndex, EntityRoutedFfn, FeatureListFfn, GateIndex, GraphFfn, IndexBuildCallbacks, SilentIndexCallbacks};
+pub use graph_ffn::{GateIndex, IndexBuildCallbacks, SilentIndexCallbacks};
+// Experimental FFN backends (in experimental/)
+pub use ffn::experimental::cached::CachedFfn;
+pub use ffn::experimental::clustered::{ClusteredFfn, ClusteredGateIndex};
+pub use ffn::experimental::down_clustered::{DownClusteredFfn, DownClusteredIndex};
+pub use ffn::experimental::entity_routed::EntityRoutedFfn;
+pub use ffn::experimental::feature_list::FeatureListFfn;
+pub use ffn::experimental::graph::GraphFfn;
 pub use route_ffn::{RouteFfn, RouteGuidedFfn, RouteTable};
 pub use vector_index::{
     load_feature_labels, load_model_weights_from_vindex, load_vindex_config,

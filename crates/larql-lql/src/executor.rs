@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use crate::ast::*;
 use crate::error::LqlError;
+use crate::relations::RelationClassifier;
 
 /// The active backend for the session.
 enum Backend {
@@ -15,6 +16,7 @@ enum Backend {
         path: PathBuf,
         config: larql_inference::VindexConfig,
         index: larql_inference::VectorIndex,
+        relation_classifier: Option<RelationClassifier>,
     },
     /// No backend loaded.
     None,
@@ -106,15 +108,27 @@ impl Session {
                     .map_err(|e| LqlError::Execution(format!("failed to load vindex: {e}")))?;
 
                 let total_features: usize = config.layers.iter().map(|l| l.num_features).sum();
+
+                // Load discovered relation clusters (if available)
+                let relation_classifier = RelationClassifier::from_vindex(&path);
+
+                let rc_status = match &relation_classifier {
+                    Some(rc) if rc.has_clusters() => {
+                        format!(", relations: {} types", rc.num_clusters())
+                    }
+                    _ => String::new(),
+                };
+
                 let out = vec![format!(
-                    "Using: {} ({} layers, {} features, model: {})",
+                    "Using: {} ({} layers, {} features, model: {}{})",
                     path.display(),
                     config.num_layers,
                     format_number(total_features),
                     config.model,
+                    rc_status,
                 )];
 
-                self.backend = Backend::Vindex { path, config, index };
+                self.backend = Backend::Vindex { path, config, index, relation_classifier };
                 Ok(out)
             }
             UseTarget::Model { id, auto_extract } => {
@@ -139,7 +153,7 @@ impl Session {
 
     fn exec_stats(&self, _vindex_path: Option<&str>) -> Result<Vec<String>, LqlError> {
         match &self.backend {
-            Backend::Vindex { path, config, index } => {
+            Backend::Vindex { path, config, index, .. } => {
                 let total_features: usize = config.layers.iter().map(|l| l.num_features).sum();
                 let gate_size = index.total_gate_vectors();
                 let down_size = index.total_down_meta();
@@ -343,9 +357,9 @@ impl Session {
 
     // ── DESCRIBE ──
     //
-    // Pure vindex knowledge browser. Shows what the model "knows" about an
-    // entity by finding which gate features fire for its embedding.
-    // Filters noise and groups by layer band (early=morphological, mid=semantic, late=output).
+    // Each FFN feature is an edge: gate fires on entity → down outputs target.
+    // One feature = one edge. Rank by gate_score * c_score (activation × selectivity).
+    // Group by target token, show the strongest edges.
 
     fn exec_describe(
         &self,
@@ -369,12 +383,22 @@ impl Session {
             return Ok(vec![format!("{entity}\n  (not found)")]);
         }
 
-        let last_tok = *token_ids.last().unwrap();
-        let embed_row = embed.row(last_tok as usize);
-        let query: larql_inference::ndarray::Array1<f32> =
-            embed_row.mapv(|v| v * embed_scale);
+        // For multi-token entities (e.g., "Mozart" → ["Mo", "zart"]),
+        // average all token embeddings to get the entity vector.
+        let hidden = embed.shape()[1];
+        let query = if token_ids.len() == 1 {
+            let tok = token_ids[0];
+            embed.row(tok as usize).mapv(|v| v * embed_scale)
+        } else {
+            let mut avg = larql_inference::ndarray::Array1::<f32>::zeros(hidden);
+            for &tok in &token_ids {
+                let row = embed.row(tok as usize);
+                avg += &row.mapv(|v| v * embed_scale);
+            }
+            avg /= token_ids.len() as f32;
+            avg
+        };
 
-        // If AT LAYER specified, only scan that layer
         let all_layers = index.loaded_layers();
         let scan_layers: Vec<usize> = if let Some(l) = layer {
             vec![l as usize]
@@ -384,85 +408,172 @@ impl Session {
 
         let trace = index.walk(&query, &scan_layers, 20);
 
-        // Collect all down-projection outputs, filtering noise:
-        // - Only keep features with positive gate scores (entity activates the gate)
-        // - Only keep tokens that are mostly ASCII printable (filter encoding garbage)
-        // - Deduplicate case-insensitive
-        let mut token_data: HashMap<String, (f32, Vec<usize>, usize)> = HashMap::new();
+        // Each feature is one edge: gate fires on entity → down outputs top_token.
+        // One edge per feature (top_token only — not fanned out to all top_k).
+        // This prevents category features (country→[France,Italy,Germany,...]) from
+        // producing 6 edges that dominate the listing.
+        //
+        // Rank by gate_score (how strongly the entity activates the feature).
+        // Show the feature's other top_k outputs as context ("also: ...").
+        struct EdgeInfo {
+            gate: f32,
+            c_score: f32,
+            layers: Vec<usize>,
+            count: usize,
+            original: String,
+            also: Vec<String>,
+            best_layer: usize,
+            best_feature: usize,
+        }
+
+        let entity_lower = entity.to_lowercase();
+        let mut edges: HashMap<String, EdgeInfo> = HashMap::new();
+
+        // Find max gate score across all hits to set a relative threshold.
+        // Only show features within 3x of the strongest activation.
+        let max_gate = trace.layers.iter()
+            .flat_map(|(_, hits)| hits.iter().map(|h| h.gate_score))
+            .fold(0.0f32, f32::max);
+        let gate_threshold = (max_gate / 3.0).max(5.0);
 
         for (layer_idx, hits) in &trace.layers {
             for hit in hits {
-                if hit.gate_score <= 0.0 {
+                if hit.gate_score < gate_threshold {
                     continue;
                 }
+
                 let tok = &hit.meta.top_token;
-                // Filter: skip tokens that are mostly non-Latin (heuristic for noise)
-                if !is_readable_token(tok) {
+                if !is_content_token(tok) {
                     continue;
                 }
-                let key = tok.to_lowercase();
-                let entry = token_data
-                    .entry(key)
-                    .or_insert((0.0f32, Vec::new(), 0));
-                if hit.gate_score > entry.0 {
-                    entry.0 = hit.gate_score;
+                // Skip self-loops
+                if tok.to_lowercase() == entity_lower {
+                    continue;
                 }
-                entry.1.push(*layer_idx);
-                entry.2 += 1;
+
+                // Collect readable "also" tokens, then filter for content
+                let also_readable: Vec<String> = hit.meta.top_k.iter()
+                    .filter(|t| {
+                        t.token.to_lowercase() != tok.to_lowercase()
+                            && t.token.to_lowercase() != entity_lower
+                            && is_readable_token(&t.token)
+                            && t.logit > 0.0
+                    })
+                    .take(5)
+                    .map(|t| t.token.clone())
+                    .collect();
+
+                // Coherence filter: keep only content-word also-tokens.
+                // A real feature has coherent outputs (cows → cattle, cow, bovine).
+                // A noise feature has fragments (Android → ronic, tattoo, ahlia).
+                let also: Vec<String> = also_readable.iter()
+                    .filter(|t| is_content_token(t))
+                    .take(3)
+                    .cloned()
+                    .collect();
+
+                // Skip features where no secondary output is a real content word
+                if also.is_empty() && !also_readable.is_empty() {
+                    continue;
+                }
+
+                let key = tok.to_lowercase();
+                let entry = edges.entry(key).or_insert_with(|| {
+                    EdgeInfo {
+                        gate: 0.0,
+                        c_score: 0.0,
+                        layers: Vec::new(),
+                        count: 0,
+                        original: tok.to_string(),
+                        also,
+                        best_layer: *layer_idx,
+                        best_feature: hit.feature,
+                    }
+                });
+
+                if hit.gate_score > entry.gate {
+                    entry.gate = hit.gate_score;
+                    entry.c_score = hit.meta.c_score;
+                    entry.best_layer = *layer_idx;
+                    entry.best_feature = hit.feature;
+                }
+
+                if !entry.layers.contains(layer_idx) {
+                    entry.layers.push(*layer_idx);
+                }
+                entry.count += 1;
             }
         }
 
-        let mut sorted: Vec<(&str, f32, usize, usize, usize)> = token_data
-            .iter()
-            .map(|(tok, (score, layers, count))| {
-                let min_l = *layers.iter().min().unwrap_or(&0);
-                let max_l = *layers.iter().max().unwrap_or(&0);
-                (tok.as_str(), *score, min_l, max_l, *count)
-            })
-            .collect();
-        sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Rank by gate score
+        let mut ranked: Vec<&EdgeInfo> = edges.values().collect();
+        ranked.sort_by(|a, b| b.gate.partial_cmp(&a.gate).unwrap_or(std::cmp::Ordering::Equal));
 
         let mut out = vec![entity.to_string()];
 
-        if sorted.is_empty() {
-            out.push("  (no features found)".into());
+        if ranked.is_empty() {
+            out.push("  (no edges found)".into());
             return Ok(out);
         }
 
-        // Group into layer bands
-        let mut early = Vec::new();  // L0-13: morphological/syntactic
-        let mut mid = Vec::new();    // L14-27: semantic/factual
-        let mut late = Vec::new();   // L28-33: output/formatting
+        // Classify relation types if classifier is available
+        let classifier = self.relation_classifier();
 
-        for &(tok, score, min_l, max_l, count) in sorted.iter().take(30) {
-            let entry = format!(
-                "    {:20} score={:.1}  L{}-{}  ({}x)",
-                tok, score, min_l, max_l, count
-            );
-            if max_l <= 13 {
-                early.push(entry);
-            } else if min_l >= 28 {
-                late.push(entry);
+        // Show edges grouped by layer band
+        let mut knowledge = Vec::new();
+        let mut output_band = Vec::new();
+        let mut morpho = Vec::new();
+
+        for info in ranked.iter().take(30) {
+            let min_l = *info.layers.iter().min().unwrap_or(&0);
+            let max_l = *info.layers.iter().max().unwrap_or(&0);
+
+            // Look up relation type from discovered clusters
+            let relation_label = if let Some(rc) = classifier {
+                if let Some(label) = rc.label_for_feature(info.best_layer, info.best_feature) {
+                    format!("{:<14}", label)
+                } else {
+                    format!("{:<14}", "")
+                }
             } else {
-                mid.push(entry);
+                String::new()
+            };
+
+            let also = if info.also.is_empty() {
+                String::new()
+            } else {
+                format!("  also: {}", info.also.join(", "))
+            };
+
+            let entry = format!(
+                "    {} → {:20} gate={:.1}  L{}-{}  {}x{}",
+                relation_label, info.original, info.gate, min_l, max_l, info.count, also,
+            );
+
+            if min_l <= 27 && max_l >= 14 {
+                knowledge.push(entry);
+            } else if min_l >= 28 {
+                output_band.push(entry);
+            } else {
+                morpho.push(entry);
             }
         }
 
-        if !mid.is_empty() {
-            out.push("  Knowledge (L14-27):".into());
-            for e in mid.iter().take(10) {
+        if !knowledge.is_empty() {
+            out.push("  Edges (L14-27):".into());
+            for e in knowledge.iter().take(15) {
                 out.push(e.clone());
             }
         }
-        if !late.is_empty() {
+        if !output_band.is_empty() {
             out.push("  Output (L28-33):".into());
-            for e in late.iter().take(5) {
+            for e in output_band.iter().take(5) {
                 out.push(e.clone());
             }
         }
-        if !early.is_empty() {
+        if !morpho.is_empty() {
             out.push("  Morphological (L0-13):".into());
-            for e in early.iter().take(5) {
+            for e in morpho.iter().take(5) {
                 out.push(e.clone());
             }
         }
@@ -654,9 +765,7 @@ impl Session {
     ) -> Result<Vec<String>, LqlError> {
         let (_path, _config, index) = self.require_vindex()?;
 
-        // Only scan knowledge layers (L14-27) by default — that's where
-        // factual relations live. Early layers are morphological noise,
-        // late layers are output formatting.
+        // Scan knowledge layers (L14-27) — factual relations live here.
         let all_layers = index.loaded_layers();
         let scan_layers: Vec<usize> = if let Some(l) = layer_filter {
             vec![l as usize]
@@ -664,12 +773,12 @@ impl Session {
             all_layers.iter().copied().filter(|l| *l >= 14 && *l <= 27).collect()
         };
 
-        // Collect readable tokens with high c_score (confident down projections)
         struct TokenInfo {
             count: usize,
             max_score: f32,
             min_layer: usize,
             max_layer: usize,
+            original: String, // preserve original casing from first hit
         }
 
         let mut tokens: HashMap<String, TokenInfo> = HashMap::new();
@@ -678,19 +787,20 @@ impl Session {
             if let Some(metas) = index.down_meta_at(layer) {
                 for meta_opt in metas.iter() {
                     if let Some(meta) = meta_opt {
-                        // Filter: readable tokens only, minimum confidence
-                        if !is_readable_token(&meta.top_token) {
+                        let tok = meta.top_token.trim();
+                        if !is_content_token(tok) {
                             continue;
                         }
-                        if meta.c_score < 0.1 {
+                        if meta.c_score < 0.2 {
                             continue;
                         }
-                        let key = meta.top_token.to_lowercase();
+                        let key = tok.to_lowercase();
                         let entry = tokens.entry(key).or_insert(TokenInfo {
                             count: 0,
                             max_score: 0.0,
                             min_layer: layer,
                             max_layer: layer,
+                            original: tok.to_string(),
                         });
                         entry.count += 1;
                         if meta.c_score > entry.max_score {
@@ -707,16 +817,16 @@ impl Session {
             }
         }
 
-        // Sort by count (features that output this token)
-        let mut sorted: Vec<(String, &TokenInfo)> = tokens.iter()
-            .map(|(tok, info)| (tok.clone(), info))
+        // Sort by count
+        let mut sorted: Vec<(&str, &TokenInfo)> = tokens.iter()
+            .map(|(_, info)| (info.original.as_str(), info))
             .collect();
         sorted.sort_by(|a, b| b.1.count.cmp(&a.1.count));
         sorted.truncate(30);
 
         let mut out = Vec::new();
-        let layer_label = if layer_filter.is_some() {
-            format!("L{}", layer_filter.unwrap())
+        let layer_label = if let Some(l) = layer_filter {
+            format!("L{}", l)
         } else {
             "L14-27".into()
         };
@@ -738,7 +848,7 @@ impl Session {
         }
 
         if sorted.is_empty() {
-            out.push("  (no readable features found)".into());
+            out.push("  (no content tokens found)".into());
         }
 
         Ok(out)
@@ -998,8 +1108,16 @@ impl Session {
                 path,
                 config,
                 index,
+                ..
             } => Ok((path, config, index)),
             Backend::None => Err(LqlError::NoBackend),
+        }
+    }
+
+    fn relation_classifier(&self) -> Option<&RelationClassifier> {
+        match &self.backend {
+            Backend::Vindex { relation_classifier, .. } => relation_classifier.as_ref(),
+            Backend::None => None,
         }
     }
 }
@@ -1034,7 +1152,6 @@ fn is_readable_token(tok: &str) -> bool {
     if tok.is_empty() || tok.len() > 30 {
         return false;
     }
-    // Count characters that are Latin, digit, common punctuation, or space
     let readable = tok.chars().filter(|c| {
         c.is_ascii_alphanumeric()
             || *c == ' '
@@ -1044,8 +1161,54 @@ fn is_readable_token(tok: &str) -> bool {
             || *c == ','
     }).count();
     let total = tok.chars().count();
-    // At least half the characters should be readable
     readable * 2 >= total && total > 0
+}
+
+/// Stricter filter for SHOW RELATIONS and DESCRIBE: content words only.
+/// Must look like a real word — no code tokens, no encoding fragments.
+fn is_content_token(tok: &str) -> bool {
+    let tok = tok.trim();
+    if !is_readable_token(tok) {
+        return false;
+    }
+    let chars: Vec<char> = tok.chars().collect();
+    if chars.len() < 3 || chars.len() > 25 {
+        return false;
+    }
+    // Must be mostly alphabetic
+    let alpha = chars.iter().filter(|c| c.is_ascii_alphabetic()).count();
+    if alpha < chars.len() * 2 / 3 {
+        return false;
+    }
+    // Reject camelCase code tokens: lowercase letter immediately followed by uppercase.
+    // This catches: trialComponents, NavigationBar, lastName, getElementById
+    // Allows: YouTube, Facebook, McDonald, French, IBM, WhatsApp
+    for w in chars.windows(2) {
+        if w[0].is_ascii_lowercase() && w[1].is_ascii_uppercase() {
+            return false;
+        }
+    }
+    // Reject if all non-ASCII (encoding fragment)
+    if !chars.iter().any(|c| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    // Filter English stop words and common function words
+    let lower = tok.to_lowercase();
+    !matches!(
+        lower.as_str(),
+        "the" | "and" | "for" | "but" | "not" | "you" | "all" | "can"
+        | "her" | "was" | "one" | "our" | "out" | "are" | "has" | "his"
+        | "how" | "its" | "may" | "new" | "now" | "old" | "see" | "way"
+        | "who" | "did" | "get" | "let" | "say" | "she" | "too" | "use"
+        | "from" | "have" | "been" | "will" | "with" | "this" | "that"
+        | "they" | "were" | "some" | "them" | "than" | "when"
+        | "what" | "your" | "each" | "make" | "like" | "just" | "over"
+        | "such" | "take" | "also" | "into" | "only" | "very" | "more"
+        | "does" | "most" | "about" | "which" | "their" | "would" | "there"
+        | "could" | "other" | "after" | "being" | "where" | "these" | "those"
+        | "first" | "should" | "because" | "through" | "before"
+        | "par" | "aux" | "che" | "del"
+    )
 }
 
 fn format_bytes(b: u64) -> String {
@@ -1301,6 +1464,51 @@ mod tests {
         assert!(!is_readable_token("ളാ"));
         assert!(!is_readable_token("ڪ"));
         assert!(!is_readable_token(""));
+    }
+
+    // ── is_content_token ──
+
+    #[test]
+    fn content_tokens_pass() {
+        assert!(is_content_token("French"));
+        assert!(is_content_token("Paris"));
+        assert!(is_content_token("Europe"));
+        assert!(is_content_token("Mozart"));
+        assert!(is_content_token("composer"));
+        assert!(is_content_token("Berlin"));
+        assert!(is_content_token("IBM"));
+        assert!(is_content_token("Facebook"));
+        // "YouTube" is filtered as camelCase (eT transition) — acceptable
+    }
+
+    #[test]
+    fn stop_words_rejected() {
+        assert!(!is_content_token("the"));
+        assert!(!is_content_token("from"));
+        assert!(!is_content_token("for"));
+        assert!(!is_content_token("with"));
+        assert!(!is_content_token("this"));
+        assert!(!is_content_token("about"));
+        assert!(!is_content_token("which"));
+        assert!(!is_content_token("first"));
+        assert!(!is_content_token("after"));
+    }
+
+    #[test]
+    fn short_tokens_rejected() {
+        assert!(!is_content_token("a"));
+        assert!(!is_content_token("of"));
+        assert!(!is_content_token("is"));
+        assert!(!is_content_token("-"));
+        assert!(!is_content_token("lö"));
+        assert!(!is_content_token("par"));
+    }
+
+    #[test]
+    fn code_tokens_rejected() {
+        assert!(!is_content_token("trialComponents"));
+        assert!(!is_content_token("NavigationBar"));
+        assert!(!is_content_token("LastName"));
     }
 
     // ── SHOW MODELS works without backend ──

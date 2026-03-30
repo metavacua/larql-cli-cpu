@@ -65,64 +65,27 @@ impl FilterConfig {
             }
         }
 
-        // Metadata-based filters
+        // Metadata-based filters — extract values once
         let meta = edge.metadata.as_ref();
+        let meta_u64 = |key: &str| meta.and_then(|m| m.get(key)).and_then(|v| v.as_u64());
+        let meta_f64 = |key: &str| meta.and_then(|m| m.get(key)).and_then(|v| v.as_f64());
 
         if let Some(min) = self.min_layer {
-            match meta.and_then(|m| m.get("layer")).and_then(|v| v.as_u64()) {
-                Some(layer) => {
-                    if (layer as usize) < min {
-                        return false;
-                    }
-                }
-                None => return false,
-            }
+            let layer = meta_u64("layer");
+            if layer.map_or(true, |l| (l as usize) < min) { return false; }
         }
         if let Some(max) = self.max_layer {
-            match meta.and_then(|m| m.get("layer")).and_then(|v| v.as_u64()) {
-                Some(layer) => {
-                    if (layer as usize) > max {
-                        return false;
-                    }
-                }
-                None => return false,
-            }
+            let layer = meta_u64("layer");
+            if layer.map_or(true, |l| (l as usize) > max) { return false; }
         }
         if let Some(min) = self.min_selectivity {
-            match meta
-                .and_then(|m| m.get("selectivity"))
-                .and_then(|v| v.as_f64())
-            {
-                Some(sel) => {
-                    if sel < min {
-                        return false;
-                    }
-                }
-                None => return false,
-            }
+            if meta_f64("selectivity").map_or(true, |v| v < min) { return false; }
         }
         if let Some(min) = self.min_c_in {
-            match meta.and_then(|m| m.get("c_in")).and_then(|v| v.as_f64()) {
-                Some(val) => {
-                    if val < min {
-                        return false;
-                    }
-                }
-                None => return false,
-            }
+            if meta_f64("c_in").map_or(true, |v| v < min) { return false; }
         }
         if let Some(min) = self.min_c_out {
-            match meta
-                .and_then(|m| m.get("c_out"))
-                .and_then(|v| v.as_f64())
-            {
-                Some(val) => {
-                    if val < min {
-                        return false;
-                    }
-                }
-                None => return false,
-            }
+            if meta_f64("c_out").map_or(true, |v| v < min) { return false; }
         }
 
         true

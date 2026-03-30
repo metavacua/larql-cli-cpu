@@ -49,8 +49,6 @@ pub enum LayerMode<'a> {
     AttentionOnly,
 }
 
-/// Compute x @ w.T with f64 accumulation for precision.
-/// This matches MLX Metal kernel behavior which uses higher-precision accumulation.
 /// Apply the appropriate norm (RMSNorm or LayerNorm) based on architecture.
 fn apply_norm(
     weights: &ModelWeights,
@@ -71,20 +69,9 @@ fn apply_norm(
     }
 }
 
-/// Compute x @ w.T using f32 BLAS.
-pub fn dot_f64(x: &Array2<f32>, w: &Array2<f32>) -> Array2<f32> {
+/// Compute x @ w.T via BLAS.
+pub fn dot_proj(x: &Array2<f32>, w: &Array2<f32>) -> Array2<f32> {
     x.dot(&w.t())
-}
-
-// Temporary debug: print per-layer norms when LARQL_DEBUG is set
-#[allow(dead_code)]
-pub(crate) fn debug_norm(label: &str, h: &Array2<f32>) {
-    if std::env::var("LARQL_DEBUG").is_ok() {
-        let last = h.row(h.shape()[0] - 1);
-        let norm: f32 = last.iter().map(|v| v * v).sum::<f32>().sqrt();
-        let s = last.as_slice().unwrap();
-        eprintln!("[dbg] {label}: norm={norm:.6} last[:4]=[{:.8},{:.8},{:.8},{:.8}]", s[0], s[1], s[2], s[3]);
-    }
 }
 
 /// Add a 1D bias vector to each row of a 2D matrix.
@@ -154,9 +141,9 @@ fn run_attention_inner(
     let w_o = weights.tensors.get(&arch.attn_o_key(layer)).unwrap();
 
     // f64 accumulation for linear projections to match MLX Metal precision
-    let mut q_full = dot_f64(&h_norm, w_q);
-    let mut k_full = dot_f64(&h_norm, w_k);
-    let mut v_full = dot_f64(&h_norm, w_v);
+    let mut q_full = dot_proj(&h_norm, w_q);
+    let mut k_full = dot_proj(&h_norm, w_k);
+    let mut v_full = dot_proj(&h_norm, w_v);
 
     // Add attention bias if present (e.g., Qwen2/2.5)
     if let Some(bias) = arch.attn_q_bias_key(layer).and_then(|k| weights.vectors.get(&k)) {
@@ -194,7 +181,7 @@ fn run_attention_inner(
     let (attn_out, attn_weights) = gqa_attention_with_weights(
         &q_rope, &k_rope, &v_full, num_q, head_dim, reps, scale, seq_len, capture_attention, softcap,
     );
-    let mut attn_projected = dot_f64(&attn_out, w_o);
+    let mut attn_projected = dot_proj(&attn_out, w_o);
     if let Some(bias) = arch.attn_o_bias_key(layer).and_then(|k| weights.vectors.get(&k)) {
         add_bias(&mut attn_projected, bias);
     }

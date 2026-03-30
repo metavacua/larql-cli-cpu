@@ -88,21 +88,18 @@ pub fn gqa_attention_with_weights(
     };
 
     let last_pos = seq_len - 1;
-    let _scale_f = scale as f32;
 
     for h in 0..num_q {
         let kv_h = h / reps;
         let q_off = h * head_dim;
         let kv_off = kv_h * head_dim;
 
-        // Extract per-head Q and K slices, compute Q @ K^T in f64 for precision
+        // Q @ K^T with f64 accumulation for precision, then cast back to f32
         let q_head = q.slice(ndarray::s![.., q_off..q_off + head_dim]);
         let k_head = k.slice(ndarray::s![.., kv_off..kv_off + head_dim]);
-
         let q_f64 = q_head.mapv(|v| v as f64);
         let k_f64 = k_head.mapv(|v| v as f64);
-        let scores_f64 = q_f64.dot(&k_f64.t()) * scale;
-        let mut scores = scores_f64.mapv(|v| v as f32);
+        let mut scores = q_f64.dot(&k_f64.t()).mapv(|v| (v * scale) as f32);
 
         // Softcapping: tanh(scores / cap) * cap (Gemma2)
         if let Some(cap) = softcap {
@@ -133,8 +130,8 @@ pub fn gqa_attention_with_weights(
         }
 
         // Weighted sum: scores @ V_head via BLAS
-        let v_head = v.slice(ndarray::s![.., kv_off..kv_off + head_dim]).to_owned();
-        let attn_v = scores.dot(&v_head); // (seq, seq) @ (seq, hd) → (seq, hd)
+        let v_head = v.slice(ndarray::s![.., kv_off..kv_off + head_dim]);
+        let attn_v = scores.dot(&v_head);
 
         // Write back to output
         for i in 0..seq_len {

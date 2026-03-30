@@ -63,30 +63,41 @@ mod test_residual {
 }
 
 mod test_ffn {
-    use larql_inference::ffn::{ffn_forward, ffn_forward_with_activation, silu_gate_up};
+    use larql_inference::ffn::{silu_gate_up, sigmoid};
     use ndarray::Array2;
+
+    /// SiLU-gated FFN helper for unit tests (no model architecture needed).
+    fn silu_ffn_forward(x: &Array2<f32>, w_gate: &Array2<f32>, w_up: &Array2<f32>, w_down: &Array2<f32>) -> Array2<f32> {
+        let gate = x.dot(&w_gate.t());
+        let up = x.dot(&w_up.t());
+        silu_gate_up(&gate, &up).dot(&w_down.t())
+    }
+
+    fn silu_ffn_forward_with_activation(x: &Array2<f32>, w_gate: &Array2<f32>, w_up: &Array2<f32>, w_down: &Array2<f32>) -> (Array2<f32>, Array2<f32>) {
+        let gate = x.dot(&w_gate.t());
+        let up = x.dot(&w_up.t());
+        let activation = silu_gate_up(&gate, &up);
+        let out = activation.dot(&w_down.t());
+        (out, activation)
+    }
 
     #[test]
     fn silu_gate_up_elementwise() {
         let gate = Array2::from_shape_vec((1, 3), vec![0.0, 1.0, -1.0]).unwrap();
         let up = Array2::from_shape_vec((1, 3), vec![1.0, 1.0, 1.0]).unwrap();
         let out = silu_gate_up(&gate, &up);
-        // SiLU(0) * 1 = 0
         assert!((out[[0, 0]]).abs() < 1e-6);
-        // SiLU(1) * 1 = 1 * sigmoid(1) ≈ 0.7311
         assert!((out[[0, 1]] - 0.7311).abs() < 0.01);
-        // SiLU(-1) * 1 = -1 * sigmoid(-1) ≈ -0.2689
         assert!((out[[0, 2]] - (-0.2689)).abs() < 0.01);
     }
 
     #[test]
     fn ffn_forward_shapes() {
-        // (seq=2, hidden=4), intermediate=3
         let x = Array2::ones((2, 4));
         let w_gate = Array2::ones((3, 4)) * 0.1;
         let w_up = Array2::ones((3, 4)) * 0.1;
         let w_down = Array2::ones((4, 3)) * 0.1;
-        let out = ffn_forward(&x, &w_gate, &w_up, &w_down);
+        let out = silu_ffn_forward(&x, &w_gate, &w_up, &w_down);
         assert_eq!(out.shape(), &[2, 4]);
     }
 
@@ -96,9 +107,9 @@ mod test_ffn {
         let w_gate = Array2::ones((3, 4)) * 0.1;
         let w_up = Array2::ones((3, 4)) * 0.1;
         let w_down = Array2::ones((4, 3)) * 0.1;
-        let (out, act) = ffn_forward_with_activation(&x, &w_gate, &w_up, &w_down);
+        let (out, act) = silu_ffn_forward_with_activation(&x, &w_gate, &w_up, &w_down);
         assert_eq!(out.shape(), &[1, 4]);
-        assert_eq!(act.shape(), &[1, 3]); // intermediate size
+        assert_eq!(act.shape(), &[1, 3]);
     }
 }
 

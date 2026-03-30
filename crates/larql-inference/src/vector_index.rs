@@ -598,10 +598,17 @@ impl VectorIndex {
         std::fs::write(&embed_path, embed_bytes)?;
         callbacks.on_stage_done("embeddings", 0.0);
 
-        // ── 3. Write down metadata (NDJSON, no vectors) ──
+        // ── 3. Write down metadata + collect directions for relation clustering ──
         callbacks.on_stage("down_meta");
         let down_path = output_dir.join("down_meta.jsonl");
         let mut down_file = BufWriter::new(std::fs::File::create(&down_path)?);
+
+        // Collect normalized down columns for knowledge layers (L14-28) for clustering
+        let cluster_layer_min = 14.min(num_layers);
+        let cluster_layer_max = 28.min(num_layers);
+        let mut cluster_directions: Vec<f32> = Vec::new();
+        let mut cluster_features: Vec<(usize, usize)> = Vec::new();
+        let mut cluster_top_tokens: Vec<String> = Vec::new();
 
         for layer in 0..num_layers {
             callbacks.on_layer_start("down", layer, num_layers);
@@ -613,32 +620,67 @@ impl VectorIndex {
                 None => continue,
             };
 
-            // w_down is (hidden_size, intermediate_size) — columns are features
+            // w_down is (hidden_size, intermediate_size)
             let num_features = w_down.shape()[1];
+            let is_knowledge_layer = layer >= cluster_layer_min && layer < cluster_layer_max;
 
-            for feat in 0..num_features {
-                if feat % 500 == 0 {
-                    callbacks.on_feature_progress("down", layer, feat, num_features);
+            // Batch features: embed @ w_down_chunk → (vocab, chunk_size)
+            let batch_size = 1024;
+
+            for batch_start in (0..num_features).step_by(batch_size) {
+                let batch_end = (batch_start + batch_size).min(num_features);
+                callbacks.on_feature_progress("down", layer, batch_start, num_features);
+
+                // Extract columns [batch_start..batch_end] from w_down
+                let w_chunk = w_down.slice(ndarray::s![.., batch_start..batch_end]).to_owned();
+                // BLAS: (vocab, hidden) @ (hidden, chunk) → (vocab, chunk)
+                let chunk_logits = weights.embed.dot(&w_chunk);
+
+            for feat in batch_start..batch_end {
+                let col = chunk_logits.column(feat - batch_start);
+                let mut scores: Vec<(usize, f32)> = col.iter().copied().enumerate().collect();
+
+                let k = down_top_k.min(scores.len());
+                if k > 0 && k < scores.len() {
+                    scores.select_nth_unstable_by(k, |a, b| b.1.partial_cmp(&a.1).unwrap());
                 }
+                scores.truncate(k);
+                scores.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
-                // Extract down column for this feature
-                let down_col: Vec<f32> = (0..hidden_size)
-                    .map(|h| w_down[[h, feat]])
+                let top_k_entries: Vec<TopKEntry> = scores
+                    .into_iter()
+                    .filter_map(|(idx, logit)| {
+                        tokenizer
+                            .decode(&[idx as u32], true)
+                            .ok()
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .map(|token| TopKEntry {
+                                token,
+                                token_id: idx as u32,
+                                logit,
+                            })
+                    })
                     .collect();
-
-                // Project to vocabulary: logits = embed @ down_col
-                let top_k_entries = project_to_top_k(
-                    &weights.embed,
-                    &down_col,
-                    down_top_k,
-                    tokenizer,
-                );
 
                 let (top_token, top_token_id, c_score) = if let Some(first) = top_k_entries.first() {
                     (first.token.clone(), first.token_id, first.logit)
                 } else {
                     (String::new(), 0, 0.0)
                 };
+
+                // Collect normalized down column for knowledge layer clustering
+                if is_knowledge_layer {
+                    let down_col: Vec<f32> = (0..hidden_size)
+                        .map(|h| w_down[[h, feat]])
+                        .collect();
+                    let norm: f32 = down_col.iter().map(|v| v * v).sum::<f32>().sqrt();
+                    if norm > 1e-8 {
+                        cluster_directions.extend(down_col.iter().map(|v| v / norm));
+                        cluster_features.push((layer, feat));
+                        cluster_top_tokens.push(top_token.clone());
+                    }
+                }
 
                 let record = DownMetaRecord {
                     layer,
@@ -660,11 +702,86 @@ impl VectorIndex {
                     .map_err(|e| InferenceError::Parse(e.to_string()))?;
                 down_file.write_all(b"\n")?;
             }
+            } // end batch
 
             callbacks.on_layer_done("down", layer, start.elapsed().as_secs_f64() * 1000.0);
         }
         down_file.flush()?;
         callbacks.on_stage_done("down_meta", 0.0);
+
+        // ── 3b. Cluster down directions to discover relation types ──
+        if !cluster_directions.is_empty() {
+            callbacks.on_stage("relation_clusters");
+
+            let n_features = cluster_features.len();
+            let data = ndarray::Array2::from_shape_vec(
+                (n_features, hidden_size),
+                cluster_directions,
+            )
+            .map_err(|e| InferenceError::Parse(format!("cluster data shape: {e}")))?;
+
+            // Find optimal k (range 8-64)
+            let max_k = 64.min(n_features / 10).max(8).min(n_features);
+            let min_k = 8.min(n_features);
+            let optimal_k = crate::clustering::find_optimal_k(&data, min_k, max_k, 30);
+
+            // Run final clustering with optimal k
+            let (centres, assignments, _distances) =
+                crate::clustering::kmeans(&data, optimal_k, 50);
+
+            // Auto-label clusters
+            let (labels, top_tokens_per_cluster) =
+                crate::clustering::auto_label_clusters(
+                    &assignments,
+                    &cluster_top_tokens,
+                    optimal_k,
+                );
+
+            // Count features per cluster
+            let mut counts = vec![0usize; optimal_k];
+            for &a in &assignments {
+                if a < optimal_k {
+                    counts[a] += 1;
+                }
+            }
+
+            // Write relation_clusters.json
+            let cluster_result = crate::clustering::ClusterResult {
+                k: optimal_k,
+                centres: centres
+                    .rows()
+                    .into_iter()
+                    .map(|r| r.to_vec())
+                    .collect(),
+                labels,
+                counts,
+                top_tokens: top_tokens_per_cluster,
+            };
+
+            let clusters_json = serde_json::to_string_pretty(&cluster_result)
+                .map_err(|e| InferenceError::Parse(e.to_string()))?;
+            std::fs::write(output_dir.join("relation_clusters.json"), clusters_json)?;
+
+            // Write per-feature cluster assignments
+            let assign_path = output_dir.join("feature_clusters.jsonl");
+            let mut assign_file = BufWriter::new(std::fs::File::create(&assign_path)?);
+            for (i, &(layer, feat)) in cluster_features.iter().enumerate() {
+                let record = serde_json::json!({
+                    "l": layer,
+                    "f": feat,
+                    "c": assignments[i],
+                });
+                serde_json::to_writer(&mut assign_file, &record)
+                    .map_err(|e| InferenceError::Parse(e.to_string()))?;
+                assign_file.write_all(b"\n")?;
+            }
+            assign_file.flush()?;
+
+            callbacks.on_stage_done(
+                &format!("relation_clusters (k={}, {} features)", optimal_k, n_features),
+                0.0,
+            );
+        }
 
         // ── 4. Copy tokenizer ──
         callbacks.on_stage("tokenizer");
@@ -1494,6 +1611,7 @@ pub fn load_model_weights_from_vindex(
 }
 
 /// Project a vector onto the embedding matrix and return top-k tokens.
+#[allow(dead_code)]
 fn project_to_top_k(
     embed: &Array2<f32>,
     vector: &[f32],

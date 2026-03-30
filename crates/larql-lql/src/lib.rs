@@ -3,6 +3,7 @@ pub mod error;
 pub mod executor;
 pub mod lexer;
 pub mod parser;
+pub mod relations;
 pub mod repl;
 
 pub use ast::Statement;
