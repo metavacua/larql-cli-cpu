@@ -669,16 +669,23 @@ impl VectorIndex {
                     (String::new(), 0, 0.0)
                 };
 
-                // Collect normalized down column for knowledge layer clustering
-                if is_knowledge_layer {
-                    let down_col: Vec<f32> = (0..hidden_size)
-                        .map(|h| w_down[[h, feat]])
-                        .collect();
-                    let norm: f32 = down_col.iter().map(|v| v * v).sum::<f32>().sqrt();
-                    if norm > 1e-8 {
-                        cluster_directions.extend(down_col.iter().map(|v| v / norm));
-                        cluster_features.push((layer, feat));
-                        cluster_top_tokens.push(top_token.clone());
+                // Collect target embedding for knowledge layer clustering.
+                // The target embedding (embed[top_token_id]) captures what kind
+                // of token this feature outputs. Features outputting cities cluster
+                // together, features outputting languages cluster together.
+                if is_knowledge_layer && top_token_id > 0 {
+                    let tok_id = top_token_id as usize;
+                    if tok_id < vocab_size {
+                        let target_row = weights.embed.row(tok_id);
+                        let norm: f32 = target_row.dot(&target_row).sqrt();
+                        if norm > 1e-8 {
+                            cluster_directions.extend(target_row.iter().map(|v| v / norm));
+                            cluster_features.push((layer, feat));
+                            let all_tokens: Vec<String> = top_k_entries.iter()
+                                .map(|e| e.token.clone())
+                                .collect();
+                            cluster_top_tokens.push(all_tokens.join("|"));
+                        }
                     }
                 }
 
@@ -720,18 +727,23 @@ impl VectorIndex {
             )
             .map_err(|e| InferenceError::Parse(format!("cluster data shape: {e}")))?;
 
-            // Find optimal k (range 8-64)
-            let max_k = 64.min(n_features / 10).max(8).min(n_features);
-            let min_k = 8.min(n_features);
-            let optimal_k = crate::clustering::find_optimal_k(&data, min_k, max_k, 30);
+            // Use k=64 — high enough to separate real relation types.
+            // With 143K features, k=64 gives ~2200 features per cluster on average.
+            // The elbow method picks k too low (10-14) and merges different relations.
+            let optimal_k = 64.min(n_features);
 
             // Run final clustering with optimal k
             let (centres, assignments, _distances) =
                 crate::clustering::kmeans(&data, optimal_k, 50);
 
-            // Auto-label clusters
+            // Auto-label clusters: project each centre against the embedding
+            // matrix. The nearest token IS the category name — the model naming
+            // its own knowledge types.
             let (labels, top_tokens_per_cluster) =
-                crate::clustering::auto_label_clusters(
+                crate::clustering::auto_label_clusters_from_embeddings(
+                    &centres,
+                    &weights.embed,
+                    tokenizer,
                     &assignments,
                     &cluster_top_tokens,
                     optimal_k,
@@ -814,6 +826,176 @@ impl VectorIndex {
             }),
         };
 
+        let config_json = serde_json::to_string_pretty(&config)
+            .map_err(|e| InferenceError::Parse(e.to_string()))?;
+        std::fs::write(output_dir.join("index.json"), config_json)?;
+
+        Ok(())
+    }
+
+    /// Resume an interrupted vindex build.
+    /// Assumes gate_vectors.bin, embeddings.bin, and down_meta.jsonl exist.
+    /// Runs: relation clustering + tokenizer + index.json.
+    pub fn build_vindex_resume(
+        weights: &ModelWeights,
+        tokenizer: &tokenizers::Tokenizer,
+        model_name: &str,
+        output_dir: &Path,
+        callbacks: &mut dyn IndexBuildCallbacks,
+    ) -> Result<(), InferenceError> {
+        let num_layers = weights.num_layers;
+        let hidden_size = weights.hidden_size;
+        let intermediate_size = weights.intermediate_size;
+        let vocab_size = weights.vocab_size;
+        let embed_scale = weights.arch.embed_scale();
+
+        // Reconstruct layer_infos from gate_vectors.bin
+        let gate_path = output_dir.join("gate_vectors.bin");
+        let gate_size = std::fs::metadata(&gate_path)?.len();
+        let bytes_per_layer = (intermediate_size * hidden_size * 4) as u64;
+        let mut layer_infos = Vec::new();
+        for layer in 0..num_layers {
+            layer_infos.push(VindexLayerInfo {
+                layer,
+                num_features: intermediate_size,
+                offset: layer as u64 * bytes_per_layer,
+                length: bytes_per_layer,
+            });
+        }
+        eprintln!("  Reconstructed {} layer infos from gate_vectors.bin ({:.1} GB)",
+            layer_infos.len(), gate_size as f64 / 1e9);
+
+        // Read down_meta.jsonl to collect cluster directions (L14-28)
+        let cluster_layer_min = 14.min(num_layers);
+        let cluster_layer_max = 28.min(num_layers);
+        let mut cluster_directions: Vec<f32> = Vec::new();
+        let mut cluster_features: Vec<(usize, usize)> = Vec::new();
+        let mut cluster_top_tokens: Vec<String> = Vec::new();
+
+        eprintln!("  Reading down_meta.jsonl for cluster directions...");
+        let down_path = output_dir.join("down_meta.jsonl");
+        let down_file = std::fs::File::open(&down_path)?;
+        let reader = std::io::BufReader::new(down_file);
+        let mut count = 0usize;
+        for line in std::io::BufRead::lines(reader) {
+            let line = line?;
+            let line = line.trim();
+            if line.is_empty() { continue; }
+            let obj: serde_json::Value = serde_json::from_str(line)
+                .map_err(|e| InferenceError::Parse(e.to_string()))?;
+            if obj.get("_header").is_some() { continue; }
+
+            let layer = obj.get("l").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let feat = obj.get("f").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let top_token_id = obj.get("i").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+
+            if layer >= cluster_layer_min && layer < cluster_layer_max && top_token_id > 0 && top_token_id < vocab_size {
+                // Use target embedding (same as the fresh build path)
+                let target_row = weights.embed.row(top_token_id);
+                let norm: f32 = target_row.dot(&target_row).sqrt();
+                if norm > 1e-8 {
+                    cluster_directions.extend(target_row.iter().map(|v| v / norm));
+                    cluster_features.push((layer, feat));
+                    // Collect all top_k tokens for labeling
+                    let all_tokens: Vec<String> = obj.get("k")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter()
+                            .filter_map(|e| e.get("t").and_then(|t| t.as_str()).map(|s| s.to_string()))
+                            .collect())
+                        .unwrap_or_default();
+                    cluster_top_tokens.push(all_tokens.join("|"));
+                }
+            }
+            count += 1;
+            if count % 50000 == 0 {
+                eprint!("\r  Read {} features...", count);
+            }
+        }
+        eprintln!("\r  Read {} features, {} in knowledge layers", count, cluster_features.len());
+
+        // Relation clustering
+        if !cluster_directions.is_empty() {
+            callbacks.on_stage("relation_clusters");
+            let n_features = cluster_features.len();
+            let data = ndarray::Array2::from_shape_vec(
+                (n_features, hidden_size),
+                cluster_directions,
+            ).map_err(|e| InferenceError::Parse(format!("cluster data shape: {e}")))?;
+
+            let optimal_k = 64.min(n_features);
+
+            let (centres, assignments, _distances) =
+                crate::clustering::kmeans(&data, optimal_k, 50);
+
+            let (labels, top_tokens_per_cluster) =
+                crate::clustering::auto_label_clusters_from_embeddings(
+                    &centres,
+                    &weights.embed,
+                    tokenizer,
+                    &assignments,
+                    &cluster_top_tokens,
+                    optimal_k,
+                );
+
+            let mut counts = vec![0usize; optimal_k];
+            for &a in &assignments { if a < optimal_k { counts[a] += 1; } }
+
+            let cluster_result = crate::clustering::ClusterResult {
+                k: optimal_k,
+                centres: centres.rows().into_iter().map(|r| r.to_vec()).collect(),
+                labels,
+                counts,
+                top_tokens: top_tokens_per_cluster,
+            };
+
+            let clusters_json = serde_json::to_string_pretty(&cluster_result)
+                .map_err(|e| InferenceError::Parse(e.to_string()))?;
+            std::fs::write(output_dir.join("relation_clusters.json"), clusters_json)?;
+
+            let assign_path = output_dir.join("feature_clusters.jsonl");
+            let mut assign_file = std::io::BufWriter::new(std::fs::File::create(&assign_path)?);
+            for (i, &(layer, feat)) in cluster_features.iter().enumerate() {
+                let record = serde_json::json!({ "l": layer, "f": feat, "c": assignments[i] });
+                serde_json::to_writer(&mut assign_file, &record)
+                    .map_err(|e| InferenceError::Parse(e.to_string()))?;
+                std::io::Write::write_all(&mut assign_file, b"\n")?;
+            }
+            std::io::Write::flush(&mut assign_file)?;
+
+            callbacks.on_stage_done(
+                &format!("relation_clusters (k={}, {} features)", optimal_k, n_features), 0.0);
+        }
+
+        // Tokenizer
+        callbacks.on_stage("tokenizer");
+        let tokenizer_json = tokenizer.to_string(true)
+            .map_err(|e| InferenceError::Parse(format!("tokenizer serialize: {e}")))?;
+        std::fs::write(output_dir.join("tokenizer.json"), tokenizer_json)?;
+        callbacks.on_stage_done("tokenizer", 0.0);
+
+        // index.json
+        let down_top_k = 10; // default
+        let config = VindexConfig {
+            version: 1,
+            model: model_name.to_string(),
+            family: weights.arch.family().to_string(),
+            num_layers,
+            hidden_size,
+            intermediate_size,
+            vocab_size,
+            embed_scale,
+            layers: layer_infos,
+            down_top_k,
+            has_model_weights: output_dir.join("model_weights.bin").exists(),
+            model_config: Some(VindexModelConfig {
+                model_type: weights.arch.config().model_type.clone(),
+                head_dim: weights.head_dim,
+                num_q_heads: weights.num_q_heads,
+                num_kv_heads: weights.num_kv_heads,
+                rope_base: weights.rope_base,
+                sliding_window: weights.arch.config().sliding_window,
+            }),
+        };
         let config_json = serde_json::to_string_pretty(&config)
             .map_err(|e| InferenceError::Parse(e.to_string()))?;
         std::fs::write(output_dir.join("index.json"), config_json)?;

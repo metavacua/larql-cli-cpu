@@ -29,6 +29,10 @@ pub struct ExtractIndexArgs {
     /// Adds model_weights.bin (~4.5GB for Gemma 3 4B). Enables --predict without --model.
     #[arg(long)]
     include_weights: bool,
+
+    /// Skip stages that already have output files (resume interrupted builds).
+    #[arg(long)]
+    resume: bool,
 }
 
 struct CliBuildCallbacks {
@@ -138,17 +142,58 @@ pub fn run(args: ExtractIndexArgs) -> Result<(), Box<dyn std::error::Error>> {
 
         eprintln!("\nBuilding index: {}", args.output.display());
 
-        VectorIndex::build_vindex(
-            model.weights(),
-            model.tokenizer(),
-            model_name,
-            &args.output,
-            args.down_top_k,
-            &mut callbacks,
-        )?;
+        let output = &args.output;
 
-        if args.include_weights {
-            write_model_weights(model.weights(), &args.output, &mut callbacks)?;
+        if args.resume {
+            // Skip stages that already have output files
+            let has_gate = output.join("gate_vectors.bin").exists();
+            let has_embed = output.join("embeddings.bin").exists();
+            let has_down = output.join("down_meta.jsonl").exists()
+                && std::fs::metadata(output.join("down_meta.jsonl"))
+                    .map(|m| m.len() > 1000)
+                    .unwrap_or(false);
+            let has_weights = output.join("model_weights.bin").exists();
+
+            if has_gate && has_embed && has_down {
+                eprintln!("  Resuming: gate_vectors, embeddings, down_meta exist — skipping");
+                // Just write index.json, tokenizer, clustering, and optionally weights
+                VectorIndex::build_vindex_resume(
+                    model.weights(),
+                    model.tokenizer(),
+                    model_name,
+                    output,
+                    &mut callbacks,
+                )?;
+            } else {
+                eprintln!("  Resume: missing core files — full rebuild");
+                VectorIndex::build_vindex(
+                    model.weights(),
+                    model.tokenizer(),
+                    model_name,
+                    output,
+                    args.down_top_k,
+                    &mut callbacks,
+                )?;
+            }
+
+            if args.include_weights && !has_weights {
+                write_model_weights(model.weights(), output, &mut callbacks)?;
+            } else if has_weights {
+                eprintln!("  Resuming: model_weights.bin exists — skipping");
+            }
+        } else {
+            VectorIndex::build_vindex(
+                model.weights(),
+                model.tokenizer(),
+                model_name,
+                output,
+                args.down_top_k,
+                &mut callbacks,
+            )?;
+
+            if args.include_weights {
+                write_model_weights(model.weights(), output, &mut callbacks)?;
+            }
         }
     }
 
