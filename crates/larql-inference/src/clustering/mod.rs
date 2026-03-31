@@ -12,6 +12,7 @@ pub mod categories;
 pub mod kmeans;
 pub mod labeling;
 pub mod pair_matching;
+pub mod probe;
 
 use ndarray::Array1;
 use serde::{Deserialize, Serialize};

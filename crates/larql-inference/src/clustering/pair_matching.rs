@@ -250,13 +250,17 @@ pub fn label_clusters_from_outputs(
             }
         }
 
-        if let Some((best_rel, best_count)) = relation_counts
-            .iter()
-            .max_by_key(|(_, &count)| count)
-        {
-            // With clean curated data (no "human"/"Earth" noise),
-            // 2 matching objects from the same relation is meaningful.
-            if *best_count >= 2 {
+        // Find top two relations by match count
+        let mut sorted_rels: Vec<(&String, &usize)> = relation_counts.iter().collect();
+        sorted_rels.sort_by(|a, b| b.1.cmp(a.1));
+
+        if let Some(&(best_rel, &best_count)) = sorted_rels.first() {
+            let second_count = sorted_rels.get(1).map(|&(_, &c)| c).unwrap_or(0);
+
+            // Require: at least 2 matches AND clear separation from runner-up.
+            // The best relation must have 2x the matches of the second-best.
+            // This prevents "occupation" from winning when it ties with "language".
+            if best_count >= 2 && (second_count == 0 || best_count >= second_count * 2) {
                 labels[c] = Some(best_rel.clone());
             }
         }

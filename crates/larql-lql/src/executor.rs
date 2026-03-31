@@ -114,7 +114,12 @@ impl Session {
 
                 let rc_status = match &relation_classifier {
                     Some(rc) if rc.has_clusters() => {
-                        format!(", relations: {} types", rc.num_clusters())
+                        let probe_info = if rc.num_probe_labels() > 0 {
+                            format!(", {} probe-confirmed", rc.num_probe_labels())
+                        } else {
+                            String::new()
+                        };
+                        format!(", relations: {} types{}", rc.num_clusters(), probe_info)
                     }
                     _ => String::new(),
                 };

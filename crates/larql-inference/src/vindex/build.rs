@@ -165,11 +165,11 @@ fn run_clustering_pipeline(
     let matrix = ndarray::Array2::from_shape_vec((n_features, hidden_size), data.directions)
         .map_err(|e| InferenceError::Parse(format!("cluster data shape: {e}")))?;
 
-    let optimal_k = 256.min(n_features);
+    let optimal_k = 512.min(n_features);
 
     let (centres, assignments, _distances) = crate::clustering::kmeans(&matrix, optimal_k, 50);
 
-    // Load reference databases (separated by layer range)
+    // Load reference databases
     let ref_dbs = crate::clustering::load_reference_databases();
 
     // Tier 1: output-only matching — Wikidata ONLY for L14-27 features.

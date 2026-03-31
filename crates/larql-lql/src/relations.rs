@@ -14,13 +14,18 @@ pub struct RelationClassifier {
     clusters: Option<ClusterResult>,
     /// Per-feature cluster assignments: (layer, feature) → cluster_id.
     feature_assignments: std::collections::HashMap<(usize, usize), usize>,
+    /// Probe-confirmed per-feature labels (highest priority).
+    probe_labels: std::collections::HashMap<(usize, usize), String>,
+    /// Number of probe-confirmed labels.
+    probe_count: usize,
 }
 
 impl RelationClassifier {
-    /// Build a classifier from discovered clusters in a vindex directory.
+    /// Build a classifier from discovered clusters + probe labels in a vindex directory.
     pub fn from_vindex(vindex_path: &std::path::Path) -> Option<Self> {
         let clusters_path = vindex_path.join("relation_clusters.json");
         let assignments_path = vindex_path.join("feature_clusters.jsonl");
+        let probe_labels_path = vindex_path.join("feature_labels.json");
 
         let clusters: ClusterResult = {
             let text = std::fs::read_to_string(&clusters_path).ok()?;
@@ -39,15 +44,47 @@ impl RelationClassifier {
             }
         }
 
+        // Load probe-confirmed per-feature labels (highest priority)
+        let mut probe_labels = std::collections::HashMap::new();
+        if let Ok(text) = std::fs::read_to_string(&probe_labels_path) {
+            if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(map) = obj.as_object() {
+                    for (key, value) in map {
+                        if let Some(rel) = value.as_str() {
+                            // Parse "L{layer}_F{feature}" key
+                            let parts: Vec<&str> = key.split('_').collect();
+                            if parts.len() == 2 {
+                                if let (Some(layer), Some(feat)) = (
+                                    parts[0].strip_prefix('L').and_then(|s| s.parse::<usize>().ok()),
+                                    parts[1].strip_prefix('F').and_then(|s| s.parse::<usize>().ok()),
+                                ) {
+                                    probe_labels.insert((layer, feat), rel.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let probe_count = probe_labels.len();
+
         Some(Self {
             clusters: Some(clusters),
             feature_assignments,
+            probe_labels,
+            probe_count,
         })
     }
 
     /// Get the relation label for a feature at (layer, feature_index).
-    /// Returns None if no cluster assignment exists.
+    /// Probe-confirmed labels take priority over cluster-assigned labels.
     pub fn label_for_feature(&self, layer: usize, feature: usize) -> Option<&str> {
+        // Tier 1: probe-confirmed label (ground truth)
+        if let Some(label) = self.probe_labels.get(&(layer, feature)) {
+            return Some(label.as_str());
+        }
+        // Tier 2: cluster-assigned label
         let clusters = self.clusters.as_ref()?;
         let &cluster_id = self.feature_assignments.get(&(layer, feature))?;
         clusters.labels.get(cluster_id).map(|s| s.as_str())
@@ -65,6 +102,11 @@ impl RelationClassifier {
         let count = clusters.counts.get(cluster_id).copied().unwrap_or(0);
         let tops = clusters.top_tokens.get(cluster_id).map(|v| v.as_slice()).unwrap_or(&[]);
         Some((label, count, tops))
+    }
+
+    /// Number of probe-confirmed feature labels.
+    pub fn num_probe_labels(&self) -> usize {
+        self.probe_count
     }
 
     /// Number of discovered clusters.
@@ -138,6 +180,8 @@ mod tests {
         RelationClassifier {
             clusters: Some(clusters),
             feature_assignments: assignments,
+            probe_labels: std::collections::HashMap::new(),
+            probe_count: 0,
         }
     }
 
