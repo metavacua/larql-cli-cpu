@@ -4,6 +4,7 @@ mod helpers;
 mod introspection;
 mod lifecycle;
 mod mutation;
+mod patch;
 mod query;
 
 #[cfg(test)]
@@ -35,9 +36,8 @@ impl Parser {
 
     pub fn parse(&mut self) -> Result<Statement, ParseError> {
         let stmt = self.parse_statement()?;
-        // Check for pipe operator
         if self.check_pipe() {
-            self.advance(); // consume |>
+            self.advance();
             let right = self.parse_statement()?;
             Ok(Statement::Pipe {
                 left: Box::new(stmt),
@@ -65,6 +65,10 @@ impl Parser {
             Token::Keyword(Keyword::Merge) => self.parse_merge(),
             Token::Keyword(Keyword::Show) => self.parse_show(),
             Token::Keyword(Keyword::Stats) => self.parse_stats(),
+            Token::Keyword(Keyword::Begin) => self.parse_begin(),
+            Token::Keyword(Keyword::Save) => self.parse_save(),
+            Token::Keyword(Keyword::Apply) => self.parse_apply(),
+            Token::Keyword(Keyword::Remove) => self.parse_remove(),
             _ => Err(ParseError(format!(
                 "expected statement keyword, got {:?}",
                 self.peek()

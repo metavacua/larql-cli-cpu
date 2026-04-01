@@ -24,6 +24,7 @@ pub enum Statement {
         layer: Option<u32>,
         relation: Option<String>,
         limit: Option<u32>,
+        into_patch: Option<String>,
     },
     Use {
         target: UseTarget,
@@ -102,6 +103,19 @@ pub enum Statement {
     ShowModels,
     Stats {
         vindex: Option<String>,
+    },
+
+    // ── Patch ──
+    BeginPatch {
+        path: String,
+    },
+    SavePatch,
+    ApplyPatch {
+        path: String,
+    },
+    ShowPatches,
+    RemovePatch {
+        path: String,
     },
 
     // ── Pipe ──

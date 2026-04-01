@@ -17,6 +17,7 @@ pub mod error;
 pub mod index;
 pub mod load;
 pub mod mutate;
+pub mod patch;
 
 // Re-export dependencies for downstream crates.
 pub use ndarray;
@@ -32,6 +33,7 @@ pub use error::VindexError;
 pub use index::{
     FeatureMeta, IndexLoadCallbacks, SilentLoadCallbacks, VectorIndex, WalkHit, WalkTrace,
 };
+pub use patch::{PatchOp, PatchedVindex, VindexPatch};
 pub use load::{
     load_feature_labels, load_vindex_config, load_vindex_embeddings, load_vindex_tokenizer,
 };

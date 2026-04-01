@@ -71,8 +71,13 @@ impl Parser {
                 self.eat_semicolon();
                 Ok(Statement::ShowModels)
             }
+            Token::Keyword(Keyword::Patches) => {
+                self.advance();
+                self.eat_semicolon();
+                Ok(Statement::ShowPatches)
+            }
             _ => Err(ParseError(format!(
-                "expected RELATIONS, LAYERS, FEATURES, or MODELS after SHOW, got {:?}",
+                "expected RELATIONS, LAYERS, FEATURES, MODELS, or PATCHES after SHOW, got {:?}",
                 self.peek()
             ))),
         }

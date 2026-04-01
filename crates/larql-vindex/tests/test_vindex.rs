@@ -1044,3 +1044,215 @@ fn source_provenance_round_trip() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ══════════════════════════════════════════════════════════════
+// PATCHES
+// ══════════════════════════════════════════════════════════════
+
+#[test]
+fn patch_save_and_load_round_trip() {
+    let dir = std::env::temp_dir().join("larql_test_patch_rt");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let patch = larql_vindex::VindexPatch {
+        version: 1,
+        base_model: "google/gemma-3-4b-it".into(),
+        base_checksum: Some("abc123".into()),
+        created_at: "2026-04-01T12:00:00Z".into(),
+        description: Some("Test patch".into()),
+        author: Some("test".into()),
+        tags: vec!["test".into()],
+        operations: vec![
+            larql_vindex::PatchOp::Insert {
+                layer: 26,
+                feature: 8821,
+                relation: Some("lives-in".into()),
+                entity: "John Coyle".into(),
+                target: "Colchester".into(),
+                confidence: Some(0.85),
+                gate_vector_b64: None,
+                down_meta: Some(larql_vindex::patch::PatchDownMeta {
+                    top_token: "Colchester".into(),
+                    top_token_id: 42,
+                    c_score: 4.2,
+                }),
+            },
+            larql_vindex::PatchOp::Delete {
+                layer: 24,
+                feature: 1337,
+                reason: Some("hallucinated".into()),
+            },
+        ],
+    };
+
+    let path = dir.join("test.vlp");
+    patch.save(&path).unwrap();
+
+    // Verify file exists and is valid JSON
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("John Coyle"));
+    assert!(text.contains("hallucinated"));
+
+    // Load back
+    let loaded = larql_vindex::VindexPatch::load(&path).unwrap();
+    assert_eq!(loaded.version, 1);
+    assert_eq!(loaded.base_model, "google/gemma-3-4b-it");
+    assert_eq!(loaded.operations.len(), 2);
+
+    let (ins, _upd, del) = loaded.counts();
+    assert_eq!(ins, 1);
+    assert_eq!(del, 1);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn patched_vindex_overrides_base() {
+    let idx = test_index();
+    let mut patched = larql_vindex::PatchedVindex::new(idx);
+
+    // Base has Paris at (0, 0)
+    assert_eq!(patched.feature_meta(0, 0).unwrap().top_token, "Paris");
+
+    // Apply patch that overrides (0, 0) to London
+    let patch = larql_vindex::VindexPatch {
+        version: 1,
+        base_model: "test".into(),
+        base_checksum: None,
+        created_at: String::new(),
+        description: None,
+        author: None,
+        tags: vec![],
+        operations: vec![
+            larql_vindex::PatchOp::Update {
+                layer: 0,
+                feature: 0,
+                gate_vector_b64: None,
+                down_meta: Some(larql_vindex::patch::PatchDownMeta {
+                    top_token: "London".into(),
+                    top_token_id: 300,
+                    c_score: 0.99,
+                }),
+            },
+        ],
+    };
+    patched.apply_patch(patch);
+
+    // Now (0, 0) should return London
+    assert_eq!(patched.feature_meta(0, 0).unwrap().top_token, "London");
+    // Other features unchanged
+    assert_eq!(patched.feature_meta(0, 1).unwrap().top_token, "French");
+    assert_eq!(patched.num_patches(), 1);
+}
+
+#[test]
+fn patched_vindex_delete_hides_feature() {
+    let idx = test_index();
+    let mut patched = larql_vindex::PatchedVindex::new(idx);
+
+    assert!(patched.feature_meta(0, 2).is_some()); // Europe
+
+    let patch = larql_vindex::VindexPatch {
+        version: 1,
+        base_model: "test".into(),
+        base_checksum: None,
+        created_at: String::new(),
+        description: None,
+        author: None,
+        tags: vec![],
+        operations: vec![
+            larql_vindex::PatchOp::Delete {
+                layer: 0,
+                feature: 2,
+                reason: Some("test delete".into()),
+            },
+        ],
+    };
+    patched.apply_patch(patch);
+
+    assert!(patched.feature_meta(0, 2).is_none()); // deleted
+}
+
+#[test]
+fn patched_vindex_bake_down() {
+    let idx = test_index();
+    let mut patched = larql_vindex::PatchedVindex::new(idx);
+
+    // Apply insert + delete
+    let patch = larql_vindex::VindexPatch {
+        version: 1,
+        base_model: "test".into(),
+        base_checksum: None,
+        created_at: String::new(),
+        description: None,
+        author: None,
+        tags: vec![],
+        operations: vec![
+            larql_vindex::PatchOp::Update {
+                layer: 0,
+                feature: 0,
+                gate_vector_b64: None,
+                down_meta: Some(larql_vindex::patch::PatchDownMeta {
+                    top_token: "London".into(),
+                    top_token_id: 300,
+                    c_score: 0.99,
+                }),
+            },
+            larql_vindex::PatchOp::Delete {
+                layer: 0,
+                feature: 2,
+                reason: None,
+            },
+        ],
+    };
+    patched.apply_patch(patch);
+
+    // Bake down to a new clean index
+    let baked = patched.bake_down();
+
+    // Verify baked result
+    assert_eq!(baked.feature_meta(0, 0).unwrap().top_token, "London");
+    assert_eq!(baked.feature_meta(0, 1).unwrap().top_token, "French");
+    assert!(baked.feature_meta(0, 2).is_none()); // deleted
+}
+
+#[test]
+fn base64_gate_vector_round_trip() {
+    let vec = vec![1.0f32, 2.0, 3.0, -4.5];
+    let encoded = larql_vindex::patch::encode_gate_vector(&vec);
+    let decoded = larql_vindex::patch::decode_gate_vector(&encoded).unwrap();
+    assert_eq!(vec, decoded);
+}
+
+#[test]
+fn patched_vindex_remove_patch() {
+    let idx = test_index();
+    let mut patched = larql_vindex::PatchedVindex::new(idx);
+
+    let patch = larql_vindex::VindexPatch {
+        version: 1,
+        base_model: "test".into(),
+        base_checksum: None,
+        created_at: String::new(),
+        description: None,
+        author: None,
+        tags: vec![],
+        operations: vec![
+            larql_vindex::PatchOp::Update {
+                layer: 0, feature: 0,
+                gate_vector_b64: None,
+                down_meta: Some(larql_vindex::patch::PatchDownMeta {
+                    top_token: "London".into(), top_token_id: 300, c_score: 0.99,
+                }),
+            },
+        ],
+    };
+    patched.apply_patch(patch);
+    assert_eq!(patched.feature_meta(0, 0).unwrap().top_token, "London");
+
+    // Remove the patch — should revert to base
+    patched.remove_patch(0);
+    assert_eq!(patched.feature_meta(0, 0).unwrap().top_token, "Paris");
+    assert_eq!(patched.num_patches(), 0);
+}

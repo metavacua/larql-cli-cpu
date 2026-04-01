@@ -1,342 +1,223 @@
-# chuk-larql-rs
+# LARQL
 
-Knowledge graphs extracted from neural network weights. Six crates, one binary, one graph format.
+The model IS the database. Query neural network weights like a graph database. No GPU required.
 
-LARQL extracts knowledge from language models through three complementary methods:
+LARQL decompiles transformer models into a queryable format called a **vindex** (vector index), then provides **LQL** (Lazarus Query Language) to browse, edit, and recompile the model's knowledge.
 
-- **Weight walking** — reads FFN weight matrices directly from safetensors files. Zero forward passes. Extracts what each neuron feature activates on and what it produces.
-- **Residual capture** — runs targeted forward passes for seed entities and captures the hidden state at specific layers. These residuals seed SurrealDB's vector store for bulk factual discovery.
-- **BFS probing** — sends structured prompts to a running model endpoint, chains next-token predictions into edges. Used as a validator for high-value candidates.
+```sql
+larql> USE "gemma3-4b.vindex";
+Using: gemma3-4b.vindex (34 layers, 348.2K features, relations: 512 types)
 
-The extraction pipeline produces edges. Edges flow into the runtime graph. No vectors at runtime.
+larql> DESCRIBE "France";
+France
+  Edges (L14-27):
+    capital     → Paris              1436.9  L27  (probe)
+    language    → French               35.2  L24  (probe)
+    continent   → Europe               14.4  L25  (probe)
+    borders     → Spain                13.3  L18  (probe)
 
-## Quick start
+larql> INSERT INTO EDGES (entity, relation, target)
+   ...   VALUES ("John Coyle", "lives-in", "Colchester");
+Inserted 1 edge. Feature F8821@L26 allocated.
+
+larql> INFER "The capital of France is" TOP 3;
+  1. Paris                (97.91%)
+  2. the                  (0.42%)
+  3. a                    (0.31%)
+```
+
+## Quick Start
 
 ```bash
-make release
+# Build
+cargo build --release
 
-# Extract lexical graph from weights (zero forward passes)
-larql weight-extract google/gemma-3-4b-it -o knowledge.larql.json
+# Extract a model into a vindex (browse-only, ~6 GB)
+larql extract-index google/gemma-3-4b-it -o gemma3-4b.vindex
 
-# Run inference from extracted weights (full forward pass in Rust)
-larql predict google/gemma-3-4b-it --prompt "The capital of France is" -k 10
+# Start the REPL
+larql repl
 
-# Extract vectors for SurrealDB workshop
-larql vector-extract google/gemma-3-4b-it -o vectors/ --resume
-
-# Capture L25 residuals for seed entities (forward passes)
-larql residuals capture google/gemma-3-4b-it \
-    --entities "France,Germany,Japan,Mozart,Einstein" \
-    --layer 25 -o residuals.vectors.ndjson
-
-# Load into SurrealDB
-larql vector-load vectors/ --ns larql --db gemma3_4b
-
-# Query the graph
-larql query --graph knowledge.larql.json France
-larql stats knowledge.larql.json
+# Or execute a single statement
+larql lql 'USE "gemma3-4b.vindex"; DESCRIBE "France";'
 ```
+
+## What is a Vindex?
+
+A vindex is a directory containing a model's weights reorganised for queryability. Gate vectors become a KNN index. Embeddings become token lookups. Down projections become edge labels. The model IS the database.
+
+```
+gemma3-4b.vindex/
+  gate_vectors.bin         # W_gate rows (KNN index, 3.3 GB)
+  embeddings.bin           # W_embed matrix (token lookup, 2.5 GB)
+  down_meta.bin            # Per-feature output metadata
+  index.json               # Config, layer bands, provenance
+  tokenizer.json           # Tokenizer
+  relation_clusters.json   # Discovered relation types
+  feature_labels.json      # Probe-confirmed labels
+```
+
+Three extraction levels:
+
+| Level | Command | Size (f16) | Enables |
+|-------|---------|-----------|---------|
+| Browse | `EXTRACT MODEL ... INTO ...` | ~3 GB | DESCRIBE, WALK, SELECT |
+| Inference | `... WITH INFERENCE` | ~6 GB | + INFER |
+| All | `... WITH ALL` | ~10 GB | + COMPILE |
 
 ## Architecture
 
-Six crates. Six concerns. Clean boundaries.
+Seven crates. Clean dependency chain.
 
 ```
-larql-models      what the model IS     (config, traits, tensor keys)
-larql-core        what the model KNOWS  (graph engine, edges, queries)
-larql-inference   what the model DOES   (forward pass, extraction, capture)
-larql-surreal     where you EXPLORE     (SurrealDB loading, schemas, queries)
-larql-cli         how you USE it        (commands, flags, formatting)
+larql-models      Model config, architecture traits, tensor keys
+    ↓
+larql-vindex      Vindex format, KNN index, load/save/mutate, patches
+    ↓
+larql-core        Graph algorithms, merge, diff
+larql-inference   Forward pass, attention, FFN, build pipeline
+    ↓
+larql-lql         LQL parser, executor, REPL
+    ↓
+larql-cli         CLI commands
 ```
 
-Dependency flow is one direction, no cycles:
+### larql-vindex
 
-```
-larql-models      <- serde, serde_json (zero compute deps)
-     ^        ^
-larql-core    larql-surreal     <- independent, both depend on models
-     ^            ^
-larql-inference   |             <- depends on models + core + ndarray + blas
-     ^            |
-larql-cli --------+             <- depends on all
-```
-
-### larql-models
-
-Pure configuration. Model architecture trait, config.json parsing, tensor key mappings. Auto-detects Gemma 3, Llama, or falls back to generic. Zero compute dependencies.
+Owns the vindex format. KNN via BLAS matmul. Load, save, mutate, patch overlay.
 
 ```rust
-let arch = larql_models::detect_architecture(model_dir)?;
-println!("{}", arch.family());           // "gemma3"
-println!("{}", arch.norm_weight_offset()); // 1.0 (Gemma), 0.0 (Llama)
-println!("{}", arch.embed_scale());        // sqrt(hidden_size) for Gemma
-println!("{}", arch.attn_q_key(5));        // "layers.5.self_attn.q_proj.weight"
+let index = VectorIndex::load_vindex(&path, &mut cb)?;
+let hits = index.gate_knn(layer, &query, 10);  // 0.008ms/layer
+let trace = index.walk(&query, &layers, 10);   // multi-layer scan
+index.set_feature_meta(layer, feature, meta);   // mutation
+index.save_down_meta(&dir)?;                    // persist
 ```
 
-### larql-core
+### larql-lql
 
-Graph engine. Indexed adjacency structure with select, walk, search, subgraph, shortest path, PageRank, BFS/DFS traversal, merge, diff. JSON and MessagePack serialization.
+LQL parser and executor. 20+ statement types across 5 categories:
 
-```rust
-let mut graph = Graph::new();
-graph.add_edge(Edge::new("France", "capital-of", "Paris").with_confidence(0.99));
-let results = graph.select("France", Some("capital-of")); // -> [Paris edge]
-let (cost, path) = shortest_path(&graph, "France", "Europe").unwrap();
+- **Lifecycle**: EXTRACT, COMPILE, DIFF, USE
+- **Browse**: WALK, DESCRIBE, SELECT, EXPLAIN WALK
+- **Inference**: INFER, EXPLAIN INFER
+- **Mutation**: INSERT, DELETE, UPDATE, MERGE
+- **Patches**: BEGIN PATCH, SAVE PATCH, APPLY PATCH, SHOW PATCHES, REMOVE PATCH
+- **Introspection**: SHOW RELATIONS/LAYERS/FEATURES/MODELS/PATCHES, STATS
+
+## LQL Reference
+
+See [docs/lql-spec.md](docs/lql-spec.md) for the full language specification and [docs/lql-guide.md](docs/lql-guide.md) for a quick start guide.
+
+### Key Statements
+
+```sql
+-- Decompile a model
+EXTRACT MODEL "google/gemma-3-4b-it" INTO "gemma3-4b.vindex" WITH ALL;
+
+-- Browse knowledge (no GPU needed)
+USE "gemma3-4b.vindex";
+DESCRIBE "France";
+DESCRIBE "Einstein" ALL LAYERS VERBOSE;
+WALK "The capital of France is" TOP 10;
+
+-- Run inference (needs model weights in vindex)
+INFER "The capital of France is" TOP 5 COMPARE;
+
+-- Edit knowledge
+INSERT INTO EDGES (entity, relation, target)
+    VALUES ("John Coyle", "lives-in", "Colchester");
+
+-- Patches (lightweight, shareable knowledge diffs)
+BEGIN PATCH "medical.vlp";
+INSERT INTO EDGES (entity, relation, target)
+    VALUES ("aspirin", "treats", "headache");
+SAVE PATCH;
+APPLY PATCH "medical.vlp";
+
+-- Recompile to standard model format
+COMPILE CURRENT INTO MODEL "edited/" FORMAT safetensors;
 ```
 
-### larql-inference
+## Patches
 
-Transformer inference engine. Loads safetensors weights, runs BLAS-accelerated forward passes. Also owns weight walking (edge extraction), attention walking (OV circuits), vector extraction, and residual capture.
+Patches are lightweight JSON files (.vlp) that capture INSERT/DELETE/UPDATE operations. They overlay an immutable base vindex without modifying it.
 
-```rust
-let model = InferenceModel::load("google/gemma-3-4b-it")?;
-let result = predict(model.weights(), model.tokenizer(), &token_ids, 10);
-// result.predictions[0] = ("Paris", 0.9967)
+```sql
+-- Create a patch
+BEGIN PATCH "medical-knowledge.vlp";
+INSERT INTO EDGES (entity, relation, target)
+    VALUES ("aspirin", "side_effect", "bleeding");
+SAVE PATCH;
+
+-- Apply patches (stackable, reversible)
+APPLY PATCH "medical-knowledge.vlp";
+APPLY PATCH "fix-hallucinations.vlp";
+SHOW PATCHES;
+REMOVE PATCH "fix-hallucinations.vlp";
+
+-- Extract diff between two vindexes as a patch
+DIFF "base.vindex" "edited.vindex" INTO PATCH "changes.vlp";
 ```
 
-### larql-surreal
+A single fact is ~10 KB. A 1,000-fact domain patch is ~10 MB. Compared to the full model at 8 GB, that's 1/800th the size. No fine-tuning, no GPU, no retraining.
 
-SurrealDB integration. Reads NDJSON vector files, generates schema DDL with HNSW indexes, produces INSERT SQL, tracks load progress. No compute dependencies — just file I/O and string generation.
+## Model Support
 
-### larql-cli
+| Family | Models | FFN Type |
+|--------|--------|----------|
+| Gemma | Gemma 2/3 (2B-27B) | Gated (GeGLU) |
+| Llama | Llama 2/3 (7B-405B) | Gated (SiLU) |
+| Mistral | Mistral 7B | Gated (SiLU) |
+| Mixtral | Mixtral 8x7B, 8x22B | MoE (8 experts) |
+| Qwen | Qwen 2/2.5 (0.5B-72B) | Gated (SiLU) |
+| Phi | Phi 2/3 (2.7B-14B) | Gated |
+| DeepSeek | DeepSeek V2/V3 | MoE (shared + routed) |
+| GPT-2 | GPT-2 (117M-1.5B) | Dense (GELU) |
 
-CLI binary connecting all crates. 21 commands.
-
-## Documentation
-
-| Doc | Description |
-|---|---|
-| [docs/cli.md](docs/cli.md) | Full CLI reference — all commands, flags, examples |
-| [docs/format.md](docs/format.md) | Graph file format specification — JSON and MessagePack |
-| [docs/weight-extraction.md](docs/weight-extraction.md) | Weight extraction pipeline — weights to vectors to SurrealDB to graph |
-| [docs/confidence.md](docs/confidence.md) | Confidence and selectivity scoring |
-| [docs/circuit-types.md](docs/circuit-types.md) | Circuit type analysis — layer architecture from gate-down cosines |
-| [docs/validation.md](docs/validation.md) | Graph validation — extraction faithfulness, dark space analysis |
-| [docs/findings.md](docs/findings.md) | Research findings — circuit types, cross-lingual knowledge, attention routing |
-
-## The extraction pipeline
-
-```
-weight-extract        -> lexical edges (8.2M, zero forward passes)
-vector-extract     -> weight vectors to NDJSON (for SurrealDB)
-vector-load        -> vectors into SurrealDB with HNSW indexes
-residuals capture  -> L25 residuals for seed entities (targeted forward passes)
-                     |
-              SurrealDB workshop: format-adjusted queries discover factual edges
-                     |
-bfs                -> validate top candidates with forward passes
-                     |
-              merge -> knowledge.larql.json -> Rust runtime (edges only, no vectors)
-```
-
-The vectors are the microscope. The edges are the photograph. You ship the photograph.
-
-## Extraction commands
-
-### Weight walking
-
-Reads safetensors directly. Zero forward passes. BLAS-accelerated.
-
-```bash
-larql weight-extract google/gemma-3-4b-it -o knowledge.larql.json
-larql weight-extract google/gemma-3-4b-it --layer 26 -o L26.larql.json --stats stats.json
-```
-
-### Attention walking
-
-Extracts routing edges from attention OV circuits.
-
-```bash
-larql attention-extract google/gemma-3-4b-it -o attention.larql.json
-```
-
-### Inference
-
-Full forward pass from extracted safetensors weights. BLAS-accelerated. No MLX, no PyTorch.
-
-```bash
-larql predict google/gemma-3-4b-it --prompt "The capital of France is" -k 10
-# 1. Paris (99.67%)
-```
-
-### Vector extraction
-
-Extracts full weight vectors to NDJSON for SurrealDB ingestion.
-
-```bash
-# All implemented components
-larql vector-extract google/gemma-3-4b-it -o vectors/ \
-    --components ffn_down,ffn_gate,ffn_up,attn_ov,attn_qk,embeddings --resume
-
-# Just factual layers
-larql vector-extract google/gemma-3-4b-it -o vectors/ \
-    --components ffn_down,ffn_gate --layers 25,26,27,28,29,30,31,32,33
-```
-
-| Component | What it stores | Dim | Per layer |
-|---|---|---|---|
-| `ffn_down` | Down projection column (output direction) | hidden | intermediate_size |
-| `ffn_gate` | Gate projection row (input selectivity) | hidden | intermediate_size |
-| `ffn_up` | Up projection row | hidden | intermediate_size |
-| `attn_ov` | Mean OV circuit output direction | hidden | num_kv_heads |
-| `attn_qk` | Q/K head projections | head_dim x hidden | num_q + num_kv |
-| `embeddings` | Token embedding rows | hidden | vocab_size |
-
-### Residual capture
-
-Runs forward passes for seed entities and captures the hidden state at specified layers.
-
-```bash
-larql residuals capture google/gemma-3-4b-it \
-    --entities "France,Germany,Japan,Mozart,Einstein" \
-    --layer 25 -o residuals.vectors.ndjson
-
-# Multiple layers
-larql residuals capture google/gemma-3-4b-it \
-    --entities entities.txt --layer 25 --layer 26 --layer 29 \
-    -o residuals.vectors.ndjson
-```
-
-### SurrealDB loading
-
-```bash
-larql vector-load vectors/ --ns larql --db gemma3_4b
-larql vector-load vectors/ --ns larql --db gemma3_4b --schema-only
-```
-
-### BFS probing
-
-```bash
-larql bfs --seeds "France,Germany" --templates templates.json \
-    --endpoint http://localhost:11434/v1 --model gemma3:4b-it \
-    -o knowledge.larql.json
-```
-
-## Query commands
-
-```bash
-larql query --graph knowledge.larql.json France capital-of
-larql describe --graph knowledge.larql.json France
-larql stats knowledge.larql.json
-larql validate knowledge.larql.json
-larql merge graph1.larql.json graph2.larql.json -o merged.larql.json
-```
-
-See [docs/cli.md](docs/cli.md) for full reference.
-
-## Workspace structure
-
-```
-chuk-larql-rs/
-├── crates/
-│   ├── larql-models/     Model config — architecture traits, tensor keys, detection
-│   ├── larql-core/       Graph engine — edges, queries, algorithms, serialization
-│   ├── larql-inference/  Inference — forward pass, extraction, walkers, capture
-│   ├── larql-surreal/    SurrealDB — vector loading, schemas, SQL generation
-│   ├── larql-cli/        CLI binary — 21 commands over all crates
-│   └── larql-python/     PyO3 binding — native Python extension
-├── docs/
-│   ├── cli.md            CLI reference
-│   ├── format.md         Graph format specification
-│   ├── confidence.md     Confidence and selectivity scoring
-│   ├── weight-extraction.md  Full pipeline documentation
-│   ├── circuit-types.md  Circuit type analysis
-│   ├── validation.md     Extraction faithfulness
-│   └── findings.md       Research findings
-├── scripts/              Python analysis scripts
-├── surql/                SurrealDB query templates
-├── Makefile
-└── README.md
-```
-
-## Python integration
-
-The `chuk-larql` Python package uses this Rust engine as its native backend.
-
-```python
-from chuk_larql import Graph, Edge
-from _larql_core import weight_walk, attention_walk, load, save
-
-g = weight_walk("google/gemma-3-4b-it")
-save(g, "knowledge.larql.json")
-```
-
-## Building
-
-```bash
-make build          # debug build (all crates)
-make release        # optimized CLI binary
-make test           # run all 191 tests
-make lint           # clippy (zero warnings)
-make ci             # fmt-check + lint + test
-make demos          # run all example demos
-make bench          # graph engine + SQL generation benchmarks
-make bench-all      # all benchmarks including inference (needs model)
-make python-build   # build Python extension (requires virtualenv)
-```
+MoE models store all experts' features in one flat index. Gate KNN naturally selects features across experts — no router needed for browse operations.
 
 ## Benchmarks
 
-### Graph engine (100K edges)
+### Vindex Operations
 
 | Operation | Latency |
 |---|---|
-| Insert edge | 1.3 us |
-| select() | 0.2 us |
-| exists() | 0.1 us |
-| shortest_path (1K nodes) | 14 us |
-| PageRank (1K nodes) | 13 ms |
-| JSON serialize 100K edges | 141 ms (9.9 MB) |
-| MsgPack serialize | 132 ms (4.7 MB, 53% smaller) |
+| Gate KNN (per layer) | 0.008ms |
+| Walk (34 layers) | 0.3ms |
+| Feature lookup | <1ns |
+| Save gates (8 MB) | 1.1ms |
+| Load vindex | 8ms |
+| Mutate (meta + gate) | 617ns |
 
 ### Inference (Gemma 3 4B, Apple Silicon)
 
 | Operation | Latency |
 |---|---|
-| RMS norm | 13 us |
-| RoPE | 22 us |
-| GQA attention | 73 us |
-| FFN forward | 6 ms |
-| Full predict (6 tokens, 34 layers) | 788 ms |
-| Throughput | 1.3 queries/sec |
+| Walk prediction (no attention) | 33ms |
+| INFER prediction (with attention) | ~11s |
+| DESCRIBE (knowledge browse) | 33ms |
 
-### SQL generation
+## Documentation
 
-| Operation | Throughput |
+| Doc | Description |
 |---|---|
-| Single insert (dim=2560) | 7.7K/sec |
-| SQL output | 395 MB/sec |
+| [docs/lql-spec.md](docs/lql-spec.md) | LQL language specification (v0.3) |
+| [docs/vindex-spec.md](docs/vindex-spec.md) | Vindex format specification (v0.2) |
+| [docs/lql-guide.md](docs/lql-guide.md) | LQL quick start guide |
+| [docs/cli.md](docs/cli.md) | CLI reference |
+| [docs/knowledge-pipeline.md](docs/knowledge-pipeline.md) | Knowledge labelling pipeline |
 
-## Status
+## Building & Testing
 
-### What's working
-
-- **Weight walker** — 8.2M edges from Gemma 3-4B in 40 minutes. Confidence + selectivity scoring. Per-layer stats.
-- **Attention walker** — OV circuit extraction with same scoring. 10,919 edges from 136 heads.
-- **Inference engine** — Full Rust forward pass from safetensors. BLAS-accelerated. 14/14 correct on capital-of test set. No MLX, no PyTorch.
-- **Model architecture** — Auto-detection from config.json. Gemma 3 (norm offset, embed scaling, QK norm, sliding window) and generic/Llama support.
-- **Vector extractor** — all 6 components: ffn_down, ffn_gate, ffn_up, attn_ov, attn_qk, embeddings.
-- **Residual capture** — forward pass through transformer layers, captures hidden state at any layer.
-- **SurrealDB loader** — NDJSON to SurrealDB with HNSW indexes, batch insert, resume, schema-only mode.
-- **Core graph engine** — full indexed graph with select, walk, search, subgraph, merge, shortest path, PageRank, BFS/DFS, diff.
-- **BFS extraction** — template-based probing with multi-token chaining.
-- **Serialization** — JSON and MessagePack with format auto-detection.
-- **CLI** — 21 commands: weight-extract, attention-extract, vector-extract, residuals, predict, index-gates, extract-routes, walk, attention-capture, qk-templates, ov-gate, extract-index, bfs, vector-load, vector-import, vector-export-surql, query, describe, stats, validate, merge.
-- **PyO3 binding** — full Python API parity.
-- **Tests** — 191 Rust tests across 6 crates. Zero clippy warnings.
-- **Benchmarks** — component-level and end-to-end for graph engine, inference, and SQL generation.
-- **Examples** — 10 runnable examples across 4 crates demonstrating all functionality.
-
-### What's next
-
-- CI / GitHub Actions
-- Hybrid inference: swap FFN layers for graph lookups (attention from weights, knowledge from graph)
-- `FfnBackend` trait: `WeightFfn`, `GraphFfn`, `SurrealFfn` — same interface, three backends
-- Layer-by-layer comparison: `--ffn weights:0-25,graph:26-33`
-- Additional model architectures: Llama, DeepSeek
-- `larql filter` command (post-extraction confidence/selectivity filtering)
-- `larql merge` improvements (max_confidence strategy at scale)
-- Packed binary edge format for runtime graphs
+```bash
+cargo build --release       # optimized build
+cargo test                  # 523 tests across all crates
+cargo run -p larql-vindex --example vindex_demo    # vindex feature demo
+cargo run -p larql-vindex --example vindex_bench --release  # benchmarks
+cargo run -p larql-lql --example parser_demo       # parser demo
+cargo run -p larql-lql --example lql_demo          # LQL spec compliance
+```
 
 ## License
 

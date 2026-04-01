@@ -138,6 +138,19 @@ fn main() {
     demo("SHOW MODELS", "SHOW MODELS;");
     demo("STATS", "STATS;");
 
+    // ── Patches ──
+    section("Patches");
+
+    demo("BEGIN PATCH", r#"BEGIN PATCH "medical-knowledge.vlp";"#);
+    demo("SAVE PATCH", "SAVE PATCH;");
+    demo("APPLY PATCH", r#"APPLY PATCH "medical-knowledge.vlp";"#);
+    demo("SHOW PATCHES", "SHOW PATCHES;");
+    demo("REMOVE PATCH", r#"REMOVE PATCH "medical-knowledge.vlp";"#);
+    demo(
+        "DIFF INTO PATCH",
+        r#"DIFF "a.vindex" "b.vindex" INTO PATCH "changes.vlp";"#,
+    );
+
     // ── Pipe Operator ──
     section("Pipe Operator");
 
@@ -167,8 +180,15 @@ fn main() {
         r#"DESCRIBE "John Coyle";"#,
         r#"INSERT INTO EDGES (entity, relation, target) VALUES ("John Coyle", "lives-in", "Colchester");"#,
         r#"DESCRIBE "John Coyle";"#,
-        // ACT 5: RECOMPILE
+        // ACT 5: PATCH
+        r#"BEGIN PATCH "medical.vlp";"#,
+        r#"INSERT INTO EDGES (entity, relation, target) VALUES ("aspirin", "treats", "headache");"#,
+        "SAVE PATCH;",
+        r#"APPLY PATCH "medical.vlp";"#,
+        "SHOW PATCHES;",
+        // ACT 6: RECOMPILE
         r#"DIFF "gemma3-4b.vindex" CURRENT;"#,
+        r#"DIFF "gemma3-4b.vindex" CURRENT INTO PATCH "changes.vlp";"#,
         r#"COMPILE CURRENT INTO MODEL "gemma3-4b-edited/" FORMAT safetensors;"#,
     ];
 

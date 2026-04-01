@@ -1,6 +1,4 @@
 /// LQL Executor — dispatches parsed AST statements to backend operations.
-///
-/// Manages session state (active vindex/model) and formats output.
 
 mod helpers;
 mod introspection;
@@ -19,30 +17,39 @@ use crate::relations::RelationClassifier;
 
 /// The active backend for the session.
 pub(crate) enum Backend {
-    /// Pre-extracted vindex — fast, supports mutation.
     Vindex {
         path: PathBuf,
         config: larql_vindex::VindexConfig,
         index: larql_vindex::VectorIndex,
         relation_classifier: Option<RelationClassifier>,
     },
-    /// No backend loaded.
     None,
 }
 
 /// Session state for the REPL / batch executor.
 pub struct Session {
     pub(crate) backend: Backend,
+    /// Active patch session: captures operations for SAVE PATCH.
+    pub(crate) patch_recording: Option<PatchRecording>,
+    /// Applied patch stack.
+    pub(crate) patch_stack: Vec<(String, larql_vindex::VindexPatch)>,
+}
+
+/// Active patch recording session (between BEGIN PATCH and SAVE PATCH).
+pub(crate) struct PatchRecording {
+    pub path: String,
+    pub operations: Vec<larql_vindex::PatchOp>,
 }
 
 impl Session {
     pub fn new() -> Self {
         Self {
             backend: Backend::None,
+            patch_recording: None,
+            patch_stack: Vec::new(),
         }
     }
 
-    /// Execute a single LQL statement, returning formatted output lines.
     pub fn execute(&mut self, stmt: &Statement) -> Result<Vec<String>, LqlError> {
         match stmt {
             Statement::Pipe { left, right } => {
@@ -81,8 +88,8 @@ impl Session {
             Statement::Compile { vindex, output, format } => {
                 self.exec_compile(vindex, output, *format)
             }
-            Statement::Diff { a, b, layer, relation, limit } => {
-                self.exec_diff(a, b, *layer, relation.as_deref(), *limit)
+            Statement::Diff { a, b, layer, relation, limit, into_patch } => {
+                self.exec_diff(a, b, *layer, relation.as_deref(), *limit, into_patch.as_deref())
             }
             Statement::Insert { entity, relation, target, layer, confidence } => {
                 self.exec_insert(entity, relation, target, *layer, *confidence)
@@ -95,6 +102,137 @@ impl Session {
             Statement::Merge { source, target, conflict } => {
                 self.exec_merge(source, target.as_deref(), *conflict)
             }
+            // ── Patch commands ──
+            Statement::BeginPatch { path } => self.exec_begin_patch(path),
+            Statement::SavePatch => self.exec_save_patch(),
+            Statement::ApplyPatch { path } => self.exec_apply_patch(path),
+            Statement::ShowPatches => self.exec_show_patches(),
+            Statement::RemovePatch { path } => self.exec_remove_patch(path),
+        }
+    }
+
+    // ── Patch execution ──
+
+    fn exec_begin_patch(&mut self, path: &str) -> Result<Vec<String>, LqlError> {
+        if self.patch_recording.is_some() {
+            return Err(LqlError::Execution(
+                "patch session already active. Run SAVE PATCH or discard first.".into(),
+            ));
+        }
+        self.patch_recording = Some(PatchRecording {
+            path: path.to_string(),
+            operations: Vec::new(),
+        });
+        Ok(vec![format!("Patch session started: {path}")])
+    }
+
+    fn exec_save_patch(&mut self) -> Result<Vec<String>, LqlError> {
+        let recording = self.patch_recording.take().ok_or_else(|| {
+            LqlError::Execution("no active patch session. Run BEGIN PATCH first.".into())
+        })?;
+
+        let model_name = match &self.backend {
+            Backend::Vindex { config, .. } => config.model.clone(),
+            Backend::None => "unknown".into(),
+        };
+
+        let patch = larql_vindex::VindexPatch {
+            version: 1,
+            base_model: model_name,
+            base_checksum: None,
+            created_at: String::new(), // TODO: timestamp
+            description: None,
+            author: None,
+            tags: vec![],
+            operations: recording.operations,
+        };
+
+        let (ins, upd, del) = patch.counts();
+        let path = PathBuf::from(&recording.path);
+        patch.save(&path)
+            .map_err(|e| LqlError::Execution(format!("failed to save patch: {e}")))?;
+
+        Ok(vec![format!(
+            "Saved: {} ({} inserts, {} updates, {} deletes)",
+            recording.path, ins, upd, del,
+        )])
+    }
+
+    fn exec_apply_patch(&mut self, path: &str) -> Result<Vec<String>, LqlError> {
+        let patch_path = PathBuf::from(path);
+        if !patch_path.exists() {
+            return Err(LqlError::Execution(format!("patch not found: {path}")));
+        }
+
+        let patch = larql_vindex::VindexPatch::load(&patch_path)
+            .map_err(|e| LqlError::Execution(format!("failed to load patch: {e}")))?;
+
+        let (ins, upd, del) = patch.counts();
+        let total = patch.len();
+
+        // Apply operations to the vindex
+        let (_path, _config, index) = self.require_vindex_mut()?;
+        for op in &patch.operations {
+            match op {
+                larql_vindex::PatchOp::Insert { layer, feature, target, confidence, .. } => {
+                    let meta = larql_vindex::FeatureMeta {
+                        top_token: target.clone(),
+                        top_token_id: 0,
+                        c_score: confidence.unwrap_or(0.9),
+                        top_k: vec![],
+                    };
+                    index.set_feature_meta(*layer, *feature, meta);
+                }
+                larql_vindex::PatchOp::Update { layer, feature, down_meta, .. } => {
+                    if let Some(dm) = down_meta {
+                        let meta = larql_vindex::FeatureMeta {
+                            top_token: dm.top_token.clone(),
+                            top_token_id: dm.top_token_id,
+                            c_score: dm.c_score,
+                            top_k: vec![],
+                        };
+                        index.set_feature_meta(*layer, *feature, meta);
+                    }
+                }
+                larql_vindex::PatchOp::Delete { layer, feature, .. } => {
+                    index.delete_feature_meta(*layer, *feature);
+                }
+            }
+        }
+
+        self.patch_stack.push((path.to_string(), patch));
+
+        Ok(vec![format!(
+            "Applied: {path} ({total} operations: {ins} inserts, {upd} updates, {del} deletes)"
+        )])
+    }
+
+    fn exec_show_patches(&self) -> Result<Vec<String>, LqlError> {
+        let mut out = Vec::new();
+        if self.patch_stack.is_empty() {
+            out.push("  (no patches applied)".into());
+        } else {
+            for (i, (path, patch)) in self.patch_stack.iter().enumerate() {
+                let (ins, upd, del) = patch.counts();
+                out.push(format!(
+                    "  {}. {:<40} {} ops ({} ins, {} upd, {} del)",
+                    i + 1, path, patch.len(), ins, upd, del,
+                ));
+            }
+            let total: usize = self.patch_stack.iter().map(|(_, p)| p.len()).sum();
+            out.push(format!("  Total: {} operations", total));
+        }
+        Ok(out)
+    }
+
+    fn exec_remove_patch(&mut self, path: &str) -> Result<Vec<String>, LqlError> {
+        let pos = self.patch_stack.iter().position(|(p, _)| p == path);
+        match pos {
+            Some(i) => {
+                let (removed_path, _) = self.patch_stack.remove(i);
+                Ok(vec![format!("Removed: {removed_path}")])
+            }
+            None => Err(LqlError::Execution(format!("patch not found in stack: {path}"))),
         }
     }
 
@@ -105,12 +243,7 @@ impl Session {
     ) -> Result<(&Path, &larql_vindex::VindexConfig, &larql_vindex::VectorIndex), LqlError>
     {
         match &self.backend {
-            Backend::Vindex {
-                path,
-                config,
-                index,
-                ..
-            } => Ok((path, config, index)),
+            Backend::Vindex { path, config, index, .. } => Ok((path, config, index)),
             Backend::None => Err(LqlError::NoBackend),
         }
     }

@@ -90,12 +90,19 @@ impl Parser {
                     self.advance();
                     limit = Some(self.expect_u32()?);
                 }
+                crate::lexer::Token::Keyword(Keyword::Into) => {
+                    self.advance();
+                    self.expect_keyword(Keyword::Patch)?;
+                    let path = self.expect_string()?;
+                    self.eat_semicolon();
+                    return Ok(Statement::Diff { a, b, layer, relation, limit, into_patch: Some(path) });
+                }
                 _ => break,
             }
         }
 
         self.eat_semicolon();
-        Ok(Statement::Diff { a, b, layer, relation, limit })
+        Ok(Statement::Diff { a, b, layer, relation, limit, into_patch: None })
     }
 
     pub(crate) fn parse_use(&mut self) -> Result<Statement, ParseError> {

@@ -160,6 +160,12 @@ SHOW MODELS;
         ("DELETE", r#"DELETE FROM EDGES WHERE entity = "x" AND layer = 26;"#),
         ("UPDATE", r#"UPDATE EDGES SET target = "y", confidence = 0.9 WHERE entity = "x";"#),
         ("MERGE", r#"MERGE "src.vindex" INTO "dst.vindex" ON CONFLICT HIGHEST_CONFIDENCE;"#),
+        // Patches
+        ("BEGIN PATCH", r#"BEGIN PATCH "test.vlp";"#),
+        ("SAVE PATCH", "SAVE PATCH;"),
+        ("APPLY PATCH", r#"APPLY PATCH "test.vlp";"#),
+        ("SHOW PATCHES", "SHOW PATCHES;"),
+        ("REMOVE PATCH", r#"REMOVE PATCH "test.vlp";"#),
         // Introspection
         ("SHOW RELATIONS", "SHOW RELATIONS AT LAYER 26 WITH EXAMPLES;"),
         ("SHOW LAYERS", "SHOW LAYERS RANGE 0-10;"),

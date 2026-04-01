@@ -377,6 +377,7 @@ impl Session {
         layer_filter: Option<u32>,
         _relation: Option<&str>,
         limit: Option<u32>,
+        into_patch: Option<&str>,
     ) -> Result<Vec<String>, LqlError> {
         let path_a = self.resolve_vindex_ref(a)?;
         let path_b = self.resolve_vindex_ref(b)?;
@@ -461,6 +462,90 @@ impl Session {
             out.push("  (no differences found)".into());
         } else {
             out.push(format!("\n{} differences shown (limit {})", diff_count, limit));
+        }
+
+        // If INTO PATCH specified, extract diff as a .vlp file
+        if let Some(patch_path) = into_patch {
+            let mut operations = Vec::new();
+
+            // Re-scan without limit for the full diff
+            for layer in &layers_a {
+                if let Some(l) = layer_filter {
+                    if *layer != l as usize { continue; }
+                }
+                let metas_a = index_a.down_meta_at(*layer);
+                let metas_b = index_b.down_meta_at(*layer);
+                let len_a = metas_a.map(|m| m.len()).unwrap_or(0);
+                let len_b = metas_b.map(|m| m.len()).unwrap_or(0);
+
+                for feat in 0..len_a.max(len_b) {
+                    let ma = metas_a.and_then(|m| m.get(feat)).and_then(|m| m.as_ref());
+                    let mb = metas_b.and_then(|m| m.get(feat)).and_then(|m| m.as_ref());
+
+                    match (ma, mb) {
+                        (Some(_a), Some(b)) if _a.top_token != b.top_token || (_a.c_score - b.c_score).abs() > 0.01 => {
+                            operations.push(larql_vindex::PatchOp::Update {
+                                layer: *layer,
+                                feature: feat,
+                                gate_vector_b64: None,
+                                down_meta: Some(larql_vindex::patch::PatchDownMeta {
+                                    top_token: b.top_token.clone(),
+                                    top_token_id: b.top_token_id,
+                                    c_score: b.c_score,
+                                }),
+                            });
+                        }
+                        (Some(_), None) => {
+                            operations.push(larql_vindex::PatchOp::Delete {
+                                layer: *layer,
+                                feature: feat,
+                                reason: Some("removed in target".into()),
+                            });
+                        }
+                        (None, Some(b)) => {
+                            operations.push(larql_vindex::PatchOp::Insert {
+                                layer: *layer,
+                                feature: feat,
+                                relation: None,
+                                entity: String::new(),
+                                target: b.top_token.clone(),
+                                confidence: Some(b.c_score),
+                                gate_vector_b64: None,
+                                down_meta: Some(larql_vindex::patch::PatchDownMeta {
+                                    top_token: b.top_token.clone(),
+                                    top_token_id: b.top_token_id,
+                                    c_score: b.c_score,
+                                }),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            let model_name = match &self.backend {
+                Backend::Vindex { config, .. } => config.model.clone(),
+                Backend::None => "unknown".into(),
+            };
+
+            let patch = larql_vindex::VindexPatch {
+                version: 1,
+                base_model: model_name,
+                base_checksum: None,
+                created_at: String::new(),
+                description: Some(format!("Diff: {} vs {}", path_a.display(), path_b.display())),
+                author: None,
+                tags: vec![],
+                operations,
+            };
+
+            let (ins, upd, del) = patch.counts();
+            patch.save(std::path::Path::new(patch_path))
+                .map_err(|e| LqlError::Execution(format!("failed to save patch: {e}")))?;
+            out.push(format!(
+                "Extracted: {} ({} ops: {} inserts, {} updates, {} deletes)",
+                patch_path, patch.len(), ins, upd, del,
+            ));
         }
 
         Ok(out)

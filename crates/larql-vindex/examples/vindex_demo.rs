@@ -153,6 +153,86 @@ fn main() {
     let m = loaded.feature_meta(0, hits[0].0).unwrap();
     println!("  KNN [1,0,0,0]:  F{} → {} (round-trip OK)", hits[0].0, m.top_token);
 
+    // ── 9. Patches ──
+    section("Patches (create, apply, query, revert)");
+
+    // Create a patch
+    let patch = larql_vindex::VindexPatch {
+        version: 1,
+        base_model: "demo-model".into(),
+        base_checksum: None,
+        created_at: "2026-04-01T12:00:00Z".into(),
+        description: Some("Add Colchester, delete Tokyo".into()),
+        author: Some("demo".into()),
+        tags: vec!["test".into()],
+        operations: vec![
+            larql_vindex::PatchOp::Insert {
+                layer: 0,
+                feature: 4,
+                relation: Some("lives-in".into()),
+                entity: "John Coyle".into(),
+                target: "Colchester".into(),
+                confidence: Some(0.85),
+                gate_vector_b64: Some(larql_vindex::patch::encode_gate_vector(&[0.0, 0.0, 0.0, 10.0])),
+                down_meta: Some(larql_vindex::patch::PatchDownMeta {
+                    top_token: "Colchester".into(),
+                    top_token_id: 200,
+                    c_score: 4.2,
+                }),
+            },
+            larql_vindex::PatchOp::Delete {
+                layer: 0,
+                feature: 2,
+                reason: Some("incorrect fact".into()),
+            },
+        ],
+    };
+
+    // Save to .vlp
+    let vlp_path = dir.join("demo.vlp");
+    patch.save(&vlp_path).unwrap();
+    let vlp_size = std::fs::metadata(&vlp_path).unwrap().len();
+    let (ins, _upd, del) = patch.counts();
+    println!("  Created: demo.vlp ({} bytes, {} insert, {} delete)", vlp_size, ins, del);
+
+    // Load it back
+    let loaded_patch = larql_vindex::VindexPatch::load(&vlp_path).unwrap();
+    println!("  Loaded:  {} ops, base_model={}", loaded_patch.len(), loaded_patch.base_model);
+
+    // Apply to a PatchedVindex
+    let base = build_demo_index();
+    let mut patched = larql_vindex::PatchedVindex::new(base);
+
+    println!("  Before patch:");
+    println!("    F0 = {}", patched.feature_meta(0, 0).map(|m| m.top_token.as_str()).unwrap_or("(none)"));
+    println!("    F2 = {}", patched.feature_meta(0, 2).map(|m| m.top_token.as_str()).unwrap_or("(none)"));
+    println!("    F4 = {}", patched.feature_meta(0, 4).map(|m| m.top_token.as_str()).unwrap_or("(none)"));
+
+    patched.apply_patch(loaded_patch);
+
+    println!("  After patch ({} patches, {} overrides):", patched.num_patches(), patched.num_overrides());
+    println!("    F0 = {}", patched.feature_meta(0, 0).map(|m| m.top_token.as_str()).unwrap_or("(none)"));
+    println!("    F2 = {}", patched.feature_meta(0, 2).map(|m| m.top_token.as_str()).unwrap_or("(none)"));
+    println!("    F4 = {}", patched.feature_meta(0, 4).map(|m| m.top_token.as_str()).unwrap_or("(none)"));
+
+    // KNN should now find the patched feature
+    let q = Array1::from_vec(vec![0.0, 0.0, 0.0, 1.0]);
+    let hits = patched.gate_knn(0, &q, 1);
+    println!("  KNN [0,0,0,1] → F{}: {}",
+        hits[0].0,
+        patched.feature_meta(0, hits[0].0).map(|m| m.top_token.as_str()).unwrap_or("?"));
+
+    // Bake down to clean index
+    let baked = patched.bake_down();
+    println!("  Baked down: {} features, {} with meta",
+        baked.total_gate_vectors(), baked.total_down_meta());
+
+    // Revert by removing patch
+    patched.remove_patch(0);
+    println!("  After revert:");
+    println!("    F2 = {} (restored)", patched.feature_meta(0, 2).map(|m| m.top_token.as_str()).unwrap_or("(none)"));
+    println!("    F4 = {} (removed)", patched.feature_meta(0, 4).map(|m| m.top_token.as_str()).unwrap_or("(none)"));
+
     let _ = std::fs::remove_dir_all(&dir);
     println!("\n=== Done ===");
 }

@@ -112,6 +112,12 @@ pub enum Keyword {
     Output,
     Weights,
     Inference,
+    Begin,
+    Save,
+    Apply,
+    Remove,
+    Patch,
+    Patches,
 }
 
 impl Keyword {
@@ -195,6 +201,12 @@ impl Keyword {
             "OUTPUT" => Some(Self::Output),
             "WEIGHTS" => Some(Self::Weights),
             "INFERENCE" => Some(Self::Inference),
+            "BEGIN" => Some(Self::Begin),
+            "SAVE" => Some(Self::Save),
+            "APPLY" => Some(Self::Apply),
+            "REMOVE" => Some(Self::Remove),
+            "PATCH" => Some(Self::Patch),
+            "PATCHES" => Some(Self::Patches),
             _ => None,
         }
     }
