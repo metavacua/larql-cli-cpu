@@ -15,12 +15,12 @@ use std::path::Path;
 use ndarray::Array2;
 use serde::{Deserialize, Serialize};
 
-use crate::error::InferenceError;
-use crate::model::ModelWeights;
+use crate::error::VindexError;
+use larql_models::ModelWeights;
 
-use super::build::IndexBuildCallbacks;
-use larql_vindex::config::{VindexConfig, VindexModelConfig};
-use larql_vindex::{IndexLoadCallbacks, load_vindex_config};
+use crate::build::IndexBuildCallbacks;
+use crate::config::{VindexConfig, VindexModelConfig};
+use crate::{IndexLoadCallbacks, load_vindex_config};
 
 #[derive(Serialize, Deserialize)]
 struct WeightEntry {
@@ -41,9 +41,14 @@ pub fn write_model_weights(
     weights: &ModelWeights,
     dir: &Path,
     callbacks: &mut dyn IndexBuildCallbacks,
-) -> Result<(), InferenceError> {
+) -> Result<(), VindexError> {
     callbacks.on_stage("model_weights");
     let start = std::time::Instant::now();
+
+    // Read dtype from config if available, default to F32
+    let dtype = crate::load_vindex_config(dir)
+        .map(|c| c.dtype)
+        .unwrap_or(crate::dtype::StorageDtype::F32);
 
     let arch = &*weights.arch;
     let num_layers = weights.num_layers;
@@ -63,7 +68,7 @@ pub fn write_model_weights(
             arch.attn_o_key(layer),
         ] {
             if let Some(tensor) = weights.tensors.get(key) {
-                let len = write_tensor(&mut attn_file, tensor)?;
+                let len = write_tensor(&mut attn_file, tensor, dtype)?;
                 entries.push(WeightEntry {
                     key: key.clone(),
                     kind: "tensor".into(),
@@ -79,76 +84,90 @@ pub fn write_model_weights(
     }
     attn_file.flush()?;
 
-    // ── FFN weights (up + down only — gate is in gate_vectors.bin) ──
-    let ffn_path = dir.join("ffn_weights.bin");
-    let mut ffn_file = BufWriter::new(std::fs::File::create(&ffn_path)?);
-    let mut ffn_offset: u64 = 0;
+    // ── W_up weights (gate is in gate_vectors.bin, not duplicated) ──
+    let up_path = dir.join("up_weights.bin");
+    let mut up_file = BufWriter::new(std::fs::File::create(&up_path)?);
+    let mut up_offset: u64 = 0;
+
+    // ── W_down weights (full vectors for COMPILE) ──
+    let down_path = dir.join("down_weights.bin");
+    let mut down_file = BufWriter::new(std::fs::File::create(&down_path)?);
+    let mut down_offset: u64 = 0;
 
     for layer in 0..num_layers {
-        callbacks.on_layer_start("ffn_weights", layer, num_layers);
+        callbacks.on_layer_start("up/down_weights", layer, num_layers);
 
         if arch.is_moe() {
-            // MoE: write per-expert up + down
             for expert in 0..arch.num_experts() {
-                for key_opt in &[
-                    arch.expert_ffn_up_key(layer, expert),
-                    arch.expert_ffn_down_key(layer, expert),
-                ] {
-                    if let Some(key) = key_opt {
-                        if let Some(tensor) = weights.tensors.get(key) {
-                            let len = write_tensor(&mut ffn_file, tensor)?;
-                            entries.push(WeightEntry {
-                                key: key.clone(),
-                                kind: "tensor".into(),
-                                shape: vec![tensor.shape()[0], tensor.shape()[1]],
-                                offset: ffn_offset,
-                                length: len,
-                                file: "ffn_weights.bin".into(),
-                            });
-                            ffn_offset += len;
-                        }
+                if let Some(key) = arch.expert_ffn_up_key(layer, expert) {
+                    if let Some(tensor) = weights.tensors.get(&key) {
+                        let len = write_tensor(&mut up_file, tensor, dtype)?;
+                        entries.push(WeightEntry {
+                            key, kind: "tensor".into(),
+                            shape: vec![tensor.shape()[0], tensor.shape()[1]],
+                            offset: up_offset, length: len,
+                            file: "up_weights.bin".into(),
+                        });
+                        up_offset += len;
+                    }
+                }
+                if let Some(key) = arch.expert_ffn_down_key(layer, expert) {
+                    if let Some(tensor) = weights.tensors.get(&key) {
+                        let len = write_tensor(&mut down_file, tensor, dtype)?;
+                        entries.push(WeightEntry {
+                            key, kind: "tensor".into(),
+                            shape: vec![tensor.shape()[0], tensor.shape()[1]],
+                            offset: down_offset, length: len,
+                            file: "down_weights.bin".into(),
+                        });
+                        down_offset += len;
                     }
                 }
             }
-            // MoE router weights
+            // MoE router weights (in up_weights alongside up projections)
             if let Some(key) = arch.moe_router_key(layer) {
                 if let Some(tensor) = weights.tensors.get(&key) {
-                    let len = write_tensor(&mut ffn_file, tensor)?;
+                    let len = write_tensor(&mut up_file, tensor, dtype)?;
                     entries.push(WeightEntry {
-                        key,
-                        kind: "tensor".into(),
+                        key, kind: "tensor".into(),
                         shape: vec![tensor.shape()[0], tensor.shape()[1]],
-                        offset: ffn_offset,
-                        length: len,
-                        file: "ffn_weights.bin".into(),
+                        offset: up_offset, length: len,
+                        file: "up_weights.bin".into(),
                     });
-                    ffn_offset += len;
+                    up_offset += len;
                 }
             }
         } else {
-            // Dense: up + down only (gate already in gate_vectors.bin)
-            for key in &[
-                arch.ffn_up_key(layer),
-                arch.ffn_down_key(layer),
-            ] {
-                if let Some(tensor) = weights.tensors.get(key) {
-                    let len = write_tensor(&mut ffn_file, tensor)?;
-                    entries.push(WeightEntry {
-                        key: key.clone(),
-                        kind: "tensor".into(),
-                        shape: vec![tensor.shape()[0], tensor.shape()[1]],
-                        offset: ffn_offset,
-                        length: len,
-                        file: "ffn_weights.bin".into(),
-                    });
-                    ffn_offset += len;
-                }
+            // Dense: separate up and down files
+            let up_key = arch.ffn_up_key(layer);
+            if let Some(tensor) = weights.tensors.get(&up_key) {
+                let len = write_tensor(&mut up_file, tensor, dtype)?;
+                entries.push(WeightEntry {
+                    key: up_key, kind: "tensor".into(),
+                    shape: vec![tensor.shape()[0], tensor.shape()[1]],
+                    offset: up_offset, length: len,
+                    file: "up_weights.bin".into(),
+                });
+                up_offset += len;
+            }
+
+            let down_key = arch.ffn_down_key(layer);
+            if let Some(tensor) = weights.tensors.get(&down_key) {
+                let len = write_tensor(&mut down_file, tensor, dtype)?;
+                entries.push(WeightEntry {
+                    key: down_key, kind: "tensor".into(),
+                    shape: vec![tensor.shape()[0], tensor.shape()[1]],
+                    offset: down_offset, length: len,
+                    file: "down_weights.bin".into(),
+                });
+                down_offset += len;
             }
         }
 
-        callbacks.on_layer_done("ffn_weights", layer, 0.0);
+        callbacks.on_layer_done("up/down_weights", layer, 0.0);
     }
-    ffn_file.flush()?;
+    up_file.flush()?;
+    down_file.flush()?;
 
     // ── Norms ──
     let norms_path = dir.join("norms.bin");
@@ -156,10 +175,8 @@ pub fn write_model_weights(
     let mut norms_offset: u64 = 0;
 
     for (key, vec) in &weights.vectors {
-        let bytes: &[u8] = unsafe {
-            std::slice::from_raw_parts(vec.as_ptr() as *const u8, vec.len() * 4)
-        };
-        norms_file.write_all(bytes)?;
+        let bytes = crate::dtype::encode_floats(vec, dtype);
+        norms_file.write_all(&bytes)?;
         entries.push(WeightEntry {
             key: key.clone(),
             kind: "vector".into(),
@@ -175,10 +192,8 @@ pub fn write_model_weights(
     // ── LM Head ──
     let lm_head_path = dir.join("lm_head.bin");
     let lm_data = weights.lm_head.as_slice().unwrap();
-    let lm_bytes: &[u8] = unsafe {
-        std::slice::from_raw_parts(lm_data.as_ptr() as *const u8, lm_data.len() * 4)
-    };
-    std::fs::write(&lm_head_path, lm_bytes)?;
+    let lm_bytes = crate::dtype::encode_floats(lm_data, dtype);
+    std::fs::write(&lm_head_path, &lm_bytes)?;
     entries.push(WeightEntry {
         key: "lm_head.weight".into(),
         kind: "tensor".into(),
@@ -190,14 +205,14 @@ pub fn write_model_weights(
 
     // ── Manifest ──
     let manifest_json = serde_json::to_string_pretty(&entries)
-        .map_err(|e| InferenceError::Parse(e.to_string()))?;
+        .map_err(|e| VindexError::Parse(e.to_string()))?;
     std::fs::write(dir.join("weight_manifest.json"), manifest_json)?;
 
     // ── Update index.json ──
     let config_path = dir.join("index.json");
     let config_text = std::fs::read_to_string(&config_path)?;
     let mut config: VindexConfig = serde_json::from_str(&config_text)
-        .map_err(|e| InferenceError::Parse(e.to_string()))?;
+        .map_err(|e| VindexError::Parse(e.to_string()))?;
 
     config.has_model_weights = true;
     config.model_config = Some(VindexModelConfig {
@@ -208,7 +223,7 @@ pub fn write_model_weights(
         rope_base: weights.rope_base,
         sliding_window: weights.arch.config().sliding_window,
         moe: if weights.arch.is_moe() {
-            Some(larql_vindex::MoeConfig {
+            Some(crate::MoeConfig {
                 num_experts: weights.arch.num_experts(),
                 top_k: weights.arch.num_experts_per_token(),
                 shared_expert: weights.arch.num_shared_experts() > 0,
@@ -220,39 +235,37 @@ pub fn write_model_weights(
     });
 
     let config_json = serde_json::to_string_pretty(&config)
-        .map_err(|e| InferenceError::Parse(e.to_string()))?;
+        .map_err(|e| VindexError::Parse(e.to_string()))?;
     std::fs::write(&config_path, config_json)?;
 
     callbacks.on_stage_done("model_weights", start.elapsed().as_secs_f64() * 1000.0);
     Ok(())
 }
 
-fn write_tensor(w: &mut BufWriter<std::fs::File>, tensor: &Array2<f32>) -> Result<u64, InferenceError> {
+fn write_tensor(w: &mut BufWriter<std::fs::File>, tensor: &Array2<f32>, dtype: crate::dtype::StorageDtype) -> Result<u64, VindexError> {
     let data = tensor.as_slice().unwrap();
-    let bytes: &[u8] = unsafe {
-        std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4)
-    };
-    w.write_all(bytes)?;
+    let bytes = crate::dtype::encode_floats(data, dtype);
+    w.write_all(&bytes)?;
     Ok(bytes.len() as u64)
 }
 
 /// Load a full ModelWeights from a vindex directory.
 ///
 /// Tries split files (v2) first, falls back to model_weights.bin (v1).
-pub fn load_model_weights_from_vindex(
+pub fn load_model_weights(
     dir: &Path,
     callbacks: &mut dyn IndexLoadCallbacks,
-) -> Result<ModelWeights, InferenceError> {
+) -> Result<ModelWeights, VindexError> {
     let config = load_vindex_config(dir)?;
 
     if !config.has_model_weights {
-        return Err(InferenceError::Parse(
+        return Err(VindexError::Parse(
             "vindex does not contain model weights. Rebuild with: larql extract-index <model> -o <vindex> --include-weights".into(),
         ));
     }
 
     let model_cfg = config.model_config.as_ref().ok_or_else(|| {
-        InferenceError::Parse("vindex missing model_config in index.json".into())
+        VindexError::Parse("vindex missing model_config in index.json".into())
     })?;
 
     // Reconstruct architecture from config
@@ -281,13 +294,13 @@ pub fn load_model_weights_from_vindex(
     }
     .to_vec();
     let embed = Array2::from_shape_vec((config.vocab_size, config.hidden_size), embed_floats)
-        .map_err(|e| InferenceError::Parse(e.to_string()))?;
+        .map_err(|e| VindexError::Parse(e.to_string()))?;
     callbacks.on_file_done("embeddings", config.vocab_size, 0.0);
 
     // Load weight manifest
     let manifest_path = dir.join("weight_manifest.json");
     if !manifest_path.exists() {
-        return Err(InferenceError::Parse(
+        return Err(VindexError::Parse(
             "weight_manifest.json not found".into(),
         ));
     }
@@ -295,7 +308,7 @@ pub fn load_model_weights_from_vindex(
     callbacks.on_file_start("model_weights", "weight_manifest.json");
     let manifest_text = std::fs::read_to_string(&manifest_path)?;
     let entries: Vec<WeightEntry> = serde_json::from_str(&manifest_text)
-        .map_err(|e| InferenceError::Parse(e.to_string()))?;
+        .map_err(|e| VindexError::Parse(e.to_string()))?;
 
     // Cache loaded file data to avoid re-reading
     let mut file_cache: HashMap<String, Vec<u8>> = HashMap::new();
@@ -320,19 +333,14 @@ pub fn load_model_weights_from_vindex(
             continue;
         }
 
-        let all_floats: &[f32] = unsafe {
-            std::slice::from_raw_parts(
-                data.as_ptr() as *const f32,
-                data.len() / 4,
-            )
-        };
-
-        let float_offset = entry.offset as usize / 4;
-        let float_count = entry.length as usize / 4;
-        if float_offset + float_count > all_floats.len() {
+        let byte_offset = entry.offset as usize;
+        let byte_count = entry.length as usize;
+        if byte_offset + byte_count > data.len() {
             continue;
         }
-        let slice = &all_floats[float_offset..float_offset + float_count];
+        let raw_bytes = &data[byte_offset..byte_offset + byte_count];
+        let floats = crate::dtype::decode_floats(raw_bytes, config.dtype);
+        let slice = &floats[..];
 
         match entry.kind.as_str() {
             "tensor" => {
@@ -340,7 +348,7 @@ pub fn load_model_weights_from_vindex(
                     (entry.shape[0], entry.shape[1]),
                     slice.to_vec(),
                 )
-                .map_err(|e| InferenceError::Parse(e.to_string()))?;
+                .map_err(|e| VindexError::Parse(e.to_string()))?;
 
                 if entry.key == "lm_head.weight" {
                     lm_head_loaded = Some(arr);
@@ -358,14 +366,10 @@ pub fn load_model_weights_from_vindex(
     // Gate vectors: read from gate_vectors.bin and inject into tensors
     // (the forward pass needs them as tensors, but they're stored in the query index)
     let gate_bytes = std::fs::read(dir.join("gate_vectors.bin"))?;
-    let gate_floats: &[f32] = unsafe {
-        std::slice::from_raw_parts(
-            gate_bytes.as_ptr() as *const f32,
-            gate_bytes.len() / 4,
-        )
-    };
+    let gate_floats = crate::dtype::decode_floats(&gate_bytes, config.dtype);
+    let bpf = crate::dtype::bytes_per_float(config.dtype);
     for info in &config.layers {
-        let float_offset = info.offset as usize / 4;
+        let float_offset = info.offset as usize / bpf;
         let float_count = info.num_features * config.hidden_size;
         if float_offset + float_count <= gate_floats.len() {
             let gate_data = &gate_floats[float_offset..float_offset + float_count];
@@ -373,7 +377,7 @@ pub fn load_model_weights_from_vindex(
                 (info.num_features, config.hidden_size),
                 gate_data.to_vec(),
             )
-            .map_err(|e| InferenceError::Parse(e.to_string()))?;
+            .map_err(|e| VindexError::Parse(e.to_string()))?;
             let gate_key = arch.ffn_gate_key(info.layer);
             tensors.insert(gate_key, gate_matrix);
         }

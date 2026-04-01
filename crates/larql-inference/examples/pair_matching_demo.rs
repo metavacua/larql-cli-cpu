@@ -5,7 +5,7 @@
 //!
 //! Run: cargo run -p larql-inference --example pair_matching_demo
 
-use larql_inference::clustering::pair_matching::{
+use larql_vindex::clustering::pair_matching::{
     label_clusters_from_pairs, load_reference_databases, RelationDatabase,
 };
 

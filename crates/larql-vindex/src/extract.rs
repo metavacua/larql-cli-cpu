@@ -5,10 +5,19 @@ use std::path::Path;
 
 use ndarray::Array2;
 
-use crate::error::InferenceError;
-use crate::model::ModelWeights;
+use crate::error::VindexError;
+use larql_models::ModelWeights;
 
 use larql_models::TopKEntry;
+use crate::dtype::StorageDtype;
+
+/// Write f32 data to a writer, encoding as f32 or f16 based on dtype.
+#[allow(dead_code)]
+fn write_floats(w: &mut impl Write, data: &[f32], dtype: StorageDtype) -> Result<u64, VindexError> {
+    let bytes = crate::dtype::encode_floats(data, dtype);
+    w.write_all(&bytes)?;
+    Ok(bytes.len() as u64)
+}
 
 /// Simple ISO 8601 timestamp without chrono dependency.
 fn chrono_now() -> String {
@@ -175,7 +184,7 @@ fn run_clustering_pipeline(
     tokenizer: &tokenizers::Tokenizer,
     output_dir: &Path,
     callbacks: &mut dyn IndexBuildCallbacks,
-) -> Result<(), InferenceError> {
+) -> Result<(), VindexError> {
     if data.directions.is_empty() {
         return Ok(());
     }
@@ -184,7 +193,7 @@ fn run_clustering_pipeline(
 
     let n_features = data.features.len();
     let matrix = ndarray::Array2::from_shape_vec((n_features, hidden_size), data.directions)
-        .map_err(|e| InferenceError::Parse(format!("cluster data shape: {e}")))?;
+        .map_err(|e| VindexError::Parse(format!("cluster data shape: {e}")))?;
 
     let optimal_k = 512.min(n_features);
 
@@ -249,7 +258,7 @@ fn run_clustering_pipeline(
     };
 
     let clusters_json = serde_json::to_string_pretty(&cluster_result)
-        .map_err(|e| InferenceError::Parse(e.to_string()))?;
+        .map_err(|e| VindexError::Parse(e.to_string()))?;
     std::fs::write(output_dir.join("relation_clusters.json"), clusters_json)?;
 
     // Write per-feature cluster assignments
@@ -258,7 +267,7 @@ fn run_clustering_pipeline(
     for (i, &(layer, feat)) in data.features.iter().enumerate() {
         let record = serde_json::json!({ "l": layer, "f": feat, "c": assignments[i] });
         serde_json::to_writer(&mut assign_file, &record)
-            .map_err(|e| InferenceError::Parse(e.to_string()))?;
+            .map_err(|e| VindexError::Parse(e.to_string()))?;
         assign_file.write_all(b"\n")?;
     }
     assign_file.flush()?;
@@ -271,21 +280,12 @@ fn run_clustering_pipeline(
     Ok(())
 }
 
-use larql_vindex::config::{
+use crate::config::{
     DownMetaRecord, DownMetaTopK, VindexConfig, VindexLayerInfo, VindexModelConfig,
 };
 
-/// Callbacks for index build progress.
-pub trait IndexBuildCallbacks {
-    fn on_stage(&mut self, _stage: &str) {}
-    fn on_layer_start(&mut self, _component: &str, _layer: usize, _total: usize) {}
-    fn on_feature_progress(&mut self, _component: &str, _layer: usize, _done: usize, _total: usize) {}
-    fn on_layer_done(&mut self, _component: &str, _layer: usize, _elapsed_ms: f64) {}
-    fn on_stage_done(&mut self, _stage: &str, _elapsed_ms: f64) {}
-}
-
-pub struct SilentBuildCallbacks;
-impl IndexBuildCallbacks for SilentBuildCallbacks {}
+// Callbacks from larql-vindex (canonical definition)
+pub use crate::build::IndexBuildCallbacks;
 
     /// Build a .vindex from model weights and write it to disk.
     ///
@@ -298,9 +298,10 @@ impl IndexBuildCallbacks for SilentBuildCallbacks {}
         model_name: &str,
         output_dir: &Path,
         down_top_k: usize,
-        extract_level: larql_vindex::ExtractLevel,
+        extract_level: crate::ExtractLevel,
+        dtype: StorageDtype,
         callbacks: &mut dyn IndexBuildCallbacks,
-    ) -> Result<(), InferenceError> {
+    ) -> Result<(), VindexError> {
         std::fs::create_dir_all(output_dir)?;
 
         let num_layers = weights.num_layers;
@@ -344,14 +345,7 @@ impl IndexBuildCallbacks for SilentBuildCallbacks {}
                     features_per_expert = w_gate.shape()[0];
                     total_features += features_per_expert;
                     let data = w_gate.as_slice().unwrap();
-                    let bytes: &[u8] = unsafe {
-                        std::slice::from_raw_parts(
-                            data.as_ptr() as *const u8,
-                            data.len() * 4,
-                        )
-                    };
-                    gate_file.write_all(bytes)?;
-                    layer_bytes += bytes.len() as u64;
+                    layer_bytes += write_floats(&mut gate_file, data, dtype)?;
                 }
 
                 // Also include shared expert if present
@@ -360,14 +354,7 @@ impl IndexBuildCallbacks for SilentBuildCallbacks {}
                         let n = w_gate.shape()[0];
                         total_features += n;
                         let data = w_gate.as_slice().unwrap();
-                        let bytes: &[u8] = unsafe {
-                            std::slice::from_raw_parts(
-                                data.as_ptr() as *const u8,
-                                data.len() * 4,
-                            )
-                        };
-                        gate_file.write_all(bytes)?;
-                        layer_bytes += bytes.len() as u64;
+                        layer_bytes += write_floats(&mut gate_file, data, dtype)?;
                     }
                 }
 
@@ -391,15 +378,7 @@ impl IndexBuildCallbacks for SilentBuildCallbacks {}
                 };
                 let num_features = w_gate.shape()[0];
                 let data = w_gate.as_slice().unwrap();
-                let bytes: &[u8] = unsafe {
-                    std::slice::from_raw_parts(
-                        data.as_ptr() as *const u8,
-                        data.len() * 4,
-                    )
-                };
-                gate_file.write_all(bytes)?;
-
-                let length = bytes.len() as u64;
+                let length = write_floats(&mut gate_file, data, dtype)?;
                 layer_infos.push(VindexLayerInfo {
                     layer,
                     num_features,
@@ -420,10 +399,8 @@ impl IndexBuildCallbacks for SilentBuildCallbacks {}
         callbacks.on_stage("embeddings");
         let embed_path = output_dir.join("embeddings.bin");
         let embed_data = weights.embed.as_slice().unwrap();
-        let embed_bytes: &[u8] = unsafe {
-            std::slice::from_raw_parts(embed_data.as_ptr() as *const u8, embed_data.len() * 4)
-        };
-        std::fs::write(&embed_path, embed_bytes)?;
+        let embed_bytes = crate::dtype::encode_floats(embed_data, dtype);
+        std::fs::write(&embed_path, &embed_bytes)?;
         callbacks.on_stage_done("embeddings", 0.0);
 
         // ── 3. Write down metadata + collect directions for relation clustering ──
@@ -584,7 +561,7 @@ impl IndexBuildCallbacks for SilentBuildCallbacks {}
                 };
 
                 serde_json::to_writer(&mut down_file, &record)
-                    .map_err(|e| InferenceError::Parse(e.to_string()))?;
+                    .map_err(|e| VindexError::Parse(e.to_string()))?;
                 down_file.write_all(b"\n")?;
             }
             } // end batch
@@ -617,7 +594,7 @@ impl IndexBuildCallbacks for SilentBuildCallbacks {}
         callbacks.on_stage("tokenizer");
         let tokenizer_json = tokenizer
             .to_string(true)
-            .map_err(|e| InferenceError::Parse(format!("tokenizer serialize: {e}")))?;
+            .map_err(|e| VindexError::Parse(format!("tokenizer serialize: {e}")))?;
         std::fs::write(output_dir.join("tokenizer.json"), tokenizer_json)?;
         callbacks.on_stage_done("tokenizer", 0.0);
 
@@ -638,7 +615,8 @@ impl IndexBuildCallbacks for SilentBuildCallbacks {}
             source: None,
             checksums: None,
             extract_level,
-            layer_bands: larql_vindex::LayerBands::for_family(&family, num_layers),
+            dtype,
+            layer_bands: crate::LayerBands::for_family(&family, num_layers),
             model_config: Some(VindexModelConfig {
                 model_type: weights.arch.config().model_type.clone(),
                 head_dim: weights.head_dim,
@@ -647,7 +625,7 @@ impl IndexBuildCallbacks for SilentBuildCallbacks {}
                 rope_base: weights.rope_base,
                 sliding_window: weights.arch.config().sliding_window,
                 moe: if is_moe {
-                    Some(larql_vindex::MoeConfig {
+                    Some(crate::MoeConfig {
                         num_experts: n_experts,
                         top_k: weights.arch.num_experts_per_token(),
                         shared_expert: weights.arch.num_shared_experts() > 0,
@@ -659,27 +637,32 @@ impl IndexBuildCallbacks for SilentBuildCallbacks {}
             }),
         };
 
+        // Write preliminary index.json (needed by write_model_weights which reads it)
+        let config_json = serde_json::to_string_pretty(&config)
+            .map_err(|e| VindexError::Parse(e.to_string()))?;
+        std::fs::write(output_dir.join("index.json"), config_json)?;
+
         // Write model weights if extract level requires them
-        if extract_level != larql_vindex::ExtractLevel::Browse {
+        if extract_level != crate::ExtractLevel::Browse {
             callbacks.on_stage("model_weights");
             let start = std::time::Instant::now();
-            super::weights::write_model_weights(weights, output_dir, callbacks)?;
+            crate::write_model_weights(weights, output_dir, callbacks)?;
             config.has_model_weights = true;
             callbacks.on_stage_done("model_weights", start.elapsed().as_secs_f64() * 1000.0);
         }
 
-        // Add provenance and checksums
-        config.source = Some(larql_vindex::VindexSource {
+        // Add provenance and checksums (final index.json overwrite)
+        config.source = Some(crate::VindexSource {
             huggingface_repo: Some(model_name.to_string()),
             huggingface_revision: None,
             safetensors_sha256: None,
             extracted_at: chrono_now(),
             larql_version: env!("CARGO_PKG_VERSION").to_string(),
         });
-        config.checksums = larql_vindex::checksums::compute_checksums(output_dir).ok();
+        config.checksums = crate::checksums::compute_checksums(output_dir).ok();
 
         let config_json = serde_json::to_string_pretty(&config)
-            .map_err(|e| InferenceError::Parse(e.to_string()))?;
+            .map_err(|e| VindexError::Parse(e.to_string()))?;
         std::fs::write(output_dir.join("index.json"), config_json)?;
 
         Ok(())
@@ -694,7 +677,7 @@ impl IndexBuildCallbacks for SilentBuildCallbacks {}
         model_name: &str,
         output_dir: &Path,
         callbacks: &mut dyn IndexBuildCallbacks,
-    ) -> Result<(), InferenceError> {
+    ) -> Result<(), VindexError> {
         let num_layers = weights.num_layers;
         let hidden_size = weights.hidden_size;
         let intermediate_size = weights.intermediate_size;
@@ -757,7 +740,7 @@ impl IndexBuildCallbacks for SilentBuildCallbacks {}
             let line = line.trim();
             if line.is_empty() { continue; }
             let obj: serde_json::Value = serde_json::from_str(line)
-                .map_err(|e| InferenceError::Parse(e.to_string()))?;
+                .map_err(|e| VindexError::Parse(e.to_string()))?;
             if obj.get("_header").is_some() { continue; }
 
             let layer = obj.get("l").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
@@ -820,7 +803,7 @@ impl IndexBuildCallbacks for SilentBuildCallbacks {}
         // Tokenizer
         callbacks.on_stage("tokenizer");
         let tokenizer_json = tokenizer.to_string(true)
-            .map_err(|e| InferenceError::Parse(format!("tokenizer serialize: {e}")))?;
+            .map_err(|e| VindexError::Parse(format!("tokenizer serialize: {e}")))?;
         std::fs::write(output_dir.join("tokenizer.json"), tokenizer_json)?;
         callbacks.on_stage_done("tokenizer", 0.0);
 
@@ -839,7 +822,7 @@ impl IndexBuildCallbacks for SilentBuildCallbacks {}
             layers: layer_infos,
             down_top_k,
             has_model_weights: output_dir.join("model_weights.bin").exists(),
-            source: Some(larql_vindex::VindexSource {
+            source: Some(crate::VindexSource {
                 huggingface_repo: Some(model_name.to_string()),
                 huggingface_revision: None,
                 safetensors_sha256: None,
@@ -847,8 +830,9 @@ impl IndexBuildCallbacks for SilentBuildCallbacks {}
                 larql_version: env!("CARGO_PKG_VERSION").to_string(),
             }),
             checksums: None,
-            extract_level: larql_vindex::ExtractLevel::Browse,
-            layer_bands: larql_vindex::LayerBands::for_family(&family, num_layers),
+            extract_level: crate::ExtractLevel::Browse,
+            dtype: StorageDtype::F32,
+            layer_bands: crate::LayerBands::for_family(&family, num_layers),
             model_config: Some(VindexModelConfig {
                 model_type: weights.arch.config().model_type.clone(),
                 head_dim: weights.head_dim,
@@ -860,10 +844,10 @@ impl IndexBuildCallbacks for SilentBuildCallbacks {}
             }),
         };
 
-        config.checksums = larql_vindex::checksums::compute_checksums(output_dir).ok();
+        config.checksums = crate::checksums::compute_checksums(output_dir).ok();
 
         let config_json = serde_json::to_string_pretty(&config)
-            .map_err(|e| InferenceError::Parse(e.to_string()))?;
+            .map_err(|e| VindexError::Parse(e.to_string()))?;
         std::fs::write(output_dir.join("index.json"), config_json)?;
 
         Ok(())

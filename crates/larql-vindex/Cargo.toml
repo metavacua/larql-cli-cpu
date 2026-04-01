@@ -23,3 +23,7 @@ tokenizers = "0.21"
 
 # Checksums
 sha2 = "0.10"
+
+# Model weights (for safetensors loading during extract)
+safetensors = "0.5"
+memmap2 = "0.9"

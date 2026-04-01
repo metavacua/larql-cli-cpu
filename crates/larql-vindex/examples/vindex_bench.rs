@@ -106,7 +106,7 @@ fn main() {
         vocab_size: 100,
         embed_scale: 1.0,
         extract_level: larql_vindex::ExtractLevel::Browse,
-        layer_bands: None,
+        dtype: larql_vindex::StorageDtype::F32,        layer_bands: None,
         layers: layer_infos,
         down_top_k: top_k_meta,
         has_model_weights: false,

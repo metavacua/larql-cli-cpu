@@ -137,7 +137,7 @@ impl Session {
         }
 
         let mut cb = larql_vindex::SilentLoadCallbacks;
-        let weights = larql_inference::load_model_weights_from_vindex(path, &mut cb)
+        let weights = larql_vindex::load_model_weights(path, &mut cb)
             .map_err(|e| LqlError::Execution(format!("failed to load model weights: {e}")))?;
         let tokenizer = larql_vindex::load_vindex_tokenizer(path)
             .map_err(|e| LqlError::Execution(format!("failed to load tokenizer: {e}")))?;
@@ -147,7 +147,9 @@ impl Session {
             .map_err(|e| LqlError::Execution(format!("tokenize error: {e}")))?;
         let token_ids: Vec<u32> = encoding.get_ids().to_vec();
 
-        let walk_ffn = larql_inference::vindex::WalkFfn::new(&weights, index, 10);
+        // 8092 features per layer is proven lossless (97.91% on France→Paris).
+        // Trace captures all but output shows top 3 per layer.
+        let walk_ffn = larql_inference::vindex::WalkFfn::new(&weights, index, 8092);
         let start = std::time::Instant::now();
         let result = larql_inference::predict_with_ffn(
             &weights,
@@ -796,7 +798,7 @@ impl Session {
         }
 
         let mut cb = larql_vindex::SilentLoadCallbacks;
-        let weights = larql_inference::load_model_weights_from_vindex(path, &mut cb)
+        let weights = larql_vindex::load_model_weights(path, &mut cb)
             .map_err(|e| LqlError::Execution(format!("failed to load model weights: {e}")))?;
         let tokenizer = larql_vindex::load_vindex_tokenizer(path)
             .map_err(|e| LqlError::Execution(format!("failed to load tokenizer: {e}")))?;
@@ -806,7 +808,9 @@ impl Session {
             .map_err(|e| LqlError::Execution(format!("tokenize error: {e}")))?;
         let token_ids: Vec<u32> = encoding.get_ids().to_vec();
 
-        let walk_ffn = larql_inference::vindex::WalkFfn::new(&weights, index, 10);
+        // 8092 features per layer is proven lossless (97.91% on France→Paris).
+        // Trace captures all but output shows top 3 per layer.
+        let walk_ffn = larql_inference::vindex::WalkFfn::new(&weights, index, 8092);
         let start = std::time::Instant::now();
         let result = larql_inference::predict_with_ffn(
             &weights, &tokenizer, &token_ids, top_k, &walk_ffn,

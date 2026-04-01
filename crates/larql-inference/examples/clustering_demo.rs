@@ -5,11 +5,11 @@
 //!
 //! Run: cargo run -p larql-inference --example clustering_demo
 
-use larql_inference::clustering::{
+use larql_vindex::clustering::{
     kmeans,
     pair_matching::{label_clusters_from_pairs, RelationDatabase},
 };
-use larql_inference::clustering::labeling::detect_entity_pattern;
+use larql_vindex::clustering::labeling::detect_entity_pattern;
 
 fn main() {
     println!("=== Clustering & Relation Discovery Demo ===\n");

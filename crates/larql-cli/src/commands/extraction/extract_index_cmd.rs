@@ -3,8 +3,9 @@ use std::time::Instant;
 
 use clap::Args;
 use indicatif::{ProgressBar, ProgressStyle};
-use larql_inference::vindex::IndexBuildCallbacks;
-use larql_inference::{write_model_weights, InferenceModel};
+use larql_vindex::IndexBuildCallbacks;
+use larql_vindex::write_model_weights;
+use larql_inference::{ InferenceModel};
 
 #[derive(Args)]
 pub struct ExtractIndexArgs {
@@ -110,7 +111,7 @@ pub fn run(args: ExtractIndexArgs) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Building vindex from vectors: {}", vectors_dir.display());
         eprintln!("Output: {}", args.output.display());
 
-        larql_inference::vindex::build_vindex_from_vectors(vectors_dir, &args.output, &mut callbacks)?;
+        larql_vindex::build_vindex_from_vectors(vectors_dir, &args.output, &mut callbacks)?;
 
         if args.include_weights {
             // Need model for weights even when building from vectors
@@ -157,7 +158,7 @@ pub fn run(args: ExtractIndexArgs) -> Result<(), Box<dyn std::error::Error>> {
             if has_gate && has_embed && has_down {
                 eprintln!("  Resuming: gate_vectors, embeddings, down_meta exist — skipping");
                 // Just write index.json, tokenizer, clustering, and optionally weights
-                larql_inference::vindex::build_vindex_resume(
+                larql_vindex::build_vindex_resume(
                     model.weights(),
                     model.tokenizer(),
                     model_name,
@@ -171,13 +172,14 @@ pub fn run(args: ExtractIndexArgs) -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     larql_vindex::ExtractLevel::Browse
                 };
-                larql_inference::vindex::build_vindex(
+                larql_vindex::build_vindex(
                     model.weights(),
                     model.tokenizer(),
                     model_name,
                     output,
                     args.down_top_k,
                     level,
+                    larql_vindex::StorageDtype::F32,
                     &mut callbacks,
                 )?;
             }
@@ -193,19 +195,18 @@ pub fn run(args: ExtractIndexArgs) -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 larql_vindex::ExtractLevel::Browse
             };
-            larql_inference::vindex::build_vindex(
+            larql_vindex::build_vindex(
                 model.weights(),
                 model.tokenizer(),
                 model_name,
                 output,
                 args.down_top_k,
                 level,
+                    larql_vindex::StorageDtype::F32,
                 &mut callbacks,
             )?;
 
-            if args.include_weights {
-                write_model_weights(model.weights(), output, &mut callbacks)?;
-            }
+            // Model weights are written by build_vindex when extract_level != Browse
         }
     }
 
@@ -230,8 +231,13 @@ pub fn run(args: ExtractIndexArgs) -> Result<(), Box<dyn std::error::Error>> {
         "gate_vectors.bin",
         "embeddings.bin",
         "down_meta.jsonl",
+        "down_meta.bin",
         "tokenizer.json",
-        "model_weights.bin",
+        "attn_weights.bin",
+        "up_weights.bin",
+        "down_weights.bin",
+        "norms.bin",
+        "lm_head.bin",
         "weight_manifest.json",
     ] {
         let path = args.output.join(name);
@@ -250,19 +256,16 @@ pub fn run(args: ExtractIndexArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let total_size: u64 = [
-        "index.json",
-        "gate_vectors.bin",
-        "embeddings.bin",
-        "down_meta.jsonl",
-        "tokenizer.json",
-        "model_weights.bin",
-        "weight_manifest.json",
-    ]
-    .iter()
-    .filter_map(|name| std::fs::metadata(args.output.join(name)).ok())
-    .map(|m| m.len())
-    .sum();
+    // Total: sum all files in the directory
+    let total_size: u64 = std::fs::read_dir(&args.output)
+        .ok()
+        .map(|entries| {
+            entries.filter_map(|e| e.ok())
+                .filter_map(|e| e.metadata().ok())
+                .map(|m| m.len())
+                .sum()
+        })
+        .unwrap_or(0);
     eprintln!(
         "  Total: {:.2} GB",
         total_size as f64 / (1024.0 * 1024.0 * 1024.0)

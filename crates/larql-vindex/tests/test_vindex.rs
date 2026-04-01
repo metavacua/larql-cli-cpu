@@ -303,7 +303,7 @@ fn save_and_load_down_meta_round_trip() {
         source: None,
         checksums: None,
         extract_level: larql_vindex::ExtractLevel::Browse,
-        layer_bands: None,
+        dtype: larql_vindex::StorageDtype::F32,        layer_bands: None,
         model_config: None,
     };
     VectorIndex::save_config(&config, &dir).unwrap();
@@ -377,7 +377,7 @@ fn save_config_round_trip() {
         source: None,
         checksums: None,
         extract_level: larql_vindex::ExtractLevel::Browse,
-        layer_bands: None,
+        dtype: larql_vindex::StorageDtype::F32,        layer_bands: None,
         model_config: None,
     };
 
@@ -636,7 +636,7 @@ fn v2_config_full_round_trip() {
         vocab_size: 262144,
         embed_scale: 50.596,
         extract_level: larql_vindex::ExtractLevel::Inference,
-        layer_bands: Some(larql_vindex::LayerBands {
+        dtype: larql_vindex::StorageDtype::F32,        layer_bands: Some(larql_vindex::LayerBands {
             syntax: (0, 13),
             knowledge: (14, 27),
             output: (28, 33),
@@ -705,7 +705,7 @@ fn v2_config_with_moe() {
         vocab_size: 32000,
         embed_scale: 64.0,
         extract_level: larql_vindex::ExtractLevel::Browse,
-        layer_bands: Some(larql_vindex::LayerBands::for_family("mixtral", 32).unwrap()),
+        dtype: larql_vindex::StorageDtype::F32,        layer_bands: Some(larql_vindex::LayerBands::for_family("mixtral", 32).unwrap()),
         layers: vec![],
         down_top_k: 10,
         has_model_weights: false,
@@ -812,7 +812,7 @@ fn moe_layer_info_round_trip() {
         vocab_size: 100,
         embed_scale: 1.0,
         extract_level: larql_vindex::ExtractLevel::Browse,
-        layer_bands: larql_vindex::LayerBands::for_family("mixtral", 32),
+        dtype: larql_vindex::StorageDtype::F32,        layer_bands: larql_vindex::LayerBands::for_family("mixtral", 32),
         layers: vec![
             VindexLayerInfo {
                 layer: 0,
@@ -878,7 +878,7 @@ fn layer_bands_config_round_trip() {
         source: None,
         checksums: None,
         extract_level: larql_vindex::ExtractLevel::Browse,
-        layer_bands: Some(larql_vindex::LayerBands {
+        dtype: larql_vindex::StorageDtype::F32,        layer_bands: Some(larql_vindex::LayerBands {
             syntax: (0, 13),
             knowledge: (14, 27),
             output: (28, 33),
@@ -1026,7 +1026,7 @@ fn source_provenance_round_trip() {
         vocab_size: 100,
         embed_scale: 1.0,
         extract_level: larql_vindex::ExtractLevel::All,
-        layer_bands: None,
+        dtype: larql_vindex::StorageDtype::F32,        layer_bands: None,
         layers: vec![],
         down_top_k: 10,
         has_model_weights: true,
@@ -1257,4 +1257,285 @@ fn patched_vindex_remove_patch() {
     patched.remove_patch(0);
     assert_eq!(patched.feature_meta(0, 0).unwrap().top_token, "Paris");
     assert_eq!(patched.num_patches(), 0);
+}
+
+// ══════════════════════════════════════════════════════════════
+// WEIGHTS (split file write/read)
+// ══════════════════════════════════════════════════════════════
+
+#[test]
+fn weight_manifest_round_trip() {
+    // Verify weight_manifest.json is valid JSON after write
+    let dir = std::env::temp_dir().join("larql_test_weight_manifest");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Write a minimal index.json first (write_model_weights reads it)
+    let config = VindexConfig {
+        version: 2,
+        model: "test".into(),
+        family: "test".into(),
+        source: None,
+        checksums: None,
+        num_layers: 0,
+        hidden_size: 4,
+        intermediate_size: 3,
+        vocab_size: 4,
+        embed_scale: 1.0,
+        extract_level: larql_vindex::ExtractLevel::Browse,
+        dtype: larql_vindex::StorageDtype::F32,
+        layer_bands: None,
+        layers: vec![],
+        down_top_k: 1,
+        has_model_weights: false,
+        model_config: None,
+    };
+    VectorIndex::save_config(&config, &dir).unwrap();
+
+    // Verify config round-trips with dtype
+    let loaded = larql_vindex::load_vindex_config(&dir).unwrap();
+    assert_eq!(loaded.dtype, larql_vindex::StorageDtype::F32);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ══════════════════════════════════════════════════════════════
+// DTYPE
+// ══════════════════════════════════════════════════════════════
+
+#[test]
+fn dtype_config_f16_round_trip() {
+    let dir = std::env::temp_dir().join("larql_test_dtype_f16");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let config = VindexConfig {
+        version: 2,
+        model: "test-f16".into(),
+        family: "test".into(),
+        source: None,
+        checksums: None,
+        num_layers: 2,
+        hidden_size: 4,
+        intermediate_size: 3,
+        vocab_size: 100,
+        embed_scale: 1.0,
+        extract_level: larql_vindex::ExtractLevel::Browse,
+        dtype: larql_vindex::StorageDtype::F16,
+        layer_bands: None,
+        layers: vec![],
+        down_top_k: 10,
+        has_model_weights: false,
+        model_config: None,
+    };
+
+    VectorIndex::save_config(&config, &dir).unwrap();
+    let loaded = larql_vindex::load_vindex_config(&dir).unwrap();
+    assert_eq!(loaded.dtype, larql_vindex::StorageDtype::F16);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn dtype_display() {
+    assert_eq!(format!("{}", larql_vindex::StorageDtype::F32), "f32");
+    assert_eq!(format!("{}", larql_vindex::StorageDtype::F16), "f16");
+}
+
+#[test]
+fn dtype_serde_round_trip() {
+    let json = serde_json::to_string(&larql_vindex::StorageDtype::F16).unwrap();
+    assert_eq!(json, "\"f16\"");
+    let parsed: larql_vindex::StorageDtype = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed, larql_vindex::StorageDtype::F16);
+}
+
+#[test]
+fn dtype_bytes_per_float() {
+    assert_eq!(larql_vindex::dtype::bytes_per_float(larql_vindex::StorageDtype::F32), 4);
+    assert_eq!(larql_vindex::dtype::bytes_per_float(larql_vindex::StorageDtype::F16), 2);
+}
+
+// ══════════════════════════════════════════════════════════════
+// LOADER (HF cache resolution)
+// ══════════════════════════════════════════════════════════════
+
+#[test]
+fn resolve_model_path_local_dir() {
+    // An existing directory should resolve to itself
+    let dir = std::env::temp_dir();
+    let result = larql_vindex::resolve_model_path(dir.to_str().unwrap());
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), dir);
+}
+
+#[test]
+fn resolve_model_path_nonexistent() {
+    let result = larql_vindex::resolve_model_path("/nonexistent/path/to/model");
+    assert!(result.is_err());
+}
+
+// ══════════════════════════════════════════════════════════════
+// PATCH EDGE CASES
+// ══════════════════════════════════════════════════════════════
+
+#[test]
+fn patch_empty_operations() {
+    let patch = larql_vindex::VindexPatch {
+        version: 1,
+        base_model: "test".into(),
+        base_checksum: None,
+        created_at: String::new(),
+        description: None,
+        author: None,
+        tags: vec![],
+        operations: vec![],
+    };
+    assert_eq!(patch.len(), 0);
+    let (i, u, d) = patch.counts();
+    assert_eq!((i, u, d), (0, 0, 0));
+}
+
+#[test]
+fn patch_multiple_patches_stack() {
+    let idx = test_index();
+    let mut patched = larql_vindex::PatchedVindex::new(idx);
+
+    // Patch 1: update F0
+    let p1 = larql_vindex::VindexPatch {
+        version: 1, base_model: "test".into(), base_checksum: None,
+        created_at: String::new(), description: None, author: None, tags: vec![],
+        operations: vec![larql_vindex::PatchOp::Update {
+            layer: 0, feature: 0, gate_vector_b64: None,
+            down_meta: Some(larql_vindex::patch::PatchDownMeta {
+                top_token: "London".into(), top_token_id: 300, c_score: 0.99,
+            }),
+        }],
+    };
+    patched.apply_patch(p1);
+
+    // Patch 2: update F1
+    let p2 = larql_vindex::VindexPatch {
+        version: 1, base_model: "test".into(), base_checksum: None,
+        created_at: String::new(), description: None, author: None, tags: vec![],
+        operations: vec![larql_vindex::PatchOp::Update {
+            layer: 0, feature: 1, gate_vector_b64: None,
+            down_meta: Some(larql_vindex::patch::PatchDownMeta {
+                top_token: "Munich".into(), top_token_id: 301, c_score: 0.95,
+            }),
+        }],
+    };
+    patched.apply_patch(p2);
+
+    assert_eq!(patched.num_patches(), 2);
+    assert_eq!(patched.feature_meta(0, 0).unwrap().top_token, "London");
+    assert_eq!(patched.feature_meta(0, 1).unwrap().top_token, "Munich");
+    assert_eq!(patched.feature_meta(0, 2).unwrap().top_token, "Europe"); // unchanged
+}
+
+#[test]
+fn patched_vindex_later_patch_overrides_earlier() {
+    let idx = test_index();
+    let mut patched = larql_vindex::PatchedVindex::new(idx);
+
+    // Both patches modify F0
+    let p1 = larql_vindex::VindexPatch {
+        version: 1, base_model: "test".into(), base_checksum: None,
+        created_at: String::new(), description: None, author: None, tags: vec![],
+        operations: vec![larql_vindex::PatchOp::Update {
+            layer: 0, feature: 0, gate_vector_b64: None,
+            down_meta: Some(larql_vindex::patch::PatchDownMeta {
+                top_token: "London".into(), top_token_id: 300, c_score: 0.99,
+            }),
+        }],
+    };
+    let p2 = larql_vindex::VindexPatch {
+        version: 1, base_model: "test".into(), base_checksum: None,
+        created_at: String::new(), description: None, author: None, tags: vec![],
+        operations: vec![larql_vindex::PatchOp::Update {
+            layer: 0, feature: 0, gate_vector_b64: None,
+            down_meta: Some(larql_vindex::patch::PatchDownMeta {
+                top_token: "Tokyo".into(), top_token_id: 400, c_score: 0.88,
+            }),
+        }],
+    };
+    patched.apply_patch(p1);
+    patched.apply_patch(p2);
+
+    // P2 wins
+    assert_eq!(patched.feature_meta(0, 0).unwrap().top_token, "Tokyo");
+}
+
+// ══════════════════════════════════════════════════════════════
+// FULL VINDEX LIFECYCLE
+// ══════════════════════════════════════════════════════════════
+
+#[test]
+fn full_lifecycle_build_query_mutate_save_reload() {
+    // Build → query → mutate → save → reload → verify
+    let hidden = 4;
+    let mut g0 = Array2::<f32>::zeros((4, hidden));
+    g0[[0, 0]] = 10.0; // Paris
+    g0[[1, 1]] = 10.0; // Berlin
+    g0[[2, 2]] = 10.0; // Tokyo
+    // F3 is empty (free slot)
+    let gate_vectors = vec![Some(g0)];
+
+    let meta = vec![
+        Some(make_meta("Paris", 100, 0.95)),
+        Some(make_meta("Berlin", 101, 0.92)),
+        Some(make_meta("Tokyo", 102, 0.88)),
+        None,
+    ];
+    let down_meta = vec![Some(meta)];
+
+    let mut idx = VectorIndex::new(gate_vectors, down_meta, 1, hidden);
+
+    // Query
+    let q = Array1::from_vec(vec![1.0, 0.0, 0.0, 0.0]);
+    assert_eq!(idx.gate_knn(0, &q, 1)[0].0, 0); // Paris
+
+    // Mutate
+    let slot = idx.find_free_feature(0).unwrap();
+    assert_eq!(slot, 3);
+    idx.set_gate_vector(0, slot, &Array1::from_vec(vec![0.0, 0.0, 0.0, 10.0]));
+    idx.set_feature_meta(0, slot, make_meta("Canberra", 103, 0.85));
+
+    // Save
+    let dir = std::env::temp_dir().join("larql_test_lifecycle");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let layer_infos = idx.save_gate_vectors(&dir).unwrap();
+    idx.save_down_meta(&dir).unwrap();
+
+    let config = VindexConfig {
+        version: 2,
+        model: "lifecycle-test".into(),
+        family: "test".into(),
+        source: None, checksums: None,
+        num_layers: 1, hidden_size: hidden, intermediate_size: 4, vocab_size: 200,
+        embed_scale: 1.0,
+        extract_level: larql_vindex::ExtractLevel::Browse,
+        dtype: larql_vindex::StorageDtype::F32,
+        layer_bands: None, layers: layer_infos, down_top_k: 1,
+        has_model_weights: false, model_config: None,
+    };
+    VectorIndex::save_config(&config, &dir).unwrap();
+
+    // Reload
+    let mut cb = larql_vindex::SilentLoadCallbacks;
+    let loaded = VectorIndex::load_vindex(&dir, &mut cb).unwrap();
+
+    // Verify
+    assert_eq!(loaded.total_gate_vectors(), 4);
+    assert_eq!(loaded.total_down_meta(), 4);
+    assert_eq!(loaded.feature_meta(0, 0).unwrap().top_token, "Paris");
+    assert_eq!(loaded.feature_meta(0, 3).unwrap().top_token, "Canberra");
+
+    // KNN should find Canberra for dim 3
+    let q2 = Array1::from_vec(vec![0.0, 0.0, 0.0, 1.0]);
+    assert_eq!(loaded.gate_knn(0, &q2, 1)[0].0, 3);
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

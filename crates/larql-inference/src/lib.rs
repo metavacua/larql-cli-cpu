@@ -2,7 +2,6 @@ extern crate blas_src;
 
 pub mod attention;
 pub mod capture;
-pub mod clustering;
 pub mod error;
 pub mod ffn;
 pub mod forward;
@@ -42,11 +41,7 @@ pub use ffn::experimental::entity_routed::EntityRoutedFfn;
 pub use ffn::experimental::feature_list::FeatureListFfn;
 pub use ffn::experimental::graph::GraphFfn;
 pub use route_ffn::{RouteFfn, RouteGuidedFfn, RouteTable};
-pub use vindex::{
-    build_vindex, build_vindex_resume, build_vindex_from_vectors,
-    load_model_weights_from_vindex, write_model_weights,
-    WalkFfn, IndexBuildCallbacks as VindexBuildCallbacks, SilentBuildCallbacks,
-};
+pub use vindex::WalkFfn;
 pub use model::{load_model_dir, resolve_model_path, ModelWeights};
 pub use tokenizer::{decode_token, load_tokenizer};
 

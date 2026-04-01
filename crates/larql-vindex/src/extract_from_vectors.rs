@@ -4,10 +4,10 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 
-use crate::error::InferenceError;
+use crate::error::VindexError;
 
 use super::build::IndexBuildCallbacks;
-use larql_vindex::config::{
+use crate::config::{
     DownMetaRecord, DownMetaTopK, VindexConfig, VindexLayerInfo,
 };
 
@@ -20,7 +20,7 @@ use larql_vindex::config::{
         vectors_dir: &Path,
         output_dir: &Path,
         callbacks: &mut dyn IndexBuildCallbacks,
-    ) -> Result<(), InferenceError> {
+    ) -> Result<(), VindexError> {
         std::fs::create_dir_all(output_dir)?;
 
         let gate_path = vectors_dir.join("ffn_gate.vectors.jsonl");
@@ -28,7 +28,7 @@ use larql_vindex::config::{
         let embed_path = vectors_dir.join("embeddings.vectors.jsonl");
 
         if !gate_path.exists() {
-            return Err(InferenceError::Parse(
+            return Err(VindexError::Parse(
                 format!("ffn_gate.vectors.jsonl not found in {}", vectors_dir.display()),
             ));
         }
@@ -37,9 +37,9 @@ use larql_vindex::config::{
         let gate_file = std::fs::File::open(&gate_path)?;
         let reader = BufReader::with_capacity(1 << 20, gate_file);
         let first_line = reader.lines().next()
-            .ok_or_else(|| InferenceError::Parse("empty gate file".into()))??;
+            .ok_or_else(|| VindexError::Parse("empty gate file".into()))??;
         let header: serde_json::Value = serde_json::from_str(&first_line)
-            .map_err(|e| InferenceError::Parse(e.to_string()))?;
+            .map_err(|e| VindexError::Parse(e.to_string()))?;
 
         let model_name = header.get("model")
             .and_then(|v| v.as_str())
@@ -67,7 +67,7 @@ use larql_vindex::config::{
             if line.is_empty() { continue; }
 
             let obj: serde_json::Value = serde_json::from_str(line)
-                .map_err(|e| InferenceError::Parse(e.to_string()))?;
+                .map_err(|e| VindexError::Parse(e.to_string()))?;
             if obj.get("_header").is_some() { continue; }
 
             let layer = obj["layer"].as_u64().unwrap() as usize;
@@ -155,7 +155,7 @@ use larql_vindex::config::{
             if line.is_empty() { continue; }
 
             let obj: serde_json::Value = serde_json::from_str(line)
-                .map_err(|e| InferenceError::Parse(e.to_string()))?;
+                .map_err(|e| VindexError::Parse(e.to_string()))?;
             if obj.get("_header").is_some() { continue; }
 
             let feature = obj["feature"].as_u64().unwrap() as usize;
@@ -208,7 +208,7 @@ use larql_vindex::config::{
             if line.is_empty() { continue; }
 
             let obj: serde_json::Value = serde_json::from_str(line)
-                .map_err(|e| InferenceError::Parse(e.to_string()))?;
+                .map_err(|e| VindexError::Parse(e.to_string()))?;
             if obj.get("_header").is_some() { continue; }
 
             let layer = obj["layer"].as_u64().unwrap() as usize;
@@ -236,7 +236,7 @@ use larql_vindex::config::{
             };
 
             serde_json::to_writer(&mut down_out, &record)
-                .map_err(|e| InferenceError::Parse(e.to_string()))?;
+                .map_err(|e| VindexError::Parse(e.to_string()))?;
             down_out.write_all(b"\n")?;
 
             down_count += 1;
@@ -287,13 +287,13 @@ use larql_vindex::config::{
             down_top_k: down_top_k_size,
             has_model_weights: false,
             source: None,
-            checksums: None,            extract_level: larql_vindex::ExtractLevel::Browse,
-            layer_bands: None,
+            checksums: None,            extract_level: crate::ExtractLevel::Browse,
+            dtype: crate::StorageDtype::F32,            layer_bands: None,
             model_config: None,
         };
 
         let config_json = serde_json::to_string_pretty(&config)
-            .map_err(|e| InferenceError::Parse(e.to_string()))?;
+            .map_err(|e| VindexError::Parse(e.to_string()))?;
         std::fs::write(output_dir.join("index.json"), config_json)?;
 
         Ok(())

@@ -113,7 +113,7 @@ fn main() {
         vocab_size: 200,
         embed_scale: 1.0,
         extract_level: larql_vindex::ExtractLevel::Browse,
-        layer_bands: Some(larql_vindex::LayerBands {
+        dtype: larql_vindex::StorageDtype::F32,        layer_bands: Some(larql_vindex::LayerBands {
             syntax: (0, 0),
             knowledge: (0, 1),
             output: (1, 1),

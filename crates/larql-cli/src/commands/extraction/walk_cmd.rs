@@ -7,7 +7,6 @@ use larql_vindex::{
     IndexLoadCallbacks, SilentLoadCallbacks, VectorIndex, ndarray, tokenizers,
 };
 use larql_inference::{
-    load_model_weights_from_vindex,
     predict_with_ffn, predict_with_router, InferenceModel, LayerFfnRouter, ModelWeights,
     SparseFfn, WeightFfn,
     vindex::WalkFfn,
@@ -307,7 +306,7 @@ fn run_with_vindex_weights(
     } else {
         Box::new(SilentLoadCallbacks)
     };
-    let weights = load_model_weights_from_vindex(vindex_path, &mut *cb)?;
+    let weights = larql_vindex::load_model_weights(vindex_path, &mut *cb)?;
     let tokenizer = load_vindex_tokenizer(vindex_path)?;
 
     vlog!(

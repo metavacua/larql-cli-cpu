@@ -37,18 +37,14 @@ impl VectorIndex {
 
         let gate_path = dir.join("gate_vectors.bin");
         let gate_bytes = std::fs::read(&gate_path)?;
-        let gate_floats: &[f32] = unsafe {
-            std::slice::from_raw_parts(
-                gate_bytes.as_ptr() as *const f32,
-                gate_bytes.len() / 4,
-            )
-        };
+        let gate_floats = crate::dtype::decode_floats(&gate_bytes, config.dtype);
 
         let mut gate_vectors: Vec<Option<Array2<f32>>> = vec![None; num_layers];
         let mut total_gate = 0;
+        let bpf = crate::dtype::bytes_per_float(config.dtype);
 
         for info in &config.layers {
-            let float_offset = info.offset as usize / 4;
+            let float_offset = info.offset as usize / bpf;
             let float_count = info.num_features * hidden_size;
             let layer_data = &gate_floats[float_offset..float_offset + float_count];
             let matrix = Array2::from_shape_vec(
@@ -160,13 +156,7 @@ pub fn load_vindex_embeddings(dir: &Path) -> Result<(Array2<f32>, f32), VindexEr
         .map_err(|e| VindexError::Parse(e.to_string()))?;
 
     let embed_bytes = std::fs::read(dir.join("embeddings.bin"))?;
-    let embed_floats: Vec<f32> = unsafe {
-        std::slice::from_raw_parts(
-            embed_bytes.as_ptr() as *const f32,
-            embed_bytes.len() / 4,
-        )
-    }
-    .to_vec();
+    let embed_floats = crate::dtype::decode_floats(&embed_bytes, config.dtype);
 
     let embed = Array2::from_shape_vec((config.vocab_size, config.hidden_size), embed_floats)
         .map_err(|e| VindexError::Parse(e.to_string()))?;

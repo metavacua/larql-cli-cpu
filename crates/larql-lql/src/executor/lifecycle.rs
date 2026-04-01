@@ -266,13 +266,14 @@ impl Session {
         };
 
         let mut callbacks = LqlBuildCallbacks::new();
-        larql_inference::vindex::build_vindex(
+        larql_vindex::build_vindex(
             inference_model.weights(),
             inference_model.tokenizer(),
             model,
             &output_dir,
             10,
             vindex_level,
+            larql_vindex::StorageDtype::F32,
             &mut callbacks,
         )
         .map_err(|e| LqlError::Execution(format!("extraction failed: {e}")))?;
@@ -353,11 +354,11 @@ impl Session {
             .map_err(|e| LqlError::Execution(format!("failed to create output dir: {e}")))?;
 
         let mut cb = larql_vindex::SilentLoadCallbacks;
-        let weights = larql_inference::load_model_weights_from_vindex(vindex_path, &mut cb)
+        let weights = larql_vindex::load_model_weights(vindex_path, &mut cb)
             .map_err(|e| LqlError::Execution(format!("failed to load model weights: {e}")))?;
 
-        let mut build_cb = larql_inference::vindex::SilentBuildCallbacks;
-        larql_inference::write_model_weights(&weights, &output_dir, &mut build_cb)
+        let mut build_cb = larql_vindex::SilentBuildCallbacks;
+        larql_vindex::write_model_weights(&weights, &output_dir, &mut build_cb)
             .map_err(|e| LqlError::Execution(format!("failed to write model: {e}")))?;
 
         let tok_src = vindex_path.join("tokenizer.json");
@@ -650,7 +651,7 @@ impl LqlBuildCallbacks {
     }
 }
 
-impl larql_inference::vindex::IndexBuildCallbacks for LqlBuildCallbacks {
+impl larql_vindex::IndexBuildCallbacks for LqlBuildCallbacks {
     fn on_stage(&mut self, stage: &str) {
         self.current_stage = stage.to_string();
         self.messages.push(format!("  Stage: {stage}"));

@@ -5,7 +5,7 @@
 
 use larql_inference::ndarray::{Array1, Array2};
 use larql_inference::tokenizers::Tokenizer;
-use larql_inference::clustering::ClusterResult;
+use larql_vindex::clustering::ClusterResult;
 
 /// Classifies edges into relation types using discovered clusters
 /// or embedding-space direction matching.
@@ -129,7 +129,7 @@ impl RelationClassifier {
     pub fn classify_direction(&self, direction: &Array1<f32>) -> Option<(usize, &str, f32)> {
         let clusters = self.clusters.as_ref()?;
         let (cluster_id, sim) =
-            larql_inference::clustering::classify_direction(direction, &clusters.centres);
+            larql_vindex::clustering::classify_direction(direction, &clusters.centres);
         let label = clusters.labels.get(cluster_id).map(|s| s.as_str()).unwrap_or("unknown");
         Some((cluster_id, label, sim))
     }
@@ -235,7 +235,7 @@ pub fn token_embedding_pub(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use larql_inference::clustering::ClusterResult;
+    use larql_vindex::clustering::ClusterResult;
 
     fn make_test_classifier() -> RelationClassifier {
         let clusters = ClusterResult {

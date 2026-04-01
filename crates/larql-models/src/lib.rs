@@ -2,6 +2,7 @@ pub mod architectures;
 pub mod config;
 pub mod detect;
 pub mod vectors;
+pub mod weights;
 
 pub use config::{Activation, FfnType, ModelArchitecture, ModelConfig, NormType, RopeScaling};
 pub use detect::{detect_architecture, detect_from_json, ModelError};
@@ -22,3 +23,4 @@ pub use vectors::{
     COMPONENT_ATTN_QK, COMPONENT_EMBEDDINGS, COMPONENT_FFN_DOWN, COMPONENT_FFN_GATE,
     COMPONENT_FFN_UP,
 };
+pub use weights::ModelWeights;
