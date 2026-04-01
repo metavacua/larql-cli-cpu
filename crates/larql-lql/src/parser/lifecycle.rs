@@ -53,7 +53,25 @@ impl Parser {
         self.expect_keyword(Keyword::Compile)?;
         let vindex = self.parse_vindex_ref()?;
         self.expect_keyword(Keyword::Into)?;
-        self.expect_keyword(Keyword::Model)?;
+
+        // COMPILE ... INTO MODEL or COMPILE ... INTO VINDEX
+        let target = if self.check_keyword(Keyword::Model) {
+            self.advance();
+            CompileTarget::Model
+        } else {
+            // Accept "VINDEX" as an identifier (not a keyword)
+            match self.peek() {
+                crate::lexer::Token::Ident(ref s) if s.eq_ignore_ascii_case("vindex") => {
+                    self.advance();
+                    CompileTarget::Vindex
+                }
+                _ => {
+                    self.expect_keyword(Keyword::Model)?; // will error with good message
+                    CompileTarget::Model
+                }
+            }
+        };
+
         let output = self.expect_string()?;
 
         let mut format = None;
@@ -63,7 +81,7 @@ impl Parser {
         }
 
         self.eat_semicolon();
-        Ok(Statement::Compile { vindex, output, format })
+        Ok(Statement::Compile { vindex, output, format, target })
     }
 
     pub(crate) fn parse_diff(&mut self) -> Result<Statement, ParseError> {

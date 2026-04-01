@@ -18,8 +18,8 @@ impl Session {
         prompt: &str,
         top: Option<u32>,
         layers: Option<&Range>,
-        _mode: Option<WalkMode>,
-        _compare: bool,
+        mode: Option<WalkMode>,
+        compare: bool,
     ) -> Result<Vec<String>, LqlError> {
         let (path, _config, index) = self.require_vindex()?;
         let top_k = top.unwrap_or(10) as usize;
@@ -60,20 +60,28 @@ impl Session {
         let trace = index.walk(&query, &walk_layers, top_k);
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
+        let mode_str = match mode {
+            Some(WalkMode::Pure) => "pure (sparse KNN only)",
+            Some(WalkMode::Dense) => "dense (full matmul)",
+            Some(WalkMode::Hybrid) | None => "hybrid (default)",
+        };
+
         let mut out = Vec::new();
         out.push(format!(
-            "Feature scan for {:?} (token {:?}, {} layers)",
+            "Feature scan for {:?} (token {:?}, {} layers, mode={})",
             prompt,
             token_str.trim(),
             walk_layers.len(),
+            mode_str,
         ));
         out.push(String::new());
 
+        let show_per_layer = if compare { 5 } else { 3 };
         for (layer, hits) in &trace.layers {
             if hits.is_empty() {
                 continue;
             }
-            for hit in hits.iter().take(3) {
+            for hit in hits.iter().take(show_per_layer) {
                 let down_top: String = hit
                     .meta
                     .top_k
@@ -91,8 +99,13 @@ impl Session {
         }
 
         out.push(format!("\n{:.1}ms", elapsed_ms));
-        out.push(String::new());
-        out.push("Note: pure vindex scan (no attention). For inference use INFER.".into());
+        if compare {
+            out.push(String::new());
+            out.push("Note: COMPARE shows more features per layer. For inference use INFER.".into());
+        } else {
+            out.push(String::new());
+            out.push("Note: pure vindex scan (no attention). For inference use INFER.".into());
+        }
 
         Ok(out)
     }
@@ -218,7 +231,7 @@ impl Session {
         entity: &str,
         band: Option<crate::ast::LayerBand>,
         layer: Option<u32>,
-        _relations_only: bool,
+        relations_only: bool,
         verbose: bool,
     ) -> Result<Vec<String>, LqlError> {
         let (path, config, index) = self.require_vindex()?;
@@ -414,6 +427,13 @@ impl Session {
             }
         }).collect();
 
+        // Apply RELATIONS ONLY filter
+        let formatted: Vec<_> = if relations_only {
+            formatted.into_iter().filter(|e| e.is_probe || e.is_cluster).collect()
+        } else {
+            formatted
+        };
+
         // Split into bands
         let mut syntax = Vec::new();
         let mut knowledge = Vec::new();
@@ -522,11 +542,16 @@ impl Session {
         &self,
         _fields: &[Field],
         conditions: &[Condition],
-        _nearest: Option<&NearestClause>,
+        nearest: Option<&NearestClause>,
         order: Option<&OrderBy>,
         limit: Option<u32>,
     ) -> Result<Vec<String>, LqlError> {
-        let (_path, _config, index) = self.require_vindex()?;
+        let (path, _config, index) = self.require_vindex()?;
+
+        // Handle NEAREST TO clause — KNN lookup
+        if let Some(nc) = nearest {
+            return self.exec_select_nearest(index, path, nc, limit);
+        }
 
         let all_layers = index.loaded_layers();
         let limit = limit.unwrap_or(20) as usize;
@@ -625,13 +650,77 @@ impl Session {
         Ok(out)
     }
 
+    /// SELECT NEAREST TO — KNN lookup at a specific layer.
+    fn exec_select_nearest(
+        &self,
+        index: &larql_vindex::VectorIndex,
+        path: &std::path::Path,
+        nc: &NearestClause,
+        limit: Option<u32>,
+    ) -> Result<Vec<String>, LqlError> {
+        let limit = limit.unwrap_or(20) as usize;
+
+        let (embed, embed_scale) = larql_vindex::load_vindex_embeddings(path)
+            .map_err(|e| LqlError::Execution(format!("failed to load embeddings: {e}")))?;
+        let tokenizer = larql_vindex::load_vindex_tokenizer(path)
+            .map_err(|e| LqlError::Execution(format!("failed to load tokenizer: {e}")))?;
+
+        let encoding = tokenizer
+            .encode(nc.entity.as_str(), false)
+            .map_err(|e| LqlError::Execution(format!("tokenize error: {e}")))?;
+        let token_ids: Vec<u32> = encoding.get_ids().to_vec();
+
+        if token_ids.is_empty() {
+            return Ok(vec!["  (entity not found)".into()]);
+        }
+
+        // Build query from entity embedding
+        let hidden = embed.shape()[1];
+        let query = if token_ids.len() == 1 {
+            embed.row(token_ids[0] as usize).mapv(|v| v * embed_scale)
+        } else {
+            let mut avg = larql_vindex::ndarray::Array1::<f32>::zeros(hidden);
+            for &tok in &token_ids {
+                avg += &embed.row(tok as usize).mapv(|v| v * embed_scale);
+            }
+            avg /= token_ids.len() as f32;
+            avg
+        };
+
+        // KNN at the specified layer
+        let hits = index.gate_knn(nc.layer as usize, &query, limit);
+
+        let mut out = Vec::new();
+        out.push(format!(
+            "{:<8} {:<8} {:<20} {:>10}",
+            "Layer", "Feature", "Token", "Score"
+        ));
+        out.push("-".repeat(50));
+
+        for (feat, score) in &hits {
+            let tok = index.feature_meta(nc.layer as usize, *feat)
+                .map(|m| m.top_token.as_str())
+                .unwrap_or("-");
+            out.push(format!(
+                "L{:<7} F{:<7} {:20} {:>10.4}",
+                nc.layer, feat, tok, score
+            ));
+        }
+
+        if hits.is_empty() {
+            out.push("  (no matching features)".into());
+        }
+
+        Ok(out)
+    }
+
     // ── EXPLAIN ──
 
     pub(crate) fn exec_explain(
         &self,
         prompt: &str,
         layers: Option<&Range>,
-        _verbose: bool,
+        verbose: bool,
     ) -> Result<Vec<String>, LqlError> {
         let (path, _config, index) = self.require_vindex()?;
 
@@ -663,16 +752,19 @@ impl Session {
             all_layers
         };
 
-        let trace = index.walk(&query, &walk_layers, 5);
+        let top_k = if verbose { 10 } else { 5 };
+        let trace = index.walk(&query, &walk_layers, top_k);
 
         let mut out = Vec::new();
         for (layer, hits) in &trace.layers {
-            for hit in hits {
+            let show_count = if verbose { hits.len() } else { hits.len().min(5) };
+            for hit in hits.iter().take(show_count) {
+                let down_count = if verbose { 5 } else { 3 };
                 let down_tokens: String = hit
                     .meta
                     .top_k
                     .iter()
-                    .take(3)
+                    .take(down_count)
                     .map(|t| t.token.clone())
                     .collect::<Vec<_>>()
                     .join(", ");

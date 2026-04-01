@@ -234,13 +234,15 @@ fn delete_feature_meta() {
 fn find_free_feature() {
     let mut idx = test_index();
 
-    // Layer 0: all 3 features have metadata → no free slot
-    assert!(idx.find_free_feature(0).is_none());
+    // Layer 0: all 3 features have metadata → returns weakest (lowest c_score)
+    // Scores: Paris=0.95, French=0.88, Europe=0.75 → weakest is Europe at F2
+    let slot = idx.find_free_feature(0).unwrap();
+    assert_eq!(slot, 2); // Europe has lowest c_score
 
-    // Layer 1: feature 1 is None → free slot
+    // Layer 1: feature 1 is None → returns empty slot first
     assert_eq!(idx.find_free_feature(1), Some(1));
 
-    // Delete one in layer 0
+    // Delete one in layer 0 → returns the now-empty slot
     idx.delete_feature_meta(0, 2);
     assert_eq!(idx.find_free_feature(0), Some(2));
 }

@@ -51,16 +51,31 @@ impl VectorIndex {
     }
 
     /// Find a free (unused) feature slot at a layer — one with no metadata.
-    /// Returns None if the layer is full.
+    /// If all slots have metadata, returns the weakest feature (lowest c_score)
+    /// as a candidate for overwriting.
     pub fn find_free_feature(&self, layer: usize) -> Option<usize> {
         if let Some(Some(ref metas)) = self.down_meta.get(layer) {
+            // First: look for an empty slot
             for (i, m) in metas.iter().enumerate() {
                 if m.is_none() {
                     return Some(i);
                 }
             }
+            // No empty slots — find the weakest feature (lowest c_score)
+            let mut weakest_idx = 0;
+            let mut weakest_score = f32::MAX;
+            for (i, m) in metas.iter().enumerate() {
+                if let Some(meta) = m {
+                    if meta.c_score < weakest_score {
+                        weakest_score = meta.c_score;
+                        weakest_idx = i;
+                    }
+                }
+            }
+            Some(weakest_idx)
+        } else {
+            None
         }
-        None
     }
 
     /// Find features matching entity and/or relation filters at a given layer (or all layers).

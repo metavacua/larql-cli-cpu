@@ -11,7 +11,7 @@ impl Session {
     pub(crate) fn exec_show_relations(
         &self,
         layer_filter: Option<u32>,
-        _with_examples: bool,
+        with_examples: bool,
     ) -> Result<Vec<String>, LqlError> {
         let (_path, _config, index) = self.require_vindex()?;
 
@@ -28,6 +28,7 @@ impl Session {
             min_layer: usize,
             max_layer: usize,
             original: String,
+            examples: Vec<String>,
         }
 
         let mut tokens: HashMap<String, TokenInfo> = HashMap::new();
@@ -44,12 +45,18 @@ impl Session {
                             continue;
                         }
                         let key = tok.to_lowercase();
+                        let examples: Vec<String> = meta.top_k.iter()
+                            .filter(|t| t.token.trim() != tok && is_content_token(t.token.trim()))
+                            .take(3)
+                            .map(|t| t.token.trim().to_string())
+                            .collect();
                         let entry = tokens.entry(key).or_insert(TokenInfo {
                             count: 0,
                             max_score: 0.0,
                             min_layer: layer,
                             max_layer: layer,
                             original: tok.to_string(),
+                            examples,
                         });
                         entry.count += 1;
                         if meta.c_score > entry.max_score {
@@ -85,13 +92,19 @@ impl Session {
         out.push("-".repeat(55));
 
         for (tok, info) in &sorted {
+            let examples_str = if with_examples && !info.examples.is_empty() {
+                format!("  e.g. {}", info.examples.join(", "))
+            } else {
+                String::new()
+            };
             out.push(format!(
-                "{:<25} {:>8} {:>8.2} {:>5}-{}",
+                "{:<25} {:>8} {:>8.2} {:>5}-{}{}",
                 tok,
                 info.count,
                 info.max_score,
                 info.min_layer,
                 info.max_layer,
+                examples_str,
             ));
         }
 
@@ -157,11 +170,23 @@ impl Session {
     pub(crate) fn exec_show_features(
         &self,
         layer: u32,
-        _conditions: &[Condition],
+        conditions: &[Condition],
         limit: Option<u32>,
     ) -> Result<Vec<String>, LqlError> {
         let (_path, _config, index) = self.require_vindex()?;
         let limit = limit.unwrap_or(20) as usize;
+
+        // Extract filters from WHERE conditions
+        let token_filter = conditions.iter().find(|c| c.field == "relation" || c.field == "token").and_then(|c| {
+            if let Value::String(ref s) = c.value { Some(s.as_str()) } else { None }
+        });
+        let min_score = conditions.iter().find(|c| c.field == "confidence" || c.field == "c_score").and_then(|c| {
+            match &c.value {
+                Value::Number(n) => Some(*n as f32),
+                Value::Integer(n) => Some(*n as f32),
+                _ => None,
+            }
+        });
 
         let metas = index
             .down_meta_at(layer as usize)
@@ -180,6 +205,18 @@ impl Session {
                 break;
             }
             if let Some(meta) = meta_opt {
+                // Apply WHERE filters
+                if let Some(tf) = token_filter {
+                    if !meta.top_token.to_lowercase().contains(&tf.to_lowercase()) {
+                        continue;
+                    }
+                }
+                if let Some(ms) = min_score {
+                    if meta.c_score < ms {
+                        continue;
+                    }
+                }
+
                 let down_tokens: String = meta
                     .top_k
                     .iter()

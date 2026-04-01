@@ -140,11 +140,7 @@ fn parse_compile_current_safetensors() {
     )
     .unwrap();
     match stmt {
-        Statement::Compile {
-            vindex,
-            output,
-            format,
-        } => {
+        Statement::Compile { vindex, output, format, .. } => {
             assert!(matches!(vindex, VindexRef::Current));
             assert_eq!(output, "edited/");
             assert_eq!(format, Some(OutputFormat::Safetensors));
@@ -160,11 +156,7 @@ fn parse_compile_path_gguf() {
     )
     .unwrap();
     match stmt {
-        Statement::Compile {
-            vindex,
-            output,
-            format,
-        } => {
+        Statement::Compile { vindex, output, format, .. } => {
             assert!(matches!(vindex, VindexRef::Path(ref p) if p == "gemma3.vindex"));
             assert_eq!(output, "out/");
             assert_eq!(format, Some(OutputFormat::Gguf));
@@ -1244,5 +1236,28 @@ fn parse_diff_without_into_patch() {
             assert_eq!(limit, Some(10));
         }
         _ => panic!("expected Diff"),
+    }
+}
+
+#[test]
+fn parse_compile_into_vindex() {
+    let stmt = parse(r#"COMPILE CURRENT INTO VINDEX "output.vindex";"#).unwrap();
+    match stmt {
+        Statement::Compile { target, output, .. } => {
+            assert_eq!(target, CompileTarget::Vindex);
+            assert_eq!(output, "output.vindex");
+        }
+        _ => panic!("expected Compile"),
+    }
+}
+
+#[test]
+fn parse_compile_into_model_explicit() {
+    let stmt = parse(r#"COMPILE CURRENT INTO MODEL "out/" FORMAT safetensors;"#).unwrap();
+    match stmt {
+        Statement::Compile { target, .. } => {
+            assert_eq!(target, CompileTarget::Model);
+        }
+        _ => panic!("expected Compile"),
     }
 }

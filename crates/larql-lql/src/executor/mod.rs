@@ -85,20 +85,74 @@ impl Session {
             Statement::Extract { model, output, components, layers, extract_level } => {
                 self.exec_extract(model, output, components.as_deref(), layers.as_ref(), *extract_level)
             }
-            Statement::Compile { vindex, output, format } => {
-                self.exec_compile(vindex, output, *format)
+            Statement::Compile { vindex, output, format, target } => {
+                self.exec_compile(vindex, output, *format, *target)
             }
             Statement::Diff { a, b, layer, relation, limit, into_patch } => {
                 self.exec_diff(a, b, *layer, relation.as_deref(), *limit, into_patch.as_deref())
             }
             Statement::Insert { entity, relation, target, layer, confidence } => {
-                self.exec_insert(entity, relation, target, *layer, *confidence)
+                let result = self.exec_insert(entity, relation, target, *layer, *confidence);
+                // Record to patch if session active
+                if result.is_ok() {
+                    if let Some(ref mut recording) = self.patch_recording {
+                        recording.operations.push(larql_vindex::PatchOp::Insert {
+                            layer: layer.unwrap_or(0) as usize,
+                            feature: 0, // filled by exec_insert
+                            relation: Some(relation.clone()),
+                            entity: entity.clone(),
+                            target: target.clone(),
+                            confidence: *confidence,
+                            gate_vector_b64: None,
+                            down_meta: None,
+                        });
+                    }
+                }
+                result
             }
             Statement::Infer { prompt, top, compare } => {
                 self.exec_infer(prompt, *top, *compare)
             }
-            Statement::Delete { conditions } => self.exec_delete(conditions),
-            Statement::Update { set, conditions } => self.exec_update(set, conditions),
+            Statement::Delete { conditions } => {
+                let result = self.exec_delete(conditions);
+                if result.is_ok() {
+                    if let Some(ref mut recording) = self.patch_recording {
+                        // Record delete with best-effort field extraction
+                        let layer = conditions.iter().find(|c| c.field == "layer")
+                            .and_then(|c| if let Value::Integer(n) = c.value { Some(n as usize) } else { None })
+                            .unwrap_or(0);
+                        let feature = conditions.iter().find(|c| c.field == "feature")
+                            .and_then(|c| if let Value::Integer(n) = c.value { Some(n as usize) } else { None })
+                            .unwrap_or(0);
+                        recording.operations.push(larql_vindex::PatchOp::Delete {
+                            layer,
+                            feature,
+                            reason: None,
+                        });
+                    }
+                }
+                result
+            }
+            Statement::Update { set, conditions } => {
+                let result = self.exec_update(set, conditions);
+                if result.is_ok() {
+                    if let Some(ref mut recording) = self.patch_recording {
+                        let layer = conditions.iter().find(|c| c.field == "layer")
+                            .and_then(|c| if let Value::Integer(n) = c.value { Some(n as usize) } else { None })
+                            .unwrap_or(0);
+                        let feature = conditions.iter().find(|c| c.field == "feature")
+                            .and_then(|c| if let Value::Integer(n) = c.value { Some(n as usize) } else { None })
+                            .unwrap_or(0);
+                        recording.operations.push(larql_vindex::PatchOp::Update {
+                            layer,
+                            feature,
+                            gate_vector_b64: None,
+                            down_meta: None,
+                        });
+                    }
+                }
+                result
+            }
             Statement::Merge { source, target, conflict } => {
                 self.exec_merge(source, target.as_deref(), *conflict)
             }

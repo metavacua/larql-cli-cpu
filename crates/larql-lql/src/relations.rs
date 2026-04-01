@@ -133,6 +133,79 @@ impl RelationClassifier {
         let label = clusters.labels.get(cluster_id).map(|s| s.as_str()).unwrap_or("unknown");
         Some((cluster_id, label, sim))
     }
+
+    /// Find the cluster ID for a relation label.
+    /// Tries exact match, then normalised variants (hyphens, underscores, spaces all equivalent).
+    pub fn cluster_for_relation(&self, relation: &str) -> Option<usize> {
+        let clusters = self.clusters.as_ref()?;
+        let norm = normalise_relation(relation);
+
+        // Exact match
+        for (i, label) in clusters.labels.iter().enumerate() {
+            if label.eq_ignore_ascii_case(relation) {
+                return Some(i);
+            }
+        }
+        // Normalised match (hyphens, underscores, spaces all equivalent)
+        for (i, label) in clusters.labels.iter().enumerate() {
+            if normalise_relation(label) == norm {
+                return Some(i);
+            }
+        }
+        // Substring match
+        for (i, label) in clusters.labels.iter().enumerate() {
+            let label_norm = normalise_relation(label);
+            if label_norm.contains(&norm) || norm.contains(&label_norm) {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Get the cluster centre vector for a relation label.
+    pub fn cluster_centre_for_relation(&self, relation: &str) -> Option<Vec<f32>> {
+        let cluster_id = self.cluster_for_relation(relation)?;
+        let clusters = self.clusters.as_ref()?;
+        clusters.centres.get(cluster_id).cloned()
+    }
+
+    /// Find the typical layer for a relation by scanning probe labels and cluster assignments.
+    /// Returns the most common layer for features with this relation.
+    pub fn typical_layer_for_relation(&self, relation: &str) -> Option<usize> {
+        let norm = normalise_relation(relation);
+        let mut layer_counts: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+
+        // Check probe labels
+        for (&(layer, _), label) in &self.probe_labels {
+            let label_norm = normalise_relation(label);
+            if label_norm == norm || label_norm.contains(&norm) || norm.contains(&label_norm) {
+                *layer_counts.entry(layer).or_default() += 1;
+            }
+        }
+
+        // If no probe matches, check cluster assignments
+        if layer_counts.is_empty() {
+            if let Some(cluster_id) = self.cluster_for_relation(relation) {
+                for (&(layer, _), &cid) in &self.feature_assignments {
+                    if cid == cluster_id {
+                        *layer_counts.entry(layer).or_default() += 1;
+                    }
+                }
+            }
+        }
+
+        layer_counts.into_iter().max_by_key(|(_, count)| *count).map(|(layer, _)| layer)
+    }
+}
+
+/// Normalise a relation name: lowercase, replace hyphens/underscores/spaces with a single space.
+fn normalise_relation(s: &str) -> String {
+    s.to_lowercase()
+        .replace('-', " ")
+        .replace('_', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Get the averaged embedding for a token string (public for executor use).

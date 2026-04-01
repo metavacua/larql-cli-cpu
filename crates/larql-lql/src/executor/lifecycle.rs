@@ -313,6 +313,7 @@ impl Session {
         vindex: &VindexRef,
         output: &str,
         _format: Option<OutputFormat>,
+        target: CompileTarget,
     ) -> Result<Vec<String>, LqlError> {
         let vindex_path = match vindex {
             VindexRef::Current => {
@@ -324,16 +325,26 @@ impl Session {
             VindexRef::Path(p) => PathBuf::from(p),
         };
 
-        let config = larql_vindex::load_vindex_config(&vindex_path)
+        match target {
+            CompileTarget::Vindex => self.exec_compile_into_vindex(&vindex_path, output),
+            CompileTarget::Model => self.exec_compile_into_model(&vindex_path, output),
+        }
+    }
+
+    fn exec_compile_into_model(
+        &self,
+        vindex_path: &std::path::Path,
+        output: &str,
+    ) -> Result<Vec<String>, LqlError> {
+        let config = larql_vindex::load_vindex_config(vindex_path)
             .map_err(|e| LqlError::Execution(format!("failed to load vindex config: {e}")))?;
 
         if !config.has_model_weights {
             return Err(LqlError::Execution(format!(
-                "COMPILE requires model weights in the vindex.\n\
+                "COMPILE INTO MODEL requires model weights in the vindex.\n\
                  This vindex was built without --include-weights.\n\
-                 Rebuild: EXTRACT MODEL \"{}\" INTO \"{}\" (with weights)",
-                config.model,
-                vindex_path.display()
+                 Rebuild: EXTRACT MODEL \"{}\" INTO \"{}\" WITH ALL",
+                config.model, vindex_path.display()
             )));
         }
 
@@ -342,14 +353,13 @@ impl Session {
             .map_err(|e| LqlError::Execution(format!("failed to create output dir: {e}")))?;
 
         let mut cb = larql_vindex::SilentLoadCallbacks;
-        let weights = larql_inference::load_model_weights_from_vindex(&vindex_path, &mut cb)
+        let weights = larql_inference::load_model_weights_from_vindex(vindex_path, &mut cb)
             .map_err(|e| LqlError::Execution(format!("failed to load model weights: {e}")))?;
 
         let mut build_cb = larql_inference::vindex::SilentBuildCallbacks;
         larql_inference::write_model_weights(&weights, &output_dir, &mut build_cb)
             .map_err(|e| LqlError::Execution(format!("failed to write model: {e}")))?;
 
-        // Copy tokenizer
         let tok_src = vindex_path.join("tokenizer.json");
         let tok_dst = output_dir.join("tokenizer.json");
         if tok_src.exists() {
@@ -358,12 +368,65 @@ impl Session {
         }
 
         let mut out = Vec::new();
-        out.push(format!(
-            "Compiled {} → {}",
-            vindex_path.display(),
-            output_dir.display()
-        ));
+        out.push(format!("Compiled {} → {}", vindex_path.display(), output_dir.display()));
         out.push(format!("Model: {}", config.model));
+        out.push(format!("Size: {}", format_bytes(dir_size(&output_dir))));
+        Ok(out)
+    }
+
+    fn exec_compile_into_vindex(
+        &self,
+        source_path: &std::path::Path,
+        output: &str,
+    ) -> Result<Vec<String>, LqlError> {
+        let output_dir = PathBuf::from(output);
+        std::fs::create_dir_all(&output_dir)
+            .map_err(|e| LqlError::Execution(format!("failed to create output dir: {e}")))?;
+
+        // Load the current vindex (with any mutations applied)
+        let (path, config, index) = self.require_vindex()?;
+
+        // Save gate vectors + down_meta + config to the new directory
+        let layer_infos = index.save_gate_vectors(&output_dir)
+            .map_err(|e| LqlError::Execution(format!("failed to save gate vectors: {e}")))?;
+        let dm_count = index.save_down_meta(&output_dir)
+            .map_err(|e| LqlError::Execution(format!("failed to save down_meta: {e}")))?;
+
+        // Copy embeddings
+        let embed_src = path.join("embeddings.bin");
+        let embed_dst = output_dir.join("embeddings.bin");
+        if embed_src.exists() {
+            std::fs::copy(&embed_src, &embed_dst)
+                .map_err(|e| LqlError::Execution(format!("failed to copy embeddings: {e}")))?;
+        }
+
+        // Copy tokenizer
+        let tok_src = path.join("tokenizer.json");
+        let tok_dst = output_dir.join("tokenizer.json");
+        if tok_src.exists() {
+            std::fs::copy(&tok_src, &tok_dst)
+                .map_err(|e| LqlError::Execution(format!("failed to copy tokenizer: {e}")))?;
+        }
+
+        // Copy label files
+        for label_file in &["relation_clusters.json", "feature_clusters.jsonl", "feature_labels.json"] {
+            let src = path.join(label_file);
+            let dst = output_dir.join(label_file);
+            if src.exists() {
+                let _ = std::fs::copy(&src, &dst);
+            }
+        }
+
+        // Write updated config with new layer infos
+        let mut new_config = config.clone();
+        new_config.layers = layer_infos;
+        new_config.checksums = larql_vindex::checksums::compute_checksums(&output_dir).ok();
+        larql_vindex::VectorIndex::save_config(&new_config, &output_dir)
+            .map_err(|e| LqlError::Execution(format!("failed to save config: {e}")))?;
+
+        let mut out = Vec::new();
+        out.push(format!("Compiled {} → {}", source_path.display(), output_dir.display()));
+        out.push(format!("Features: {}", dm_count));
         out.push(format!("Size: {}", format_bytes(dir_size(&output_dir))));
         Ok(out)
     }

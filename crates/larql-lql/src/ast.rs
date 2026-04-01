@@ -17,6 +17,7 @@ pub enum Statement {
         vindex: VindexRef,
         output: String,
         format: Option<OutputFormat>,
+        target: CompileTarget,
     },
     Diff {
         a: VindexRef,
@@ -165,6 +166,14 @@ pub enum ExtractLevel {
     Inference,
     /// + up, norms, lm_head (~10 GB f16), enables COMPILE
     All,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompileTarget {
+    /// COMPILE ... INTO MODEL — produce safetensors/gguf
+    Model,
+    /// COMPILE ... INTO VINDEX — bake patches into clean vindex
+    Vindex,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

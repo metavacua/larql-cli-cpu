@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 /// Metadata stored in index.json inside a .vindex directory.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct VindexConfig {
     /// Format version.
     pub version: u32,
@@ -207,7 +207,7 @@ fn default_router_type() -> String {
 }
 
 /// Per-layer info for gate_vectors.bin layout.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct VindexLayerInfo {
     pub layer: usize,
     pub num_features: usize,
