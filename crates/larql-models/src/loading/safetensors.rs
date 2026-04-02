@@ -77,7 +77,7 @@ pub fn load_model_dir(path: impl AsRef<Path>) -> Result<ModelWeights, ModelError
         return Err(ModelError::NoSafetensors(path.to_path_buf()));
     }
 
-    let mut tensors: HashMap<String, Array2<f32>> = HashMap::new();
+    let mut tensors: HashMap<String, crate::WeightArray> = HashMap::new();
     let mut vectors: HashMap<String, Vec<f32>> = HashMap::new();
 
     for st_path in &st_files {
@@ -106,7 +106,7 @@ pub fn load_model_dir(path: impl AsRef<Path>) -> Result<ModelWeights, ModelError
                     2 => {
                         let arr = Array2::from_shape_vec((shape[0], shape[1]), data)
                             .map_err(|e| ModelError::Parse(e.to_string()))?;
-                        tensors.insert(key, arr);
+                        tensors.insert(key, arr.into_shared());
                     }
                     1 => { vectors.insert(key, data); }
                     _ => {}
@@ -125,7 +125,7 @@ pub fn load_model_dir(path: impl AsRef<Path>) -> Result<ModelWeights, ModelError
                     2 => {
                         let arr = Array2::from_shape_vec((shape[0], shape[1]), data)
                             .map_err(|e| ModelError::Parse(e.to_string()))?;
-                        tensors.insert(key, arr);
+                        tensors.insert(key, arr.into_shared());
                     }
                     1 => { vectors.insert(key, data); }
                     _ => {}
@@ -232,7 +232,7 @@ fn dequantize_mxfp4_experts(
     st: &safetensors::SafeTensors,
     tensor_names: &[String],
     prefixes: &[&str],
-    tensors: &mut HashMap<String, Array2<f32>>,
+    tensors: &mut HashMap<String, crate::WeightArray>,
     _vectors: &mut HashMap<String, Vec<f32>>,
 ) -> Result<(), ModelError> {
     // Find all gate_up_proj_blocks tensors (one per layer)
@@ -280,10 +280,10 @@ fn dequantize_mxfp4_experts(
 
             tensors.insert(gate_key,
                 Array2::from_shape_vec((half, in_features), gate_data)
-                    .map_err(|e| ModelError::Parse(e.to_string()))?);
+                    .map_err(|e| ModelError::Parse(e.to_string()))?.into_shared());
             tensors.insert(up_key,
                 Array2::from_shape_vec((half, in_features), up_data)
-                    .map_err(|e| ModelError::Parse(e.to_string()))?);
+                    .map_err(|e| ModelError::Parse(e.to_string()))?.into_shared());
         }
 
         // Dequantize down projection
@@ -302,7 +302,7 @@ fn dequantize_mxfp4_experts(
                     let down_key = format!("{layer_prefix}.block_sparse_moe.experts.{e}.w2.weight");
                     tensors.insert(down_key,
                         Array2::from_shape_vec((down_out, down_in), data.clone())
-                            .map_err(|e| ModelError::Parse(e.to_string()))?);
+                            .map_err(|e| ModelError::Parse(e.to_string()))?.into_shared());
                 }
             }
         }
@@ -316,7 +316,7 @@ fn dequantize_mxfp4_experts(
                     let router_key = format!("{layer_prefix}.block_sparse_moe.gate.weight");
                     tensors.insert(router_key,
                         Array2::from_shape_vec((s[0], s[1]), data)
-                            .map_err(|e| ModelError::Parse(e.to_string()))?);
+                            .map_err(|e| ModelError::Parse(e.to_string()))?.into_shared());
                 }
             }
         }

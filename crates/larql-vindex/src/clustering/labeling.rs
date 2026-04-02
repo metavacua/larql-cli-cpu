@@ -4,7 +4,8 @@
 //! 1. TF-IDF: distinctive tokens per cluster (fallback)
 //! 2. Member-based: average member embeddings → nearest category word
 
-use ndarray::{Array1, Array2};
+use ndarray::Array1;
+use larql_models::WeightArray;
 use std::collections::HashMap;
 
 use super::categories::{category_words, is_stop_word};
@@ -99,8 +100,8 @@ pub fn auto_label_clusters(
 /// Duplicates allowed — two clusters both labeled "country" means two
 /// country-related feature groups.
 pub fn auto_label_clusters_from_embeddings(
-    _centres: &Array2<f32>,
-    embed: &Array2<f32>,
+    _centres: &ndarray::ArrayBase<impl ndarray::Data<Elem = f32>, ndarray::Ix2>,
+    embed: &ndarray::ArrayBase<impl ndarray::Data<Elem = f32>, ndarray::Ix2>,
     tokenizer: &tokenizers::Tokenizer,
     assignments: &[usize],
     top_tokens: &[String],
@@ -248,7 +249,7 @@ pub fn detect_entity_pattern(members: &[String]) -> Option<String> {
 /// Encode a token using the tokenizer and embedding matrix.
 pub fn encode_token_with_tokenizer(
     tok: &str,
-    embed: &Array2<f32>,
+    embed: &ndarray::ArrayBase<impl ndarray::Data<Elem = f32>, ndarray::Ix2>,
     hidden: usize,
     tokenizer: &tokenizers::Tokenizer,
 ) -> Option<Array1<f32>> {

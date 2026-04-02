@@ -251,8 +251,8 @@ impl<'a> FfnBackend for RouteGuidedFfn<'a> {
 /// Pre-recorded activation variant: uses stored gate values (fast, less accurate).
 fn route_ffn_forward_prerecorded(
     x: &Array2<f32>,
-    w_up: &Array2<f32>,
-    w_down: &Array2<f32>,
+    w_up: &ndarray::ArrayBase<impl ndarray::Data<Elem = f32>, ndarray::Ix2>,
+    w_down: &ndarray::ArrayBase<impl ndarray::Data<Elem = f32>, ndarray::Ix2>,
     features: &[(usize, f32)],
 ) -> Array2<f32> {
     let seq_len = x.shape()[0];
@@ -286,9 +286,9 @@ fn route_ffn_forward_prerecorded(
 /// Eliminates the full gate matmul but keeps accurate activations.
 fn route_ffn_forward_guided(
     x: &Array2<f32>,
-    w_gate: &Array2<f32>,    // (intermediate, hidden)
-    w_up: &Array2<f32>,      // (intermediate, hidden)
-    w_down: &Array2<f32>,    // (hidden, intermediate)
+    w_gate: &ndarray::ArrayBase<impl ndarray::Data<Elem = f32>, ndarray::Ix2>,    // (intermediate, hidden)
+    w_up: &ndarray::ArrayBase<impl ndarray::Data<Elem = f32>, ndarray::Ix2>,      // (intermediate, hidden)
+    w_down: &ndarray::ArrayBase<impl ndarray::Data<Elem = f32>, ndarray::Ix2>,    // (hidden, intermediate)
     feature_indices: &[usize],
 ) -> Array2<f32> {
     let seq_len = x.shape()[0];

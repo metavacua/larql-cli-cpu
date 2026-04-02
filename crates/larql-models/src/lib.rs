@@ -26,6 +26,6 @@ pub use vectors::{
     COMPONENT_ATTN_QK, COMPONENT_EMBEDDINGS, COMPONENT_FFN_DOWN, COMPONENT_FFN_GATE,
     COMPONENT_FFN_UP,
 };
-pub use weights::ModelWeights;
+pub use weights::{ModelWeights, WeightArray};
 
 pub use loading::{load_model_dir, resolve_model_path, load_gguf};

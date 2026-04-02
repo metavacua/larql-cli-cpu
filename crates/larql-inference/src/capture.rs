@@ -224,7 +224,7 @@ impl InferenceModel {
 
 /// Project a residual vector onto the embedding matrix to find top-k tokens.
 fn project_to_vocab(
-    embed: &ndarray::Array2<f32>,
+    embed: &ndarray::ArrayBase<impl ndarray::Data<Elem = f32>, ndarray::Ix2>,
     residual: &[f32],
     k: usize,
     tokenizer: &tokenizers::Tokenizer,

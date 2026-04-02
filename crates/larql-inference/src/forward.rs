@@ -70,7 +70,7 @@ fn apply_norm(
 }
 
 /// Compute x @ w.T via BLAS.
-pub fn dot_proj(x: &Array2<f32>, w: &Array2<f32>) -> Array2<f32> {
+pub fn dot_proj(x: &ndarray::ArrayBase<impl ndarray::Data<Elem = f32>, ndarray::Ix2>, w: &ndarray::ArrayBase<impl ndarray::Data<Elem = f32>, ndarray::Ix2>) -> Array2<f32> {
     x.dot(&w.t())
 }
 

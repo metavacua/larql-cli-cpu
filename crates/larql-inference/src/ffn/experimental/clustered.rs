@@ -42,7 +42,7 @@ impl ClusteredGateIndex {
         ClusteredGateIndex { layers: layer_map, num_clusters, top_c }
     }
 
-    fn kmeans(w_gate: &Array2<f32>, k: usize, iters: usize) -> LayerClusters {
+    fn kmeans(w_gate: &ndarray::ArrayBase<impl ndarray::Data<Elem = f32>, ndarray::Ix2>, k: usize, iters: usize) -> LayerClusters {
         let n = w_gate.shape()[0];
         let d = w_gate.shape()[1];
         let k = k.min(n);

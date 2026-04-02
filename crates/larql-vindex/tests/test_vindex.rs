@@ -3,7 +3,7 @@
 use larql_vindex::{
     FeatureMeta, GateIndex, VectorIndex, VindexConfig, VindexLayerInfo,
 };
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArcArray2};
 
 fn make_top_k(token: &str, id: u32, logit: f32) -> larql_models::TopKEntry {
     larql_models::TopKEntry {
@@ -1560,7 +1560,7 @@ fn make_synthetic_model() -> larql_models::ModelWeights {
     let intermediate = 4;
     let vocab_size = 16;
 
-    let mut tensors: HashMap<String, ndarray::Array2<f32>> = HashMap::new();
+    let mut tensors: HashMap<String, ArcArray2<f32>> = HashMap::new();
     let mut vectors: HashMap<String, Vec<f32>> = HashMap::new();
 
     // Per layer: gate, up, down, attn Q/K/V/O, norms
@@ -1568,23 +1568,23 @@ fn make_synthetic_model() -> larql_models::ModelWeights {
         // FFN gate (intermediate × hidden)
         let mut gate = ndarray::Array2::<f32>::zeros((intermediate, hidden));
         for i in 0..intermediate { gate[[i, i % hidden]] = 1.0 + layer as f32; }
-        tensors.insert(format!("layers.{layer}.mlp.gate_proj.weight"), gate);
+        tensors.insert(format!("layers.{layer}.mlp.gate_proj.weight"), gate.into_shared());
 
         // FFN up (intermediate × hidden)
         let mut up = ndarray::Array2::<f32>::zeros((intermediate, hidden));
         for i in 0..intermediate { up[[i, (i + 1) % hidden]] = 0.5; }
-        tensors.insert(format!("layers.{layer}.mlp.up_proj.weight"), up);
+        tensors.insert(format!("layers.{layer}.mlp.up_proj.weight"), up.into_shared());
 
         // FFN down (hidden × intermediate)
         let mut down = ndarray::Array2::<f32>::zeros((hidden, intermediate));
         for i in 0..intermediate { down[[i % hidden, i]] = 0.3; }
-        tensors.insert(format!("layers.{layer}.mlp.down_proj.weight"), down);
+        tensors.insert(format!("layers.{layer}.mlp.down_proj.weight"), down.into_shared());
 
         // Attention Q/K/V/O (hidden × hidden)
         for suffix in &["q_proj", "k_proj", "v_proj", "o_proj"] {
             let mut attn = ndarray::Array2::<f32>::zeros((hidden, hidden));
             for i in 0..hidden { attn[[i, i]] = 1.0; }
-            tensors.insert(format!("layers.{layer}.self_attn.{suffix}.weight"), attn);
+            tensors.insert(format!("layers.{layer}.self_attn.{suffix}.weight"), attn.into_shared());
         }
 
         // Norms
@@ -1601,6 +1601,7 @@ fn make_synthetic_model() -> larql_models::ModelWeights {
         embed[[i, i % hidden]] = 1.0;
     }
 
+    let embed = embed.into_shared();
     let lm_head = embed.clone();
 
     let arch = larql_models::detect_from_json(&serde_json::json!({

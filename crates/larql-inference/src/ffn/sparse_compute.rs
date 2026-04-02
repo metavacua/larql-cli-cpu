@@ -118,7 +118,7 @@ pub fn sparse_ffn_forward(
 
 /// Gather rows from a weight matrix for selected features.
 fn gather_rows(
-    w: &Array2<f32>,
+    w: &ndarray::ArrayBase<impl ndarray::Data<Elem = f32>, ndarray::Ix2>,
     features: &[usize],
     hidden: usize,
 ) -> Vec<f32> {

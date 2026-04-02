@@ -473,7 +473,7 @@ pub fn run(args: CircuitDiscoverArgs) -> Result<(), Box<dyn std::error::Error>> 
 }
 
 fn project_top_token(
-    embed: &ndarray::Array2<f32>,
+    embed: &ndarray::ArrayBase<impl ndarray::Data<Elem = f32>, ndarray::Ix2>,
     vector: &[f32],
     tokenizer: &tokenizers::Tokenizer,
 ) -> String {

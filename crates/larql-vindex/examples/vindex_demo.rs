@@ -9,7 +9,7 @@
 
 use larql_models::TopKEntry;
 use larql_vindex::{FeatureMeta, VectorIndex, VindexConfig};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArcArray2};
 use std::collections::HashMap;
 
 fn main() {
@@ -484,26 +484,26 @@ fn make_config(model: &str, layers: usize, hidden: usize, intermediate: usize,
 
 fn make_synthetic_model() -> larql_models::ModelWeights {
     let (num_layers, hidden, intermediate, vocab_size) = (2, 8, 4, 16);
-    let mut tensors: HashMap<String, Array2<f32>> = HashMap::new();
+    let mut tensors: HashMap<String, ArcArray2<f32>> = HashMap::new();
     let mut vectors: HashMap<String, Vec<f32>> = HashMap::new();
 
     for layer in 0..num_layers {
         let mut gate = Array2::<f32>::zeros((intermediate, hidden));
         for i in 0..intermediate { gate[[i, i % hidden]] = 1.0 + layer as f32; }
-        tensors.insert(format!("layers.{layer}.mlp.gate_proj.weight"), gate);
+        tensors.insert(format!("layers.{layer}.mlp.gate_proj.weight"), gate.into_shared());
 
         let mut up = Array2::<f32>::zeros((intermediate, hidden));
         for i in 0..intermediate { up[[i, (i + 1) % hidden]] = 0.5; }
-        tensors.insert(format!("layers.{layer}.mlp.up_proj.weight"), up);
+        tensors.insert(format!("layers.{layer}.mlp.up_proj.weight"), up.into_shared());
 
         let mut down = Array2::<f32>::zeros((hidden, intermediate));
         for i in 0..intermediate { down[[i % hidden, i]] = 0.3; }
-        tensors.insert(format!("layers.{layer}.mlp.down_proj.weight"), down);
+        tensors.insert(format!("layers.{layer}.mlp.down_proj.weight"), down.into_shared());
 
         for s in &["q_proj", "k_proj", "v_proj", "o_proj"] {
             let mut a = Array2::<f32>::zeros((hidden, hidden));
             for i in 0..hidden { a[[i, i]] = 1.0; }
-            tensors.insert(format!("layers.{layer}.self_attn.{s}.weight"), a);
+            tensors.insert(format!("layers.{layer}.self_attn.{s}.weight"), a.into_shared());
         }
         vectors.insert(format!("layers.{layer}.input_layernorm.weight"), vec![1.0; hidden]);
         vectors.insert(format!("layers.{layer}.post_attention_layernorm.weight"), vec![1.0; hidden]);
@@ -520,8 +520,9 @@ fn make_synthetic_model() -> larql_models::ModelWeights {
         "num_key_value_heads": 1, "rope_theta": 10000.0, "vocab_size": vocab_size,
     }));
 
+    let embed = embed.into_shared();
     larql_models::ModelWeights {
-        tensors, vectors, embed: embed.clone(), lm_head: embed,
+        tensors, vectors, embed: embed.clone(), lm_head: embed.clone(),
         num_layers, hidden_size: hidden, intermediate_size: intermediate, vocab_size,
         head_dim: hidden, num_q_heads: 1, num_kv_heads: 1, rope_base: 10000.0, arch,
     }

@@ -166,7 +166,7 @@ impl GgufFile {
     }
 
     /// Load all tensors, dequantizing to f32.
-    pub fn load_tensors(&self) -> Result<(HashMap<String, Array2<f32>>, HashMap<String, Vec<f32>>), ModelError> {
+    pub fn load_tensors(&self) -> Result<(HashMap<String, crate::WeightArray>, HashMap<String, Vec<f32>>), ModelError> {
         let file = std::fs::File::open(&self.path)?;
         let mmap = unsafe { memmap2::Mmap::map(&file)? };
 
@@ -198,7 +198,7 @@ impl GgufFile {
                     let cols = info.dims[1] as usize;
                     let arr = Array2::from_shape_vec((rows, cols), floats)
                         .map_err(|e| ModelError::Parse(format!("tensor {}: {}", info.name, e)))?;
-                    tensors.insert(key, arr);
+                    tensors.insert(key, arr.into_shared());
                 }
                 1 => {
                     vectors.insert(key, floats);
@@ -270,7 +270,7 @@ pub fn load_gguf(path: &Path) -> Result<ModelWeights, ModelError> {
     let (mut tensors, vectors) = gguf.load_tensors()?;
 
     // Re-normalize keys through the architecture's prefix stripping
-    let mut normalized_tensors = HashMap::new();
+    let mut normalized_tensors: HashMap<String, crate::WeightArray> = HashMap::new();
     for (k, v) in tensors.drain() {
         let key = super::safetensors::normalize_key_pub(&k, prefixes);
         normalized_tensors.insert(key, v);

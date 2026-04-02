@@ -472,9 +472,9 @@ pub fn load_model_weights(
         .map_err(|e| VindexError::Parse(e.to_string()))?;
 
     let mut mmap_cache: HashMap<String, memmap2::Mmap> = HashMap::new();
-    let mut tensors: HashMap<String, Array2<f32>> = HashMap::new();
+    let mut tensors: HashMap<String, larql_models::WeightArray> = HashMap::new();
     let mut vectors: HashMap<String, Vec<f32>> = HashMap::new();
-    let mut lm_head_loaded: Option<Array2<f32>> = None;
+    let mut lm_head_loaded: Option<larql_models::WeightArray> = None;
 
     for entry in &entries {
         let filename = if entry.file.is_empty() { "model_weights.bin".to_string() } else { entry.file.clone() };
@@ -506,9 +506,9 @@ pub fn load_model_weights(
                 let arr = Array2::from_shape_vec((entry.shape[0], entry.shape[1]), floats)
                     .map_err(|e| VindexError::Parse(e.to_string()))?;
                 if entry.key == "lm_head.weight" {
-                    lm_head_loaded = Some(arr);
+                    lm_head_loaded = Some(arr.into_shared());
                 } else {
-                    tensors.insert(entry.key.clone(), arr);
+                    tensors.insert(entry.key.clone(), arr.into_shared());
                 }
             }
             "vector" => {
@@ -531,13 +531,14 @@ pub fn load_model_weights(
             let gate_matrix = Array2::from_shape_vec(
                 (info.num_features, config.hidden_size), gate_data.to_vec(),
             ).map_err(|e| VindexError::Parse(e.to_string()))?;
-            tensors.insert(arch.ffn_gate_key(info.layer), gate_matrix);
+            tensors.insert(arch.ffn_gate_key(info.layer), gate_matrix.into_shared());
         }
     }
 
     callbacks.on_file_done("model_weights", entries.len(), 0.0);
 
     let cfg = arch.config();
+    let embed = embed.into_shared();
     let lm_head = lm_head_loaded.unwrap_or_else(|| embed.clone());
 
     Ok(ModelWeights {

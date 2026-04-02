@@ -278,7 +278,7 @@ pub fn run(args: OvGateArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn project_top_token(
-    embed: &Array2<f32>,
+    embed: &ndarray::ArrayBase<impl ndarray::Data<Elem = f32>, ndarray::Ix2>,
     vector: &[f32],
     tokenizer: &tokenizers::Tokenizer,
 ) -> String {
@@ -303,7 +303,7 @@ fn project_top_token(
 }
 
 fn project_top_n(
-    embed: &Array2<f32>,
+    embed: &ndarray::ArrayBase<impl ndarray::Data<Elem = f32>, ndarray::Ix2>,
     vector: &[f32],
     n: usize,
     tokenizer: &tokenizers::Tokenizer,

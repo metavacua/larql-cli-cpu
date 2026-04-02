@@ -4,6 +4,7 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use ndarray::Array2;
+use larql_models::WeightArray;
 
 use crate::error::VindexError;
 use larql_models::ModelWeights;
@@ -54,7 +55,7 @@ struct ClusterData {
 /// Returns (token_ids, reduced_embedding_matrix).
 pub(crate) fn build_whole_word_vocab(
     tokenizer: &tokenizers::Tokenizer,
-    embed: &Array2<f32>,
+    embed: &ndarray::ArrayBase<impl ndarray::Data<Elem = f32>, ndarray::Ix2>,
     vocab_size: usize,
     hidden_size: usize,
 ) -> (Vec<usize>, Array2<f32>) {
@@ -426,7 +427,7 @@ pub use crate::extract::callbacks::IndexBuildCallbacks;
             let start = std::time::Instant::now();
 
             // Collect all down matrices for this layer (dense: 1, MoE: num_experts)
-            let down_matrices: Vec<(&Array2<f32>, usize)> = if is_moe && n_experts > 0 {
+            let down_matrices: Vec<(&WeightArray, usize)> = if is_moe && n_experts > 0 {
                 let mut mats = Vec::new();
                 for expert in 0..n_experts {
                     if let Some(key) = weights.arch.expert_ffn_down_key(layer, expert) {

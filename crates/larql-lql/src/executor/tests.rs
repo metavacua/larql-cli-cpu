@@ -362,26 +362,26 @@ fn make_test_weights() -> larql_inference::ModelWeights {
     let intermediate = 4;
     let vocab_size = 16;
 
-    let mut tensors: HashMap<String, ndarray::Array2<f32>> = HashMap::new();
+    let mut tensors: HashMap<String, ndarray::ArcArray2<f32>> = HashMap::new();
     let mut vectors: HashMap<String, Vec<f32>> = HashMap::new();
 
     for layer in 0..num_layers {
         let mut gate = ndarray::Array2::<f32>::zeros((intermediate, hidden));
         for i in 0..intermediate { gate[[i, i % hidden]] = 1.0 + layer as f32; }
-        tensors.insert(format!("layers.{layer}.mlp.gate_proj.weight"), gate);
+        tensors.insert(format!("layers.{layer}.mlp.gate_proj.weight"), gate.into_shared());
 
         let mut up = ndarray::Array2::<f32>::zeros((intermediate, hidden));
         for i in 0..intermediate { up[[i, (i + 1) % hidden]] = 0.5; }
-        tensors.insert(format!("layers.{layer}.mlp.up_proj.weight"), up);
+        tensors.insert(format!("layers.{layer}.mlp.up_proj.weight"), up.into_shared());
 
         let mut down = ndarray::Array2::<f32>::zeros((hidden, intermediate));
         for i in 0..intermediate { down[[i % hidden, i]] = 0.3; }
-        tensors.insert(format!("layers.{layer}.mlp.down_proj.weight"), down);
+        tensors.insert(format!("layers.{layer}.mlp.down_proj.weight"), down.into_shared());
 
         for suffix in &["q_proj", "k_proj", "v_proj", "o_proj"] {
             let mut attn = ndarray::Array2::<f32>::zeros((hidden, hidden));
             for i in 0..hidden { attn[[i, i]] = 1.0; }
-            tensors.insert(format!("layers.{layer}.self_attn.{suffix}.weight"), attn);
+            tensors.insert(format!("layers.{layer}.self_attn.{suffix}.weight"), attn.into_shared());
         }
 
         vectors.insert(format!("layers.{layer}.input_layernorm.weight"), vec![1.0; hidden]);
@@ -392,6 +392,7 @@ fn make_test_weights() -> larql_inference::ModelWeights {
 
     let mut embed = ndarray::Array2::<f32>::zeros((vocab_size, hidden));
     for i in 0..vocab_size { embed[[i, i % hidden]] = 1.0; }
+    let embed = embed.into_shared();
     let lm_head = embed.clone();
 
     let arch = larql_models::detect_from_json(&serde_json::json!({
