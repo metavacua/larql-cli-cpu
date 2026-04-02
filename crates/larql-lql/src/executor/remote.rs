@@ -485,6 +485,177 @@ impl Session {
         Ok(vec![format!("Deleted: L{layer} F{feature} → remote server")])
     }
 
+    pub(crate) fn remote_update(
+        &self,
+        set: &[crate::ast::Assignment],
+        conditions: &[crate::ast::Condition],
+    ) -> Result<Vec<String>, LqlError> {
+        let (url, client) = self.require_remote()?;
+
+        let layer = conditions
+            .iter()
+            .find(|c| c.field == "layer")
+            .and_then(|c| match &c.value {
+                crate::ast::Value::Integer(n) => Some(*n as usize),
+                _ => None,
+            })
+            .unwrap_or(0);
+        let feature = conditions
+            .iter()
+            .find(|c| c.field == "feature")
+            .and_then(|c| match &c.value {
+                crate::ast::Value::Integer(n) => Some(*n as usize),
+                _ => None,
+            })
+            .unwrap_or(0);
+
+        // Build down_meta from SET assignments.
+        let target = set
+            .iter()
+            .find(|a| a.field == "target" || a.field == "top_token")
+            .and_then(|a| match &a.value {
+                crate::ast::Value::String(s) => Some(s.clone()),
+                _ => None,
+            });
+        let confidence = set
+            .iter()
+            .find(|a| a.field == "confidence" || a.field == "c_score")
+            .and_then(|a| match &a.value {
+                crate::ast::Value::Number(n) => Some(*n as f32),
+                crate::ast::Value::Integer(n) => Some(*n as f32),
+                _ => None,
+            });
+
+        let down_meta = target.as_ref().map(|t| {
+            larql_vindex::patch::core::PatchDownMeta {
+                top_token: t.clone(),
+                top_token_id: 0,
+                c_score: confidence.unwrap_or(0.9),
+            }
+        });
+
+        let op = larql_vindex::PatchOp::Update {
+            layer,
+            feature,
+            gate_vector_b64: None,
+            down_meta,
+        };
+
+        let patch = larql_vindex::VindexPatch {
+            version: 1,
+            base_model: String::new(),
+            base_checksum: None,
+            created_at: String::new(),
+            description: Some(format!("UPDATE L{layer} F{feature}")),
+            author: None,
+            tags: vec![],
+            operations: vec![op],
+        };
+
+        let resp = client
+            .post(format!("{url}/v1/patches/apply"))
+            .json(&serde_json::json!({"patch": patch}))
+            .send()
+            .map_err(|e| LqlError::Execution(format!("request failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            let text = resp.text().unwrap_or_default();
+            return Err(LqlError::Execution(format!("UPDATE failed: {text}")));
+        }
+
+        let desc = target
+            .as_deref()
+            .map(|t| format!(" target={t}"))
+            .unwrap_or_default();
+        Ok(vec![format!("Updated: L{layer} F{feature}{desc} → remote server")])
+    }
+
+    // ── Remote SELECT ──
+
+    pub(crate) fn remote_select(
+        &self,
+        conditions: &[crate::ast::Condition],
+        limit: Option<u32>,
+    ) -> Result<Vec<String>, LqlError> {
+        let (url, client) = self.require_remote()?;
+
+        let mut body = serde_json::Map::new();
+        body.insert("limit".into(), serde_json::json!(limit.unwrap_or(20)));
+
+        for cond in conditions {
+            match cond.field.as_str() {
+                "entity" => {
+                    if let crate::ast::Value::String(s) = &cond.value {
+                        body.insert("entity".into(), serde_json::json!(s));
+                    }
+                }
+                "relation" => {
+                    if let crate::ast::Value::String(s) = &cond.value {
+                        body.insert("relation".into(), serde_json::json!(s));
+                    }
+                }
+                "layer" => {
+                    if let crate::ast::Value::Integer(n) = &cond.value {
+                        body.insert("layer".into(), serde_json::json!(n));
+                    }
+                }
+                "confidence" | "c_score" => {
+                    match &cond.value {
+                        crate::ast::Value::Number(n) => {
+                            body.insert("min_confidence".into(), serde_json::json!(n));
+                        }
+                        crate::ast::Value::Integer(n) => {
+                            body.insert("min_confidence".into(), serde_json::json!(n));
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let resp = client
+            .post(format!("{url}/v1/select"))
+            .json(&serde_json::Value::Object(body))
+            .send()
+            .map_err(|e| LqlError::Execution(format!("request failed: {e}")))?;
+
+        let result: serde_json::Value = resp
+            .json()
+            .map_err(|e| LqlError::Execution(format!("invalid response: {e}")))?;
+
+        let mut out = Vec::new();
+        out.push(format!(
+            "{:<8} {:<8} {:<20} {:>10}  {}",
+            "Layer", "Feature", "Token", "Score", "Relation"
+        ));
+        out.push("-".repeat(60));
+
+        if let Some(edges) = result["edges"].as_array() {
+            for edge in edges {
+                let layer = edge["layer"].as_u64().unwrap_or(0);
+                let feature = edge["feature"].as_u64().unwrap_or(0);
+                let target = edge["target"].as_str().unwrap_or("?");
+                let score = edge["c_score"].as_f64().unwrap_or(0.0);
+                let relation = edge["relation"].as_str().unwrap_or("");
+                out.push(format!(
+                    "L{:<7} F{:<7} {:20} {:>10.4}  {}",
+                    layer, feature, target, score, relation
+                ));
+            }
+
+            if edges.is_empty() {
+                out.push("  (no matching edges)".into());
+            }
+        }
+
+        if let Some(total) = result["total"].as_u64() {
+            out.push(format!("\n{} total", total));
+        }
+
+        Ok(out)
+    }
+
     // ── Local patch management (client-side overlay) ──
 
     pub(crate) fn remote_apply_local_patch(&mut self, path: &str) -> Result<Vec<String>, LqlError> {

@@ -175,6 +175,10 @@ impl Session {
                 self.remote_insert(entity, relation, target, *layer, *confidence)
             }
             Statement::Delete { conditions } => self.remote_delete(conditions),
+            Statement::Update { set, conditions } => self.remote_update(set, conditions),
+            Statement::Select { fields, conditions, nearest, order, limit } => {
+                self.remote_select(conditions, *limit)
+            }
             Statement::ApplyPatch { path } => self.remote_apply_local_patch(path),
             Statement::ShowPatches => self.remote_show_patches(),
             Statement::RemovePatch { path } => self.remote_remove_local_patch(path),
@@ -185,8 +189,8 @@ impl Session {
             }
             _ => Err(LqlError::Execution(
                 "this statement is not supported on a remote backend. \
-                 Supported: DESCRIBE, WALK, INFER, STATS, SHOW RELATIONS, \
-                 APPLY PATCH, SHOW PATCHES, REMOVE PATCH, USE"
+                 Supported: DESCRIBE, WALK, INFER, SELECT, STATS, SHOW RELATIONS, \
+                 INSERT, DELETE, UPDATE, APPLY PATCH, SHOW PATCHES, REMOVE PATCH, USE"
                     .into(),
             )),
         }

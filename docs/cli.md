@@ -42,6 +42,7 @@ larql serve --dir <DIR> [OPTIONS]
 | `--rate-limit <SPEC>` | Per-IP rate limit (e.g., "100/min", "10/sec") | — |
 | `--max-concurrent <N>` | Max concurrent requests | 100 |
 | `--cache-ttl <SECS>` | Cache TTL for DESCRIBE results (0 = disabled) | 0 |
+| `--grpc-port <PORT>` | Enable gRPC server on this port | — |
 | `--tls-cert <PATH>` | TLS certificate for HTTPS | — |
 | `--tls-key <PATH>` | TLS private key for HTTPS | — |
 | `--log-level <LEVEL>` | Logging level | info |

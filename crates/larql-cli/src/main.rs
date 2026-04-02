@@ -213,6 +213,10 @@ struct ServeArgs {
     #[arg(long, default_value = "0")]
     cache_ttl: u64,
 
+    /// gRPC port.
+    #[arg(long)]
+    grpc_port: Option<u16>,
+
     /// TLS certificate path.
     #[arg(long)]
     tls_cert: Option<std::path::PathBuf>,
@@ -327,6 +331,10 @@ fn main() {
             if args.cache_ttl > 0 {
                 cmd_args.push("--cache-ttl".into());
                 cmd_args.push(args.cache_ttl.to_string());
+            }
+            if let Some(port) = args.grpc_port {
+                cmd_args.push("--grpc-port".into());
+                cmd_args.push(port.to_string());
             }
             if let Some(ref cert) = args.tls_cert {
                 cmd_args.push("--tls-cert".into());
