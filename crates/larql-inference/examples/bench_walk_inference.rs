@@ -44,7 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let t0 = Instant::now();
     let mut cb = SilentLoadCallbacks;
-    let index = VectorIndex::load_vindex(&vindex_path, &mut cb)?;
+    let mut index = VectorIndex::load_vindex(&vindex_path, &mut cb)?;
     println!("Vindex loaded in {:.1}s ({} vectors)", t0.elapsed().as_secs_f64(), index.total_gate_vectors());
 
     // Pre-decode f16 gate vectors (skip for f32 — already zero-copy mmap)
@@ -55,6 +55,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Gate warmup in {warmup_s:.1}s (f16→f32 pre-decode)");
     } else {
         println!("Gate warmup: skipped (f32, zero-copy mmap)");
+    }
+
+    // Load feature-major down vectors for direct walk (if available)
+    match index.load_down_features(&vindex_path) {
+        Ok(()) => println!("Down features: loaded (direct walk enabled)"),
+        Err(_) => println!("Down features: not found (using sparse matmul fallback)"),
     }
 
     let weights = model.weights();

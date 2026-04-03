@@ -80,16 +80,20 @@ The WalkFfn replaces the dense FFN with a sparse version that uses the vindex ga
 ## Examples
 
 ```bash
-# Fused attention demo (correctness, GQA, softcap, capture)
-cargo run --release -p larql-inference --example attention_demo
+# Walk inference benchmark (dense vs walk vs HNSW, needs model + vindex)
+cargo run --release -p larql-inference --example bench_walk_inference -- \
+  --model google/gemma-3-4b-it --vindex path/to/vindex
 
-# Fused attention benchmark (fused vs materialized, seq scaling)
+# Walk boundary sweep (correctness proof across all 34 layers)
+cargo run --release -p larql-inference --example walk_boundary_sweep -- \
+  --model google/gemma-3-4b-it --vindex path/to/vindex
+
+# Fused attention demo and benchmark
+cargo run --release -p larql-inference --example attention_demo
 cargo run --release -p larql-inference --example bench_attention
 
-# Backend demo (routing, buffer cache, calibration)
+# Backend demo and benchmark (CPU vs Metal)
 cargo run --release -p larql-inference --example backend_demo --features metal
-
-# Backend benchmark (CPU vs Metal at transformer scale)
 cargo run --release -p larql-inference --example bench_backend --features metal
 
 # Full inference benchmark (needs model weights)
@@ -103,14 +107,24 @@ cargo run -p larql-inference --example clustering_demo
 cargo run -p larql-inference --example pair_matching_demo
 ```
 
+### Vindex tools
+
+```bash
+# Convert gate vectors from f16 to f32 (zero-copy mmap)
+cargo run --release -p larql-vindex --example convert_gates_f32 -- path/to/vindex
+
+# Build feature-major down vectors (contiguous per-feature layout)
+cargo run --release -p larql-vindex --example build_down_features -- path/to/vindex
+```
+
 ## Tests
 
 ```bash
-# All tests (109 total)
-cargo test -p larql-inference
-
-# With Metal GPU tests (+6 Metal-specific)
+# Inference tests (115 with Metal)
 cargo test -p larql-inference --features metal
+
+# HNSW tests
+cargo test -p larql-vindex --test test_hnsw --release
 
 # Individual test suites
 cargo test -p larql-inference --test test_fused_attention   # 18 tests
@@ -125,6 +139,7 @@ cargo test -p larql-inference --test test_walker_utils      # 10 tests
 |------|-------|----------|
 | Backend (unit + integration) | 34 | Shape, correctness, batch, Metal vs CPU, factory |
 | Fused attention | 18 | GQA, softcap, capture, reference agreement, edge cases |
+| HNSW index | 7 | Build, search, recall, scores, empty, sorted |
 | FFN | 9 | SiLU, GELU, dense, highway, multi-position |
 | Attention/residual | 10 | RoPE, GQA, RMS norm, per-head norm |
 | Trace stores | 14 | Write/read, tiers, boundaries, additive property |

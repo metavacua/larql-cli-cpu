@@ -257,7 +257,7 @@ Dense and full-precision MoE models support all operations (DESCRIBE, WALK, INFE
 | FFN gate+down projection | ~2.5 ms each |
 | Final logits (BLAS gemv, 262K vocab) | ~27 ms |
 
-Hardware acceleration: Apple Accelerate (AMX) for CPU matmuls, optional Metal GPU (`--features metal`) with auto-calibrated dispatch and buffer cache. FFN graph layer replaces dense matmul with vindex gate KNN at all 34 layers — 22% overhead, zero approximation. See [docs/inference-engine.md](docs/inference-engine.md) and [docs/ffn-graph-layer.md](docs/ffn-graph-layer.md).
+Hardware acceleration: Apple Accelerate (AMX) for CPU matmuls, optional Metal GPU (`--features metal`) with auto-calibrated dispatch and buffer cache. FFN graph layer with mmap'd down vectors is **faster than dense matmul** (517ms vs 535ms) at full precision across all 34 layers. See [docs/inference-engine.md](docs/inference-engine.md) and [docs/ffn-graph-layer.md](docs/ffn-graph-layer.md).
 
 ## Residual Stream Trace
 
@@ -346,6 +346,10 @@ cargo run --release -p larql-inference --example bench_attention   # attention b
 cargo run --release -p larql-inference --example backend_demo --features metal   # backend demo
 cargo run --release -p larql-inference --example bench_backend --features metal  # backend benchmarks
 cargo run --release -p larql-inference --example bench_inference   # full inference benchmarks
+
+# Vindex tools
+cargo run --release -p larql-vindex --example convert_gates_f32 -- path/to/vindex  # f16→f32 gate vectors
+cargo run --release -p larql-vindex --example build_down_features -- path/to/vindex # feature-major down vectors
 
 # Vindex and LQL examples
 cargo run -p larql-vindex --example vindex_demo    # vindex feature demo

@@ -49,21 +49,22 @@ Zero divergence. Same top-1 token, same probability, at every boundary. The gate
 |---------|------|-------|-----|
 | Unoptimized | 21,197ms | 708ms | 30x slower |
 | + batch gate KNN (one gemm per layer) | 4,178ms | 685ms | 6.1x |
-| + sparse down projection | — | — | (included above) |
-| + f16 decode cache | — | — | (included above) |
+| + sparse down projection + f16 cache | 4,178ms | 685ms | (included above) |
 | + trace recording off by default | 841ms | 685ms | 23% |
-| + f32 gate vectors (mmap, zero-copy) | **685ms** | **560ms** | **22%** |
+| + f32 gate vectors (mmap, zero-copy) | 685ms | 560ms | 22% |
+| + zero-copy mmap down matrix | 668ms | 544ms | 23% |
+| + remove redundant gate KNN | **517ms** | **535ms** | **Walk is faster** |
 
 ### Per-layer breakdown
 
 ```
-Dense FFN:    6.4ms/layer  (3 matmuls: gate + up + down)
-Walk FFN:    10.7ms/layer  (gate KNN 4ms + sparse FFN 6.4ms)
-Gate KNN:     4.0ms/layer  (mmap gemm: [10240, 2560] × [2560, 6])
-Sparse FFN:   6.4ms/layer  (dense fallback at K ≈ intermediate)
+Dense FFN:    6.4ms/layer  (gate + up + GEGLU + down from safetensors)
+Walk FFN:     6.0ms/layer  (gate + up + GEGLU from safetensors + down from mmap)
 ```
 
-The 4ms gate KNN is memory-bound: reading 100MB of f32 gate vectors per layer from mmap. On subsequent tokens, the OS page cache keeps hot pages resident, reducing this toward L3 cache latency (~1ms).
+Walk is faster because the down projection reads from the feature-major mmap'd `down_features.bin` which has better page cache behavior than the safetensors layout. Same computation, better memory access pattern.
+
+The gate KNN (4ms) is only used for the sparse fallback path (when down_features.bin is not available) or for tracing.
 
 ### What eliminated the 30x gap
 
@@ -171,14 +172,40 @@ Current:     560ms dense, 685ms walk (22% gap)
 + template cache:   attention eliminated → ~170ms (gate KNN + logits)
 ```
 
+## Three FFN Engines
+
+The WalkFfn auto-selects the optimal engine based on feature count:
+
+| Engine | When | Down projection | Speed |
+|--------|------|----------------|-------|
+| **Dense fallback** | K >= 80% of intermediate | Full W_down matmul (BLAS) | 6.4ms/layer |
+| **Sparse matmul** | K < 80%, down_features available | Sequential memcpy from feature-major mmap + BLAS gemv | ~6ms/layer |
+| **Direct walk** | K < 25%, down_features available | Per-feature mmap read + saxpy accumulation, no matmul | ~1-3ms/layer |
+
+The threshold routing is automatic. At K=10,229 (Gemma-3 with top-8092 union), the dense fallback fires. As models become sparser or feature selection improves, the direct walk path activates.
+
+## Feature-Major Down Vectors
+
+The `down_features.bin` file stores down projection vectors in feature-major layout: `[intermediate, hidden]` per layer. Each feature's down vector is 2560 contiguous f32 values (10KB). This enables:
+
+- **Sequential memcpy** instead of strided column gather for the sparse matmul path
+- **Zero-copy mmap read** for the direct walk path (pointer offset + read)
+- **Cache-friendly** access pattern — each feature read is one L2 cache line sequence
+
+Build with:
+```bash
+cargo run --release -p larql-vindex --example build_down_features -- path/to/vindex/
+```
+
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `crates/larql-inference/src/vindex/walk_ffn.rs` | WalkFfn backend |
+| `crates/larql-inference/src/vindex/walk_ffn.rs` | WalkFfn: 3-engine FFN backend |
 | `crates/larql-inference/src/ffn/sparse_compute.rs` | Sparse FFN compute (shared) |
-| `crates/larql-vindex/src/index/core.rs` | Gate KNN, mmap, f16 cache, HNSW |
-| `crates/larql-vindex/src/index/hnsw.rs` | HNSW graph index |
-| `crates/larql-vindex/examples/convert_gates_f32.rs` | f16 → f32 converter |
-| `crates/larql-inference/examples/bench_walk_inference.rs` | Walk benchmark |
-| `crates/larql-inference/examples/walk_boundary_sweep.rs` | Correctness sweep |
+| `crates/larql-vindex/src/index/core.rs` | Gate KNN, mmap, warmup, HNSW, down features |
+| `crates/larql-vindex/src/index/hnsw.rs` | HNSW graph index (experimental) |
+| `crates/larql-vindex/examples/convert_gates_f32.rs` | f16 → f32 gate vector converter |
+| `crates/larql-vindex/examples/build_down_features.rs` | Feature-major down vector builder |
+| `crates/larql-inference/examples/bench_walk_inference.rs` | Walk benchmark (dense vs walk vs HNSW) |
+| `crates/larql-inference/examples/walk_boundary_sweep.rs` | Correctness sweep (all 34 layers) |

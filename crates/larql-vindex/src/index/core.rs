@@ -53,6 +53,16 @@ pub trait GateIndex {
     /// When present, sparse_ffn_forward should use this instead of the model's down weight row.
     fn down_override(&self, _layer: usize, _feature: usize) -> Option<&[f32]> { None }
 
+    /// Get a feature's contiguous down vector from mmap'd feature-major storage.
+    /// Returns None if feature-major down vectors aren't loaded.
+    fn down_feature_vector(&self, _layer: usize, _feature: usize) -> Option<&[f32]> { None }
+
+    /// Whether feature-major down vectors are available for direct walk.
+    fn has_down_features(&self) -> bool { false }
+
+    /// Get the full down matrix for a layer: [intermediate, hidden] zero-copy view.
+    fn down_layer_matrix(&self, _layer: usize) -> Option<ndarray::ArrayView2<f32>> { None }
+
     /// Batched gate KNN: compute scores for all positions in one BLAS gemm.
     /// Returns the union of per-position top-K feature indices (sorted).
     /// Default: falls back to per-position gate_knn calls.
@@ -203,6 +213,11 @@ pub struct VectorIndex {
     /// When populated, gate_knn bypasses the mutex cache entirely.
     warmed_gates: std::sync::RwLock<Vec<Option<Vec<f32>>>>,
 
+    /// Mmap'd feature-major down vectors: [intermediate, hidden] per layer, f32.
+    /// Each feature's down vector is contiguous — enables zero-copy saxpy walk.
+    /// Loaded from down_features.bin via load_down_features().
+    down_features_mmap: Option<Arc<memmap2::Mmap>>,
+
     /// Lazy HNSW index per layer. Built on first query, reused thereafter.
     /// When set, gate_knn uses graph search instead of brute-force matmul.
     hnsw_cache: Mutex<Vec<Option<super::hnsw::HnswLayer>>>,
@@ -229,6 +244,7 @@ impl Clone for VectorIndex {
             down_overrides: self.down_overrides.clone(),
             f16_decode_cache: Mutex::new(vec![None; self.num_layers]),
             warmed_gates: std::sync::RwLock::new(vec![None; self.num_layers]),
+            down_features_mmap: self.down_features_mmap.clone(),
             hnsw_cache: Mutex::new((0..self.num_layers).map(|_| None).collect()),
             hnsw_enabled: std::sync::atomic::AtomicBool::new(
                 self.hnsw_enabled.load(Ordering::Relaxed)
@@ -260,6 +276,7 @@ impl VectorIndex {
             down_overrides: HashMap::new(),
             f16_decode_cache: Mutex::new(vec![None; num_layers]),
             warmed_gates: std::sync::RwLock::new(vec![None; num_layers]),
+            down_features_mmap: None,
             hnsw_cache: Mutex::new((0..num_layers).map(|_| None).collect()),
             hnsw_enabled: std::sync::atomic::AtomicBool::new(false),
             hnsw_ef_search: std::sync::atomic::AtomicUsize::new(200),
@@ -288,6 +305,7 @@ impl VectorIndex {
             down_overrides: HashMap::new(),
             f16_decode_cache: Mutex::new(vec![None; num_layers]),
             warmed_gates: std::sync::RwLock::new(vec![None; num_layers]),
+            down_features_mmap: None,
             hnsw_cache: Mutex::new((0..num_layers).map(|_| None).collect()),
             hnsw_enabled: std::sync::atomic::AtomicBool::new(false),
             hnsw_ef_search: std::sync::atomic::AtomicUsize::new(200),
@@ -444,6 +462,7 @@ impl VectorIndex {
             down_overrides: HashMap::new(),
             f16_decode_cache: Mutex::new(vec![None; num_layers]),
             warmed_gates: std::sync::RwLock::new(vec![None; num_layers]),
+            down_features_mmap: None,
             hnsw_cache: Mutex::new((0..num_layers).map(|_| None).collect()),
             hnsw_enabled: std::sync::atomic::AtomicBool::new(false),
             hnsw_ef_search: std::sync::atomic::AtomicUsize::new(200),
@@ -994,6 +1013,71 @@ impl VectorIndex {
         feature_set.into_iter().collect()
     }
 
+    /// Load feature-major down vectors from down_features.bin.
+    /// Each feature's down vector is [hidden] contiguous f32.
+    /// Enables zero-copy mmap walk: read pointer + saxpy, no matmul.
+    pub fn load_down_features(&mut self, dir: &std::path::Path) -> Result<(), crate::error::VindexError> {
+        let path = dir.join("down_features.bin");
+        if !path.exists() {
+            return Err(crate::error::VindexError::Parse(
+                "down_features.bin not found. Run: cargo run --release -p larql-vindex --example build_down_features -- <vindex>".into()
+            ));
+        }
+        let file = std::fs::File::open(&path)?;
+        let mmap = unsafe { memmap2::Mmap::map(&file)? };
+        self.down_features_mmap = Some(Arc::new(mmap));
+        Ok(())
+    }
+
+    /// Whether feature-major down vectors are loaded.
+    pub fn has_down_features(&self) -> bool {
+        self.down_features_mmap.is_some()
+    }
+
+    /// Get a feature's contiguous down vector from the mmap'd feature-major file.
+    /// Returns [hidden_size] f32 slice — zero-copy from mmap.
+    /// Layout: layer * (intermediate * hidden) + feature * hidden
+    pub fn down_feature_vector(&self, layer: usize, feature: usize) -> Option<&[f32]> {
+        let mmap = self.down_features_mmap.as_ref()?;
+        let intermediate = self.num_features(layer);
+        if intermediate == 0 || feature >= intermediate { return None; }
+
+        let layer_floats = intermediate * self.hidden_size;
+        let layer_offset = layer * layer_floats * 4; // bytes
+        let feature_offset = feature * self.hidden_size * 4; // bytes
+        let start = layer_offset + feature_offset;
+        let end = start + self.hidden_size * 4;
+
+        if end > mmap.len() { return None; }
+
+        let data = unsafe {
+            let ptr = mmap[start..end].as_ptr() as *const f32;
+            std::slice::from_raw_parts(ptr, self.hidden_size)
+        };
+        Some(data)
+    }
+
+    /// Get the full down matrix for a layer as a zero-copy ArrayView2.
+    /// Returns [intermediate, hidden] view directly into the mmap'd down_features.bin.
+    /// No allocation, no copy. The mmap IS the matrix.
+    pub fn down_layer_matrix(&self, layer: usize) -> Option<ndarray::ArrayView2<f32>> {
+        let mmap = self.down_features_mmap.as_ref()?;
+        let intermediate = self.num_features(layer);
+        if intermediate == 0 { return None; }
+
+        let floats_per_layer = intermediate * self.hidden_size;
+        let bytes_per_layer = floats_per_layer * 4;
+        let start = layer * bytes_per_layer;
+        let end = start + bytes_per_layer;
+        if end > mmap.len() { return None; }
+
+        let data = unsafe {
+            let ptr = mmap[start..end].as_ptr() as *const f32;
+            std::slice::from_raw_parts(ptr, floats_per_layer)
+        };
+        ndarray::ArrayView2::from_shape((intermediate, self.hidden_size), data).ok()
+    }
+
     /// Pre-decode f16 gate vectors to f32 for lock-free access.
     /// For f32 vindexes this is a no-op — the mmap path is already zero-copy.
     /// Call once after loading for f16 vindexes.
@@ -1155,5 +1239,17 @@ impl GateIndex for VectorIndex {
 
     fn gate_knn_batch(&self, layer: usize, x: &Array2<f32>, top_k: usize) -> Vec<usize> {
         self.gate_knn_batch(layer, x, top_k)
+    }
+
+    fn down_feature_vector(&self, layer: usize, feature: usize) -> Option<&[f32]> {
+        self.down_feature_vector(layer, feature)
+    }
+
+    fn has_down_features(&self) -> bool {
+        self.has_down_features()
+    }
+
+    fn down_layer_matrix(&self, layer: usize) -> Option<ndarray::ArrayView2<f32>> {
+        self.down_layer_matrix(layer)
     }
 }
