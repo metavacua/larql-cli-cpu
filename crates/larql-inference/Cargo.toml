@@ -41,3 +41,4 @@ metal = ["dep:metal"]
 [dev-dependencies]
 assert_approx_eq = "1"
 tempfile = "3"
+larql-compute = { path = "../larql-compute" }

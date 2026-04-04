@@ -35,6 +35,8 @@ pub trait GateIndex {
     fn feature_meta(&self, layer: usize, feature: usize) -> Option<FeatureMeta>;
     fn num_features(&self, layer: usize) -> usize;
     fn down_override(&self, _layer: usize, _feature: usize) -> Option<&[f32]> { None }
+    /// Check if any down vector overrides or gate overrides exist at this layer.
+    fn has_overrides_at(&self, _layer: usize) -> bool { false }
     fn down_feature_vector(&self, _layer: usize, _feature: usize) -> Option<&[f32]> { None }
     fn has_down_features(&self) -> bool { false }
     fn down_layer_matrix(&self, _layer: usize) -> Option<ndarray::ArrayView2<'_, f32>> { None }

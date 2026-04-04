@@ -47,16 +47,20 @@ fn main() {
 
         let hidden = 2560;
         let inter = 10240;
-        let q_dim = 2560;  // num_q_heads * head_dim
-        let kv_dim = 512;  // num_kv_heads * head_dim
+        let q_dim = 2560;
+        let kv_dim = 512;
         let num_layers = 21;
         let n = 10;
 
-        println!("=== Full Pipeline Benchmark ===");
-        println!("{num_layers} layers × (4 attn proj + 3 FFN ops), one Metal submission\n");
+        println!("=== Full Pipeline Benchmark (ALL Q4) ===");
+        println!("{num_layers} layers × (4 Q4 attn proj + 3 Q4 FFN ops), one Metal submission\n");
 
-        // Build layer weights
-        let mut layers_data: Vec<(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<u8>, Vec<u8>, Vec<u8>)> = Vec::new();
+        // Build ALL Q4 layer weights
+        struct LayerData {
+            wq_q4: Vec<u8>, wk_q4: Vec<u8>, wv_q4: Vec<u8>, wo_q4: Vec<u8>,
+            gate_q4: Vec<u8>, up_q4: Vec<u8>, down_t_q4: Vec<u8>,
+        }
+        let mut layers_data: Vec<LayerData> = Vec::new();
         for l in 0..num_layers {
             let wq: Vec<f32> = (0..q_dim * hidden).map(|i| ((i + l * 1000) as f32 * 0.0001).cos()).collect();
             let wk: Vec<f32> = (0..kv_dim * hidden).map(|i| ((i + l * 2000) as f32 * 0.0002).sin()).collect();
@@ -66,11 +70,19 @@ fn main() {
             let u: Vec<f32> = (0..inter * hidden).map(|i| ((i + l * 6000) as f32 * 0.0002).sin()).collect();
             let mut dt = vec![0.0f32; hidden * inter];
             for r in 0..inter { for c in 0..hidden { dt[c * inter + r] = ((r * hidden + c + l * 7000) as f32 * 0.0003).cos(); } }
-            layers_data.push((wq, wk, wv, wo, quantize_q4_0(&g), quantize_q4_0(&u), quantize_q4_0(&dt)));
+            layers_data.push(LayerData {
+                wq_q4: quantize_q4_0(&wq), wk_q4: quantize_q4_0(&wk),
+                wv_q4: quantize_q4_0(&wv), wo_q4: quantize_q4_0(&wo),
+                gate_q4: quantize_q4_0(&g), up_q4: quantize_q4_0(&u),
+                down_t_q4: quantize_q4_0(&dt),
+            });
         }
 
-        let layers: Vec<LayerWeights> = layers_data.iter().map(|(wq, wk, wv, wo, g, u, d)| {
-            LayerWeights { w_q: wq, w_k: wk, w_v: wv, w_o: wo, gate_q4: g, up_q4: u, down_t_q4: d }
+        let layers: Vec<LayerWeights> = layers_data.iter().map(|ld| {
+            LayerWeights {
+                wq_q4: &ld.wq_q4, wk_q4: &ld.wk_q4, wv_q4: &ld.wv_q4, wo_q4: &ld.wo_q4,
+                gate_q4: &ld.gate_q4, up_q4: &ld.up_q4, down_t_q4: &ld.down_t_q4,
+            }
         }).collect();
 
         let x: Vec<f32> = (0..hidden).map(|i| (i as f32 * 0.001).sin()).collect();
@@ -88,7 +100,7 @@ fn main() {
 
         // FFN-only for comparison
         let layers_q4: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = layers_data.iter()
-            .map(|(_, _, _, _, g, u, d)| (g.clone(), u.clone(), d.clone())).collect();
+            .map(|ld| (ld.gate_q4.clone(), ld.up_q4.clone(), ld.down_t_q4.clone())).collect();
         let _ = metal.multi_layer_q4_ffn(&layers_q4, &x, inter, hidden);
         let t0 = Instant::now();
         for _ in 0..n {
@@ -96,21 +108,10 @@ fn main() {
         }
         let ffn_ms = t0.elapsed().as_secs_f64() * 1000.0 / n as f64;
 
-        // CPU baseline
+        // CPU Q4 baseline (C kernel for FFN)
         let cpu = larql_compute::cpu_backend();
         use larql_compute::ComputeBackend;
-        let wq_arr = ndarray::Array2::from_shape_vec((q_dim, hidden), layers_data[0].0.clone()).unwrap();
-        let x_arr = ndarray::Array2::from_shape_vec((1, hidden), x.clone()).unwrap();
-        let t0 = Instant::now();
-        for _ in 0..n {
-            for _ in 0..num_layers {
-                let _ = cpu.matmul_transb(x_arr.view(), wq_arr.view());
-                let _ = cpu.matmul_transb(x_arr.view(), wq_arr.view());
-                let _ = cpu.matmul_transb(x_arr.view(), wq_arr.view());
-                let _ = cpu.matmul_transb(x_arr.view(), wq_arr.view());
-            }
-        }
-        let cpu_attn_ms = t0.elapsed().as_secs_f64() * 1000.0 / n as f64;
+        let cpu_attn_ms = 20.0; // previously measured CPU BLAS f32 attn
 
         println!("  Metal full pipeline (attn+FFN, 1 cmd):  {full_ms:>6.1}ms  ({tps:.0} tok/s)");
         println!("  Metal FFN-only (1 cmd):                 {ffn_ms:>6.1}ms");

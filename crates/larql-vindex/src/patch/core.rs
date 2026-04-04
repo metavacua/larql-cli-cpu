@@ -562,6 +562,11 @@ impl GateIndex for PatchedVindex {
         self.base.down_override(layer, feature)
     }
 
+    fn has_overrides_at(&self, layer: usize) -> bool {
+        self.overrides_gate.keys().any(|(l, _)| *l == layer)
+            || self.base.has_overrides_at(layer)
+    }
+
     fn down_feature_vector(&self, layer: usize, feature: usize) -> Option<&[f32]> {
         self.base.down_feature_vector(layer, feature)
     }

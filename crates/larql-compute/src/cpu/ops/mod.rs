@@ -7,5 +7,6 @@ pub mod f32_matmul;
 pub mod q4_matvec;
 pub mod q4_vecmat;
 pub mod q4_common;
+pub mod q8_matvec;
 pub mod attention;
 pub mod geglu;

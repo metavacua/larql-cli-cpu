@@ -15,6 +15,7 @@ pub mod causal_attention;
 pub mod q4_matvec_v2;
 pub mod q4_matvec_v3;
 pub mod q4_matvec_v4;
+pub mod q8_matvec;
 
 /// Concatenate all shaders into one MSL source string for compilation.
 pub fn all_shaders() -> String {
@@ -31,5 +32,6 @@ pub fn all_shaders() -> String {
     src.push_str(q4_matvec_v2::SHADER);
     src.push_str(q4_matvec_v3::SHADER);
     src.push_str(q4_matvec_v4::SHADER);
+    src.push_str(q8_matvec::SHADER);
     src
 }

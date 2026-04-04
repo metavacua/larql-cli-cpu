@@ -527,6 +527,7 @@ impl<'a> FfnBackend for WalkFfn<'a> {
         // Full mmap walk: gate + up + down from 3 separate mmap files.
         // At high K (>50% intermediate), uses full mmap matmuls.
         // At low K (<50%), uses per-feature sparse walk.
+        //
         if self.index.has_full_mmap_ffn() {
             let intermediate = self.index.num_features(layer);
             if intermediate > 0 && self.top_k * 2 < intermediate {
@@ -535,8 +536,35 @@ impl<'a> FfnBackend for WalkFfn<'a> {
                     return result;
                 }
             } else {
-                // High K: full mmap matmuls (production path, 523ms)
-                if let Some(result) = self.walk_ffn_full_mmap(layer, x) {
+                // High K: full mmap matmuls (production path)
+                if let Some(mut result) = self.walk_ffn_full_mmap(layer, x) {
+                    // Apply down overrides from INSERT as post-hoc corrections.
+                    // For each overridden feature, subtract the model's down contribution
+                    // and add the override's down contribution using the same activation.
+                    if self.index.has_overrides_at(layer) {
+                        let hidden = x.shape()[1];
+                        let seq_len = x.shape()[0];
+                        let (ref mut out, ref activation) = result;
+                        if let Some(down_view) = self.index.down_layer_matrix(layer) {
+                            for s in 0..seq_len {
+                                let mut out_row = out.row_mut(s);
+                                // Check each overridden feature
+                                for feat in 0..intermediate {
+                                    if let Some(override_down) = self.index.down_override(layer, feat) {
+                                        if override_down.len() != hidden { continue; }
+                                        let act = activation[[s, feat]];
+                                        if act.abs() <= 1e-10 { continue; }
+                                        // Subtract original down contribution
+                                        let orig_down = down_view.row(feat);
+                                        out_row.scaled_add(-act, &orig_down);
+                                        // Add override down contribution
+                                        let ov = ndarray::ArrayView1::from(override_down);
+                                        out_row.scaled_add(act, &ov);
+                                    }
+                                }
+                            }
+                        }
+                    }
                     return result;
                 }
             }

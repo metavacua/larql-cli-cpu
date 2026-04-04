@@ -174,7 +174,7 @@ impl MetalBackend {
         q_dim: usize, kv_dim: usize,
     ) -> Vec<f32> {
         ops::full_pipeline::dispatch_full_pipeline(
-            &self.queue, &self.bufs, &self.f32_ops, &self.q4,
+            &self.queue, &self.bufs, &self.q4,
             &self.geglu_pipeline, &self.q8_quant_pipeline,
             layers, x, hidden, inter, q_dim, kv_dim,
         )

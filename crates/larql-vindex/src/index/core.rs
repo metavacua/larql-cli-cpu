@@ -442,6 +442,10 @@ impl GateIndex for VectorIndex {
         self.down_overrides.get(&(layer, feature)).map(|v| v.as_slice())
     }
 
+    fn has_overrides_at(&self, layer: usize) -> bool {
+        self.down_overrides.keys().any(|(l, _)| *l == layer)
+    }
+
     fn gate_knn_batch(&self, layer: usize, x: &Array2<f32>, top_k: usize) -> Vec<usize> {
         self.gate_knn_batch(layer, x, top_k)
     }
