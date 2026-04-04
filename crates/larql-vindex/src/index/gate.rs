@@ -150,6 +150,71 @@ impl VectorIndex {
         None // Not on fast path — caller will use resolve_gate
     }
 
+    /// Per-feature gate walk: score each feature with an individual dot product.
+    /// No matrix multiplication. Iterates gate vectors from mmap and computes
+    /// dot products one feature at a time. Returns exact top-K.
+    pub fn gate_walk(
+        &self,
+        layer: usize,
+        residual: &Array1<f32>,
+        top_k: usize,
+    ) -> Option<Vec<(usize, f32)>> {
+        let num_features = self.num_features(layer);
+        if num_features == 0 { return None; }
+
+        // Get gate data as contiguous f32 (from mmap or warmed cache)
+        let gate_data: &[f32];
+        let _owned: Vec<f32>;
+
+        // Try zero-copy f32 mmap first
+        let mmap_slice = if self.gate_mmap_dtype == crate::config::dtype::StorageDtype::F32 {
+            self.gate_mmap_bytes.as_ref().and_then(|mmap| {
+                let slice = self.gate_mmap_slices.get(layer)?;
+                if slice.num_features == 0 { return None; }
+                let byte_offset = slice.float_offset * 4;
+                let byte_end = byte_offset + slice.num_features * self.hidden_size * 4;
+                if byte_end > mmap.len() { return None; }
+                Some(unsafe {
+                    std::slice::from_raw_parts(
+                        mmap[byte_offset..byte_end].as_ptr() as *const f32,
+                        slice.num_features * self.hidden_size,
+                    )
+                })
+            })
+        } else {
+            None
+        };
+
+        if let Some(data) = mmap_slice {
+            gate_data = data;
+        } else {
+            // Fallback: resolve gate (may clone)
+            let gate = self.resolve_gate(layer)?;
+            _owned = gate.data;
+            gate_data = &_owned;
+        }
+
+        let hidden = self.hidden_size;
+
+        // Per-feature dot products — no matrix multiply.
+        // Each feature scored individually via BLAS sdot (level-1, vector·vector).
+        let gate_view = ArrayView2::from_shape((num_features, hidden), gate_data).unwrap();
+        let mut scores = Vec::with_capacity(num_features);
+        for feat in 0..num_features {
+            scores.push(gate_view.row(feat).dot(residual));
+        }
+
+        // Top-K selection
+        let mut indexed: Vec<(usize, f32)> = scores.into_iter().enumerate().collect();
+        let k = top_k.min(indexed.len());
+        if k > 0 && k < indexed.len() {
+            indexed.select_nth_unstable_by(k, |a, b| b.1.abs().partial_cmp(&a.1.abs()).unwrap());
+            indexed.truncate(k);
+        }
+        indexed.sort_unstable_by(|a, b| b.1.abs().partial_cmp(&a.1.abs()).unwrap());
+        Some(indexed)
+    }
+
     /// Gate KNN within a specific feature range (for MoE expert-scoped queries).
     /// Only computes dot products for features [feat_start..feat_end].
     /// Returns (global_feature_index, score) pairs.

@@ -60,7 +60,7 @@ fn bench_backend(label: &str, backend: &dyn MatMulBackend) {
     let w_q = synth_matrix(num_heads * head_dim, hidden, 2);
 
     bench(&format!("Q proj [{seq},{hidden}] x [{},{hidden}]^T", num_heads * head_dim), 50, || {
-        let _ = backend.matmul_transb(&h, &w_q);
+        let _ = backend.matmul_transb(h.view(), w_q.view());
     });
 
     // QK^T per head: [seq, head_dim] x [seq, head_dim]^T
@@ -68,7 +68,7 @@ fn bench_backend(label: &str, backend: &dyn MatMulBackend) {
     let k = synth_matrix(seq, head_dim, 11);
 
     bench(&format!("QK^T [{seq},{head_dim}] x [{seq},{head_dim}]^T"), 200, || {
-        let _ = backend.matmul_transb(&q, &k);
+        let _ = backend.matmul_transb(q.view(), k.view());
     });
 
     // scores @ V: [seq, seq] x [seq, head_dim]
@@ -76,7 +76,7 @@ fn bench_backend(label: &str, backend: &dyn MatMulBackend) {
     let v = synth_matrix(seq, head_dim, 21);
 
     bench(&format!("scores*V [{seq},{seq}] x [{seq},{head_dim}]"), 200, || {
-        let _ = backend.matmul(&scores, &v);
+        let _ = backend.matmul(scores.view(), v.view());
     });
 
     // O projection: [seq, num_heads*head_dim] x [hidden, num_heads*head_dim]^T
@@ -84,7 +84,7 @@ fn bench_backend(label: &str, backend: &dyn MatMulBackend) {
     let w_o = synth_matrix(hidden, num_heads * head_dim, 31);
 
     bench(&format!("O proj [{seq},{}] x [{hidden},{}]^T", num_heads * head_dim, num_heads * head_dim), 50, || {
-        let _ = backend.matmul_transb(&attn_out, &w_o);
+        let _ = backend.matmul_transb(attn_out.view(), w_o.view());
     });
 
     // ── FFN projections ──
@@ -92,14 +92,14 @@ fn bench_backend(label: &str, backend: &dyn MatMulBackend) {
     let w_gate = synth_matrix(intermediate, hidden, 41);
 
     bench(&format!("FFN gate [{seq},{hidden}] x [{intermediate},{hidden}]^T"), 20, || {
-        let _ = backend.matmul_transb(&x, &w_gate);
+        let _ = backend.matmul_transb(x.view(), w_gate.view());
     });
 
     let act = synth_matrix(seq, intermediate, 50);
     let w_down = synth_matrix(hidden, intermediate, 51);
 
     bench(&format!("FFN down [{seq},{intermediate}] x [{hidden},{intermediate}]^T"), 20, || {
-        let _ = backend.matmul_transb(&act, &w_down);
+        let _ = backend.matmul_transb(act.view(), w_down.view());
     });
 
     // ── Batched attention heads ──
@@ -117,7 +117,7 @@ fn bench_backend(label: &str, backend: &dyn MatMulBackend) {
 
     bench(&format!("Serial QK^T ({num_heads} heads, {num_heads} calls)"), 100, || {
         for op in &ops {
-            let _ = backend.matmul_transb(&op.a, &op.b);
+            let _ = backend.matmul_transb(op.a.view(), op.b.view());
         }
     });
 
@@ -127,7 +127,7 @@ fn bench_backend(label: &str, backend: &dyn MatMulBackend) {
     let lm_head = synth_matrix(vocab, hidden, 301);
 
     bench(&format!("Logits [1,{hidden}] x [{vocab},{hidden}]^T"), 5, || {
-        let _ = backend.matmul_transb(&last, &lm_head);
+        let _ = backend.matmul_transb(last.view(), lm_head.view());
     });
 
     // ── Sequence length scaling ──
@@ -135,7 +135,7 @@ fn bench_backend(label: &str, backend: &dyn MatMulBackend) {
     for &s in &[1, 6, 12, 24, 48] {
         let h_s = synth_matrix(s, hidden, 400 + s as u64);
         bench(&format!("  seq={s:<4} [{s},{hidden}] x [{},{hidden}]^T", num_heads * head_dim), 20, || {
-            let _ = backend.matmul_transb(&h_s, &w_q);
+            let _ = backend.matmul_transb(h_s.view(), w_q.view());
         });
     }
 }
@@ -175,9 +175,9 @@ fn main() {
             let t0 = Instant::now();
             for _ in 0..20 {
                 if transb {
-                    let _ = cpu.matmul_transb(&a, &b);
+                    let _ = cpu.matmul_transb(a.view(), b.view());
                 } else {
-                    let _ = cpu.matmul(&a, &b);
+                    let _ = cpu.matmul(a.view(), b.view());
                 }
             }
             let cpu_us = t0.elapsed().as_micros() as f64 / 20.0;
@@ -186,9 +186,9 @@ fn main() {
             let t0 = Instant::now();
             for _ in 0..20 {
                 if transb {
-                    let _ = default.matmul_transb(&a, &b);
+                    let _ = default.matmul_transb(a.view(), b.view());
                 } else {
-                    let _ = default.matmul(&a, &b);
+                    let _ = default.matmul(a.view(), b.view());
                 }
             }
             let def_us = t0.elapsed().as_micros() as f64 / 20.0;

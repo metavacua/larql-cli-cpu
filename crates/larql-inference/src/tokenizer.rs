@@ -23,3 +23,17 @@ pub fn decode_token(tokenizer: &tokenizers::Tokenizer, id: u32) -> Option<String
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
+
+/// Decode a single token ID, including special tokens (BOS, EOS, etc.).
+/// Falls back to the raw vocabulary entry if normal decode produces nothing.
+pub fn decode_token_raw(tokenizer: &tokenizers::Tokenizer, id: u32) -> String {
+    // Try normal decode first (skip_special_tokens=true)
+    if let Some(s) = decode_token(tokenizer, id) {
+        return s;
+    }
+    // Fall back to vocabulary lookup (returns <bos>, <eos>, etc.)
+    if let Some(s) = tokenizer.id_to_token(id) {
+        return s;
+    }
+    format!("[{id}]")
+}

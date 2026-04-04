@@ -1,13 +1,17 @@
 //! WalkFfn — FFN backend that replaces dense matmul with vindex lookups.
 //!
-//! The gate KNN scores ARE the gated activations. The walk does two operations
-//! instead of three: gate KNN → down gemm. The up projection is eliminated.
+//! Sparse walk path (preferred):
+//!   gate_knn (HNSW or brute) → K up dot products → GEGLU → K down accumulations
+//!   No dense matmuls. Reads only K feature vectors from mmap.
 //!
-//! Dense FFN:  gate_matmul + up_matmul + GEGLU + down_matmul  (3 matmuls, 315MB)
-//! Walk FFN:   gate_knn + down_gemm                           (2 ops, 205MB)
+//! Fallback paths:
+//!   exact: gate/up from model weights + down from mmap (3 dense matmuls)
+//!   full_mmap: all three from mmap (3 dense matmuls)
+//!   sparse_model: gate KNN + sparse gather from model weights
 
 use ndarray::Array2;
 
+use crate::backend::MatMulBackend;
 use crate::ffn::FfnBackend;
 use crate::ffn::sparse_compute::{sparse_ffn_forward, sparse_ffn_forward_with_overrides};
 use crate::model::ModelWeights;
@@ -18,6 +22,7 @@ pub struct WalkFfn<'a> {
     pub weights: &'a ModelWeights,
     pub index: &'a dyn GateIndex,
     pub top_k: usize,
+    pub backend: Option<&'a dyn MatMulBackend>,
     trace_residuals: std::cell::RefCell<Vec<(usize, Vec<f32>)>>,
     record_trace: bool,
 }
@@ -25,7 +30,20 @@ pub struct WalkFfn<'a> {
 impl<'a> WalkFfn<'a> {
     pub fn new(weights: &'a ModelWeights, index: &'a dyn GateIndex, top_k: usize) -> Self {
         Self {
-            weights, index, top_k,
+            weights, index, top_k, backend: None,
+            trace_residuals: std::cell::RefCell::new(Vec::new()),
+            record_trace: false,
+        }
+    }
+
+    pub fn new_with_backend(
+        weights: &'a ModelWeights,
+        index: &'a dyn GateIndex,
+        top_k: usize,
+        backend: &'a dyn MatMulBackend,
+    ) -> Self {
+        Self {
+            weights, index, top_k, backend: Some(backend),
             trace_residuals: std::cell::RefCell::new(Vec::new()),
             record_trace: false,
         }
@@ -33,7 +51,7 @@ impl<'a> WalkFfn<'a> {
 
     pub fn new_with_trace(weights: &'a ModelWeights, index: &'a dyn GateIndex, top_k: usize) -> Self {
         Self {
-            weights, index, top_k,
+            weights, index, top_k, backend: None,
             trace_residuals: std::cell::RefCell::new(Vec::new()),
             record_trace: true,
         }
@@ -55,6 +73,95 @@ impl<'a> WalkFfn<'a> {
             layers.push((layer, walk_hits));
         }
         WalkTrace { layers }
+    }
+
+    /// Sparse walk FFN: zero matrix multiplications.
+    ///
+    /// Per position:
+    ///   1. gate_knn → top-K features with gate scores (HNSW graph search, no matmul)
+    ///   2. For each feature: up_score = up_mmap[feat] · x  (dot product)
+    ///   3. activation = silu(gate_score) * up_score          (GEGLU)
+    ///   4. out += activation * down_mmap[feat]               (scaled vector add)
+    ///
+    /// Operations: K dot products + K scaled adds per position. No matmuls.
+    fn walk_ffn_sparse(
+        &self,
+        layer: usize,
+        x: &Array2<f32>,
+    ) -> Option<(Array2<f32>, Array2<f32>)> {
+        let up_view = self.index.up_layer_matrix(layer)?;
+        let down_view = self.index.down_layer_matrix(layer)?;
+
+        let hidden = x.shape()[1];
+        let seq_len = x.shape()[0];
+        let intermediate = self.index.num_features(layer);
+
+        let arch = &*self.weights.arch;
+        let is_gated = arch.ffn_type() == larql_models::FfnType::Gated;
+        let use_gelu = matches!(
+            arch.activation(),
+            larql_models::Activation::GeluTanh | larql_models::Activation::Gelu
+        );
+
+        let mut out = Array2::<f32>::zeros((seq_len, hidden));
+        let mut full_activation = Array2::<f32>::zeros((seq_len, intermediate));
+
+        for s in 0..seq_len {
+            let x_row = x.row(s);
+            let x_owned = x_row.to_owned();
+
+            // Gate walk: per-feature dot products (no matmul)
+            // Falls back to gate_knn (HNSW or brute) if gate_walk not available
+            let hits = self.index.gate_walk(layer, &x_owned, self.top_k)
+                .unwrap_or_else(|| self.index.gate_knn(layer, &x_owned, self.top_k));
+
+            let mut out_row = out.row_mut(s);
+
+            for (feat, gate_score) in hits {
+                let act = if is_gated {
+                    // Up: single dot product from mmap (not a matmul)
+                    let up_score = up_view.row(feat).dot(&x_row);
+                    let activated_gate = if use_gelu {
+                        crate::ffn::gelu_tanh(gate_score)
+                    } else {
+                        gate_score * crate::ffn::sigmoid(gate_score)
+                    };
+                    activated_gate * up_score
+                } else {
+                    let mut v = gate_score;
+                    if let Some(bias) = arch.ffn_up_bias_key(layer)
+                        .and_then(|bk| self.weights.vectors.get(&bk))
+                    {
+                        if feat < bias.len() { v += bias[feat]; }
+                    }
+                    if use_gelu { crate::ffn::gelu_tanh(v) } else { v * crate::ffn::sigmoid(v) }
+                };
+
+                full_activation[[s, feat]] = act;
+
+                if act.abs() > 1e-10 {
+                    // Down: scaled vector add from mmap (not a matmul)
+                    if let Some(override_down) = self.index.down_override(layer, feat) {
+                        if override_down.len() == hidden {
+                            let ov = ndarray::ArrayView1::from(override_down);
+                            out_row.scaled_add(act, &ov);
+                            continue;
+                        }
+                    }
+                    let down_row = down_view.row(feat);
+                    out_row.scaled_add(act, &down_row);
+                }
+            }
+        }
+
+        // Down bias
+        if let Some(bias) = arch.ffn_down_bias_key(layer)
+            .and_then(|k| self.weights.vectors.get(&k))
+        {
+            crate::forward::add_bias(&mut out, bias);
+        }
+
+        Some((out, full_activation))
     }
 
     /// Full mmap walk: gate + up + down all from mmap. Zero safetensor reads.
@@ -84,7 +191,7 @@ impl<'a> WalkFfn<'a> {
         );
 
         // up_scores = x @ up_vectors^T = [seq, intermediate]
-        let up_scores = x.dot(&up_view.t());
+        let up_scores = crate::backend::dot_proj_gpu(x, &up_view, self.backend);
 
         // GEGLU: silu(gate) * up  (exact, same as dense)
         let activation = if use_gelu {
@@ -93,8 +200,8 @@ impl<'a> WalkFfn<'a> {
             crate::ffn::silu_gate_up(&gate_scores, &up_scores)
         };
 
-        // Down: activation @ down_matrix (mmap, zero-copy)
-        let mut out = activation.dot(&down_view);
+        // Down: activation @ down_matrix (mmap)
+        let mut out = crate::backend::matmul_gpu(&activation, &down_view, self.backend);
 
         if let Some(bias) = arch.ffn_down_bias_key(layer)
             .and_then(|k| self.weights.vectors.get(&k))
@@ -246,11 +353,25 @@ impl<'a> FfnBackend for WalkFfn<'a> {
             self.trace_residuals.borrow_mut().push((layer, last_row));
         }
 
-        // Full mmap path available but exact path (gate/up from safetensors + down from mmap)
-        // is faster due to better memory locality (safetensors are in one file).
-        // The full mmap path reads from 3 separate files = worse TLB behavior.
+        // Full mmap walk: gate + up + down all from mmap. No model weight reads.
+        // At high K (>50% intermediate), uses full mmap matmuls (fastest).
+        // At low K (<50%), uses per-feature sparse walk (fewer ops).
+        if self.index.has_full_mmap_ffn() {
+            let intermediate = self.index.num_features(layer);
+            if intermediate > 0 && self.top_k * 2 < intermediate {
+                // Low K: per-feature sparse (no matmul, graph walk)
+                if let Some(result) = self.walk_ffn_sparse(layer, x) {
+                    return result;
+                }
+            } else {
+                // High K: full mmap matmuls (production path, 523ms)
+                if let Some(result) = self.walk_ffn_full_mmap(layer, x) {
+                    return result;
+                }
+            }
+        }
 
-        // Partial mmap: gate/up from model weights + down from mmap.
+        // Fallback: partial mmap (gate/up from model weights + down from mmap)
         if self.index.has_down_features() {
             return self.walk_ffn_exact(layer, x);
         }

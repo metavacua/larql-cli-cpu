@@ -188,14 +188,34 @@ impl Parser {
         let prompt = self.expect_string()?;
 
         let mut layers = None;
+        let mut band = None;
         let mut verbose = false;
         let mut top = None;
+        let mut relations_only = false;
+        let mut with_attention = false;
 
         loop {
             match self.peek() {
                 Token::Keyword(Keyword::Layers) => {
                     self.advance();
                     layers = Some(self.parse_range()?);
+                }
+                Token::Keyword(Keyword::All) => {
+                    self.advance();
+                    self.expect_keyword(Keyword::Layers)?;
+                    band = Some(LayerBand::All);
+                }
+                Token::Keyword(Keyword::Syntax) => {
+                    self.advance();
+                    band = Some(LayerBand::Syntax);
+                }
+                Token::Keyword(Keyword::Knowledge) => {
+                    self.advance();
+                    band = Some(LayerBand::Knowledge);
+                }
+                Token::Keyword(Keyword::Output) => {
+                    self.advance();
+                    band = Some(LayerBand::Output);
                 }
                 Token::Keyword(Keyword::Verbose) => {
                     self.advance();
@@ -205,11 +225,21 @@ impl Parser {
                     self.advance();
                     top = Some(self.expect_u32()?);
                 }
+                Token::Keyword(Keyword::Relations) => {
+                    self.advance();
+                    self.expect_keyword(Keyword::Only)?;
+                    relations_only = true;
+                }
+                Token::Keyword(Keyword::With) => {
+                    self.advance();
+                    self.expect_keyword(Keyword::Attention)?;
+                    with_attention = true;
+                }
                 _ => break,
             }
         }
 
         self.eat_semicolon();
-        Ok(Statement::Explain { prompt, mode, layers, verbose, top })
+        Ok(Statement::Explain { prompt, mode, layers, band, verbose, top, relations_only, with_attention })
     }
 }

@@ -94,24 +94,24 @@ fn main() {
     // First call: cold cache
     let h = synth_matrix(seq, hidden, 42);
     let t0 = Instant::now();
-    let _ = default.matmul_transb(&h, &w_q);
+    let _ = default.matmul_transb(h.view(), w_q.view());
     let cold_us = t0.elapsed().as_micros();
 
     // Second call: warm cache (same weight matrix pointer)
     let h2 = synth_matrix(seq, hidden, 44);
     let t0 = Instant::now();
-    let _ = default.matmul_transb(&h2, &w_q);
+    let _ = default.matmul_transb(h2.view(), w_q.view());
     let warm_us = t0.elapsed().as_micros();
 
     // Third call: still cached
     let h3 = synth_matrix(seq, hidden, 45);
     let t0 = Instant::now();
-    let _ = default.matmul_transb(&h3, &w_q);
+    let _ = default.matmul_transb(h3.view(), w_q.view());
     let hot_us = t0.elapsed().as_micros();
 
     // CPU baseline
     let t0 = Instant::now();
-    let _ = cpu.matmul_transb(&h, &w_q);
+    let _ = cpu.matmul_transb(h.view(), w_q.view());
     let cpu_us = t0.elapsed().as_micros();
 
     println!("  Q proj [{seq},{hidden}] x [{},{hidden}]^T  ({}M FLOPs)",
@@ -128,11 +128,11 @@ fn main() {
     let k = synth_matrix(seq, head_dim, 101);
 
     let t0 = Instant::now();
-    let s_cpu = cpu.matmul_transb(&q, &k);
+    let s_cpu = cpu.matmul_transb(q.view(), k.view());
     let cpu_us = t0.elapsed().as_micros();
 
     let t0 = Instant::now();
-    let s_default = default.matmul_transb(&q, &k);
+    let s_default = default.matmul_transb(q.view(), k.view());
     let def_us = t0.elapsed().as_micros();
 
     let diff = max_diff(&s_cpu, &s_default);
@@ -148,18 +148,18 @@ fn main() {
     let w_gate = synth_matrix(intermediate, hidden, 201);
 
     let t0 = Instant::now();
-    let g_cpu = cpu.matmul_transb(&x, &w_gate);
+    let g_cpu = cpu.matmul_transb(x.view(), w_gate.view());
     let cpu_us = t0.elapsed().as_micros();
 
     // Cold
     let t0 = Instant::now();
-    let g_default = default.matmul_transb(&x, &w_gate);
+    let g_default = default.matmul_transb(x.view(), w_gate.view());
     let def_cold_us = t0.elapsed().as_micros();
 
     // Warm
     let x2 = synth_matrix(seq, hidden, 202);
     let t0 = Instant::now();
-    let _ = default.matmul_transb(&x2, &w_gate);
+    let _ = default.matmul_transb(x2.view(), w_gate.view());
     let def_warm_us = t0.elapsed().as_micros();
 
     let diff = max_diff(&g_cpu, &g_default);
@@ -178,28 +178,28 @@ fn main() {
 
     // Warm all weight buffers
     let h_warm = synth_matrix(seq, hidden, 60);
-    let _ = default.matmul_transb(&h_warm, &w_q);
-    let _ = default.matmul_transb(&h_warm, &w_k);
-    let _ = default.matmul_transb(&h_warm, &w_v);
+    let _ = default.matmul_transb(h_warm.view(), w_q.view());
+    let _ = default.matmul_transb(h_warm.view(), w_k.view());
+    let _ = default.matmul_transb(h_warm.view(), w_v.view());
     let attn_warm = synth_matrix(seq, num_heads * head_dim, 61);
-    let _ = default.matmul_transb(&attn_warm, &w_o);
+    let _ = default.matmul_transb(attn_warm.view(), w_o.view());
 
     // Benchmark hot path
     let h_input = synth_matrix(seq, hidden, 70);
     let attn_out = synth_matrix(seq, num_heads * head_dim, 71);
 
     let t0 = Instant::now();
-    let _ = cpu.matmul_transb(&h_input, &w_q);
-    let _ = cpu.matmul_transb(&h_input, &w_k);
-    let _ = cpu.matmul_transb(&h_input, &w_v);
-    let _ = cpu.matmul_transb(&attn_out, &w_o);
+    let _ = cpu.matmul_transb(h_input.view(), w_q.view());
+    let _ = cpu.matmul_transb(h_input.view(), w_k.view());
+    let _ = cpu.matmul_transb(h_input.view(), w_v.view());
+    let _ = cpu.matmul_transb(attn_out.view(), w_o.view());
     let cpu_layer_us = t0.elapsed().as_micros();
 
     let t0 = Instant::now();
-    let _ = default.matmul_transb(&h_input, &w_q);
-    let _ = default.matmul_transb(&h_input, &w_k);
-    let _ = default.matmul_transb(&h_input, &w_v);
-    let _ = default.matmul_transb(&attn_out, &w_o);
+    let _ = default.matmul_transb(h_input.view(), w_q.view());
+    let _ = default.matmul_transb(h_input.view(), w_k.view());
+    let _ = default.matmul_transb(h_input.view(), w_v.view());
+    let _ = default.matmul_transb(attn_out.view(), w_o.view());
     let def_layer_us = t0.elapsed().as_micros();
 
     println!("  Q + K + V + O projections (all cached)");

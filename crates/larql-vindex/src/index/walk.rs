@@ -108,4 +108,64 @@ impl VectorIndex {
     }
 
     // warmup() is in gate.rs (it's a gate cache operation)
+
+    // ── LM head (output projection) for vindex logits ──
+
+    /// Load lm_head from lm_head.bin for KNN logit lookup.
+    pub fn load_lm_head(&mut self, dir: &std::path::Path) -> Result<(), VindexError> {
+        let path = dir.join("lm_head.bin");
+        if !path.exists() {
+            return Err(VindexError::Parse("lm_head.bin not found".into()));
+        }
+        let file = std::fs::File::open(&path)?;
+        let mmap = unsafe { memmap2::Mmap::map(&file)? };
+        // Detect vocab size from file size: vocab = file_bytes / (hidden_size * 4)
+        let vocab = mmap.len() / (self.hidden_size * 4);
+        self.vocab_size = vocab;
+        self.lm_head_mmap = Some(Arc::new(mmap));
+        Ok(())
+    }
+
+    /// Whether lm_head is loaded for vindex logits.
+    pub fn has_lm_head(&self) -> bool {
+        self.lm_head_mmap.is_some() && self.vocab_size > 0
+    }
+
+    /// KNN against lm_head: find top-K tokens by dot product with query vector.
+    /// Single BLAS gemv: query[1, hidden] @ lm_head[vocab, hidden]^T → [1, vocab].
+    /// Then top-K selection. Returns (token_id, score) sorted by score descending.
+    pub fn lm_head_knn(&self, query: &ndarray::Array1<f32>, top_k: usize) -> Vec<(u32, f32)> {
+        let mmap = match self.lm_head_mmap.as_ref() {
+            Some(m) => m,
+            None => return vec![],
+        };
+        let vocab = self.vocab_size;
+        let hidden = self.hidden_size;
+        if vocab == 0 { return vec![]; }
+
+        let expected = vocab * hidden * 4;
+        if mmap.len() < expected { return vec![]; }
+
+        // Zero-copy: reinterpret mmap as [vocab, hidden] f32 matrix
+        let data = unsafe {
+            let ptr = mmap.as_ptr() as *const f32;
+            std::slice::from_raw_parts(ptr, vocab * hidden)
+        };
+        let lm_view = ndarray::ArrayView2::from_shape((vocab, hidden), data).unwrap();
+
+        // Single BLAS gemv: scores = lm_head @ query → [vocab]
+        let scores = lm_view.dot(query);
+
+        // Top-K selection
+        let mut indexed: Vec<(u32, f32)> = scores.iter().copied().enumerate()
+            .map(|(i, s)| (i as u32, s))
+            .collect();
+        let k = top_k.min(indexed.len());
+        if k > 0 && k < indexed.len() {
+            indexed.select_nth_unstable_by(k, |a, b| b.1.partial_cmp(&a.1).unwrap());
+            indexed.truncate(k);
+        }
+        indexed.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        indexed
+    }
 }

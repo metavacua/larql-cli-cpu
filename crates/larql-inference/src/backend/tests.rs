@@ -65,7 +65,7 @@ fn matmul_output_shape() {
     let backend = CpuBackend;
     let a = synth_matrix(3, 5, 1);
     let b = synth_matrix(5, 7, 2);
-    let c = backend.matmul(&a, &b);
+    let c = backend.matmul(a.view(), b.view());
     assert_eq!(c.shape(), &[3, 7]);
 }
 
@@ -74,7 +74,7 @@ fn matmul_transb_output_shape() {
     let backend = CpuBackend;
     let a = synth_matrix(3, 5, 1);
     let b = synth_matrix(7, 5, 2); // [n, k]
-    let c = backend.matmul_transb(&a, &b);
+    let c = backend.matmul_transb(a.view(), b.view());
     assert_eq!(c.shape(), &[3, 7]);
 }
 
@@ -83,7 +83,7 @@ fn matmul_single_element() {
     let backend = CpuBackend;
     let a = Array2::from_elem((1, 1), 3.0f32);
     let b = Array2::from_elem((1, 1), 4.0f32);
-    let c = backend.matmul(&a, &b);
+    let c = backend.matmul(a.view(), b.view());
     assert!((c[[0, 0]] - 12.0).abs() < 1e-6);
 }
 
@@ -94,7 +94,7 @@ fn matmul_matches_reference_small() {
     let backend = CpuBackend;
     let a = synth_matrix(4, 6, 10);
     let b = synth_matrix(6, 8, 20);
-    let got = backend.matmul(&a, &b);
+    let got = backend.matmul(a.view(), b.view());
     let want = reference_matmul(&a, &b);
     assert!(
         max_abs_diff(&got, &want) < 1e-5,
@@ -108,7 +108,7 @@ fn matmul_transb_matches_reference_small() {
     let backend = CpuBackend;
     let a = synth_matrix(4, 6, 30);
     let b = synth_matrix(8, 6, 40); // [n, k]
-    let got = backend.matmul_transb(&a, &b);
+    let got = backend.matmul_transb(a.view(), b.view());
     let want = reference_matmul_transb(&a, &b);
     assert!(
         max_abs_diff(&got, &want) < 1e-5,
@@ -123,7 +123,7 @@ fn matmul_matches_reference_transformer_scale() {
     let backend = CpuBackend;
     let a = synth_matrix(6, 256, 100);
     let b = synth_matrix(256, 64, 200);
-    let got = backend.matmul(&a, &b);
+    let got = backend.matmul(a.view(), b.view());
     let want = reference_matmul(&a, &b);
     assert!(
         max_abs_diff(&got, &want) < 1e-3,
@@ -138,7 +138,7 @@ fn matmul_transb_matches_reference_transformer_scale() {
     let backend = CpuBackend;
     let a = synth_matrix(6, 64, 300);
     let b = synth_matrix(6, 64, 400);
-    let got = backend.matmul_transb(&a, &b);
+    let got = backend.matmul_transb(a.view(), b.view());
     let want = reference_matmul_transb(&a, &b);
     assert!(
         max_abs_diff(&got, &want) < 1e-4,
@@ -154,7 +154,7 @@ fn matmul_identity() {
     let backend = CpuBackend;
     let a = synth_matrix(4, 4, 50);
     let eye = Array2::eye(4);
-    let got = backend.matmul(&a, &eye);
+    let got = backend.matmul(a.view(), eye.view());
     assert!(max_abs_diff(&got, &a) < 1e-6);
 }
 
@@ -163,7 +163,7 @@ fn matmul_zeros() {
     let backend = CpuBackend;
     let a = synth_matrix(3, 5, 60);
     let z = Array2::zeros((5, 7));
-    let got = backend.matmul(&a, &z);
+    let got = backend.matmul(a.view(), z.view());
     assert!(got.iter().all(|&v| v.abs() < 1e-10));
 }
 
@@ -183,7 +183,7 @@ fn matmul_batch_matches_serial() {
 
     let batch_results = backend.matmul_batch(&ops);
     for (i, op) in ops.iter().enumerate() {
-        let serial = backend.matmul(&op.a, &op.b);
+        let serial = backend.matmul(op.a.view(), op.b.view());
         assert!(
             max_abs_diff(&batch_results[i], &serial) < 1e-6,
             "batch[{i}] differs from serial"
@@ -205,7 +205,7 @@ fn matmul_batch_transb_matches_serial() {
 
     let batch_results = backend.matmul_batch(&ops);
     for (i, op) in ops.iter().enumerate() {
-        let serial = backend.matmul_transb(&op.a, &op.b);
+        let serial = backend.matmul_transb(op.a.view(), op.b.view());
         assert!(
             max_abs_diff(&batch_results[i], &serial) < 1e-6,
             "batch_transb[{i}] differs from serial"
@@ -241,8 +241,8 @@ fn matmul_batch_mixed_transpose() {
     assert_eq!(results[0].shape(), &[3, 5]);
     assert_eq!(results[1].shape(), &[3, 5]);
 
-    let want0 = backend.matmul(&ops[0].a, &ops[0].b);
-    let want1 = backend.matmul_transb(&ops[1].a, &ops[1].b);
+    let want0 = backend.matmul(ops[0].a.view(), ops[0].b.view());
+    let want1 = backend.matmul_transb(ops[1].a.view(), ops[1].b.view());
     assert!(max_abs_diff(&results[0], &want0) < 1e-6);
     assert!(max_abs_diff(&results[1], &want1) < 1e-6);
 }
@@ -254,7 +254,7 @@ fn matmul_tall_skinny() {
     let backend = CpuBackend;
     let a = synth_matrix(100, 4, 800);
     let b = synth_matrix(4, 3, 801);
-    let got = backend.matmul(&a, &b);
+    let got = backend.matmul(a.view(), b.view());
     let want = reference_matmul(&a, &b);
     assert_eq!(got.shape(), &[100, 3]);
     assert!(max_abs_diff(&got, &want) < 1e-5);
@@ -265,7 +265,7 @@ fn matmul_wide_flat() {
     let backend = CpuBackend;
     let a = synth_matrix(2, 100, 900);
     let b = synth_matrix(100, 200, 901);
-    let got = backend.matmul(&a, &b);
+    let got = backend.matmul(a.view(), b.view());
     let want = reference_matmul(&a, &b);
     assert_eq!(got.shape(), &[2, 200]);
     assert!(max_abs_diff(&got, &want) < 1e-3);
@@ -290,7 +290,7 @@ fn default_backend_matmul_works() {
     let backend = super::default_backend();
     let a = synth_matrix(4, 8, 1000);
     let b = synth_matrix(8, 6, 1001);
-    let c = backend.matmul(&a, &b);
+    let c = backend.matmul(a.view(), b.view());
     assert_eq!(c.shape(), &[4, 6]);
     let want = reference_matmul(&a, &b);
     assert!(max_abs_diff(&c, &want) < 1e-5);

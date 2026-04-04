@@ -145,6 +145,97 @@ pub fn run_attention_block(
     Some((h_post_attn, attn_projected, attn_weights))
 }
 
+/// GPU-accelerated attention block. Same as `run_attention_block` but routes
+/// Q/K/V/O projections through the MatMulBackend (Metal, CUDA, or CPU).
+/// If backend is None, falls back to CPU BLAS.
+pub fn run_attention_block_gpu(
+    weights: &crate::model::ModelWeights,
+    h: &Array2<f32>,
+    layer: usize,
+    capture_attention: bool,
+    backend: Option<&dyn crate::backend::MatMulBackend>,
+) -> Option<(Array2<f32>, Array2<f32>, Option<AttentionWeights>)> {
+    use crate::backend::dot_proj_gpu;
+    use crate::forward::add_bias;
+    use crate::residual::rms_norm_heads;
+
+    let arch = &*weights.arch;
+    let head_dim = weights.head_dim;
+    let num_q = weights.num_q_heads;
+    let num_kv = weights.num_kv_heads;
+    let reps = num_q / num_kv;
+    let scale = if arch.attention_multiplier() != 1.0 {
+        arch.attention_multiplier() as f64
+    } else {
+        arch.attention_scale()
+    };
+    let seq_len = h.shape()[0];
+    let norm_offset = arch.norm_weight_offset();
+
+    let h_norm = crate::forward::apply_norm(weights, h, &arch.input_layernorm_key(layer), norm_offset);
+
+    let w_q = weights.tensors.get(&arch.attn_q_key(layer))?;
+    let w_k = weights.tensors.get(&arch.attn_k_key(layer)).unwrap();
+    let w_v = weights.tensors.get(&arch.attn_v_key(layer)).unwrap();
+    let w_o = weights.tensors.get(&arch.attn_o_key(layer)).unwrap();
+
+    // Q/K/V projections — GPU-accelerated
+    let mut q_full = dot_proj_gpu(&h_norm, w_q, backend);
+    let mut k_full = dot_proj_gpu(&h_norm, w_k, backend);
+    let mut v_full = dot_proj_gpu(&h_norm, w_v, backend);
+
+    if let Some(bias) = arch.attn_q_bias_key(layer).and_then(|k| weights.vectors.get(&k)) {
+        add_bias(&mut q_full, bias);
+    }
+    if let Some(bias) = arch.attn_k_bias_key(layer).and_then(|k| weights.vectors.get(&k)) {
+        add_bias(&mut k_full, bias);
+    }
+    if let Some(bias) = arch.attn_v_bias_key(layer).and_then(|k| weights.vectors.get(&k)) {
+        add_bias(&mut v_full, bias);
+    }
+
+    let qk_offset = weights.arch.qk_norm_weight_offset();
+    let qk_norm_off = if qk_offset != 0.0 { qk_offset } else { norm_offset };
+    let q_normed = match arch.attn_q_norm_key(layer).and_then(|k| weights.vectors.get(&k)) {
+        Some(norm_w) => rms_norm_heads(&q_full, norm_w, num_q, head_dim, qk_norm_off),
+        None => q_full,
+    };
+    let k_normed = match arch.attn_k_norm_key(layer).and_then(|k| weights.vectors.get(&k)) {
+        Some(norm_w) => rms_norm_heads(&k_full, norm_w, num_kv, head_dim, qk_norm_off),
+        None => k_full,
+    };
+
+    let layer_rope_base = arch.rope_base_for_layer(layer);
+    let q_rope = apply_rope(&q_normed, num_q, head_dim, layer_rope_base);
+    let k_rope = apply_rope(&k_normed, num_kv, head_dim, layer_rope_base);
+
+    let softcap = arch.attn_logit_softcapping();
+    let (attn_out, attn_weights) = gqa_attention_with_weights(
+        &q_rope, &k_rope, &v_full, num_q, head_dim, reps, scale, seq_len,
+        capture_attention, softcap,
+    );
+
+    // O projection — GPU-accelerated
+    let mut attn_projected = dot_proj_gpu(&attn_out, w_o, backend);
+    if let Some(bias) = arch.attn_o_bias_key(layer).and_then(|k| weights.vectors.get(&k)) {
+        add_bias(&mut attn_projected, bias);
+    }
+
+    let res_mult = arch.residual_multiplier();
+    let h_post_attn = if arch.has_post_norms() {
+        let normed = crate::forward::apply_norm(
+            weights, &attn_projected, &arch.post_attention_layernorm_key(layer), norm_offset,
+        );
+        if res_mult != 1.0 { h + &(&normed * res_mult) } else { h + &normed }
+    } else if res_mult != 1.0 {
+        h + &(&attn_projected * res_mult)
+    } else {
+        h + &attn_projected
+    };
+
+    Some((h_post_attn, attn_projected, attn_weights))
+}
+
 /// Grouped-query attention with causal masking (no weight capture).
 ///
 /// q: (seq, num_q * head_dim), k: (seq, num_kv * head_dim), v: same as k

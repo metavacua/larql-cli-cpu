@@ -187,9 +187,9 @@ impl MetalBackend {
             let b = Self::calibration_matrix(n, k, 43);
 
             // Warm the Metal buffer cache
-            let a_data = Self::contiguous_data(&a);
-            let b_data = Self::contiguous_data(&b);
-            let _ = self.dispatch_transb(&a_data, &b_data, m, n, k);
+            let a_slice = a.as_slice().unwrap();
+            let b_slice = b.as_slice().unwrap();
+            let _ = self.dispatch_transb(a_slice, b_slice, m, n, k);
 
             // Benchmark CPU (median of 5)
             let cpu_us = Self::bench_median(5, || {
@@ -198,9 +198,7 @@ impl MetalBackend {
 
             // Benchmark Metal with warm cache (median of 5)
             let metal_us = Self::bench_median(5, || {
-                let a_data = Self::contiguous_data(&a);
-                let b_data = Self::contiguous_data(&b);
-                let _ = self.dispatch_transb(&a_data, &b_data, m, n, k);
+                let _ = self.dispatch_transb(a_slice, b_slice, m, n, k);
             });
 
             if metal_us < cpu_us {
@@ -252,8 +250,8 @@ impl MetalBackend {
         times[n / 2]
     }
 
-    /// Extract a contiguous f32 slice from an ndarray, copying if needed.
-    fn contiguous_data(a: &Array2<f32>) -> std::borrow::Cow<'_, [f32]> {
+    /// Extract a contiguous f32 slice from an ndarray view, zero-copy if standard layout.
+    fn contiguous_view_data<'v>(a: &'v ndarray::ArrayView2<'v, f32>) -> std::borrow::Cow<'v, [f32]> {
         if let Some(s) = a.as_slice() {
             std::borrow::Cow::Borrowed(s)
         } else {
@@ -263,6 +261,10 @@ impl MetalBackend {
     }
 
     /// Get or create a GPU buffer for the given data slice.
+    ///
+    /// For page-aligned data (mmap'd vindex files), uses zero-copy:
+    /// the GPU reads directly from the same unified memory pages.
+    /// For non-aligned data, copies into a shared GPU buffer.
     fn get_or_create_buffer(&self, data: &[f32]) -> Buffer {
         let key: CacheKey = (data.as_ptr() as usize, data.len());
         let mut cache = self.buffer_cache.lock().unwrap();
@@ -271,12 +273,27 @@ impl MetalBackend {
             return buf.clone();
         }
 
-        let bytes = (data.len() * std::mem::size_of::<f32>()) as u64;
-        let buf = self.device.new_buffer_with_data(
-            data.as_ptr() as *const c_void,
-            bytes,
-            MTLResourceOptions::StorageModeShared,
-        );
+        let bytes = data.len() * std::mem::size_of::<f32>();
+        let ptr = data.as_ptr() as *const c_void;
+        let page_size = 16384; // Apple Silicon uses 16KB pages
+
+        let buf = if (ptr as usize) % page_size == 0 && bytes % page_size == 0 {
+            // Zero-copy: mmap'd data, page-aligned. GPU reads same physical pages.
+            self.device.new_buffer_with_bytes_no_copy(
+                ptr as *mut c_void,
+                bytes as u64,
+                MTLResourceOptions::StorageModeShared,
+                None,
+            )
+        } else {
+            // Copy: not page-aligned, must copy into GPU-accessible buffer.
+            self.device.new_buffer_with_data(
+                ptr,
+                bytes as u64,
+                MTLResourceOptions::StorageModeShared,
+            )
+        };
+
         cache.insert(key, buf.clone());
         buf
     }
@@ -372,22 +389,32 @@ impl MetalBackend {
 }
 
 impl MatMulBackend for MetalBackend {
-    fn matmul(&self, a: &Array2<f32>, b: &Array2<f32>) -> Array2<f32> {
+    fn matmul(&self, a: ndarray::ArrayView2<f32>, b: ndarray::ArrayView2<f32>) -> Array2<f32> {
         let (m, k) = (a.shape()[0], a.shape()[1]);
         let n = b.shape()[1];
         debug_assert_eq!(a.shape()[1], b.shape()[0], "matmul: inner dims mismatch");
 
         if !self.should_use_gpu(m, n, k) {
-            return a.dot(b);
+            return a.dot(&b);
         }
 
-        let a_data = Self::contiguous_data(a);
-        let b_data = Self::contiguous_data(b);
-        let c_data = self.dispatch_notrans(&a_data, &b_data, m, n, k);
+        // Extract contiguous slices — zero-copy for standard layout (mmap views)
+        let a_owned;
+        let a_data: &[f32] = match a.as_slice() {
+            Some(s) => s,
+            None => { a_owned = a.as_standard_layout().into_owned(); a_owned.as_slice().unwrap() }
+        };
+        let b_owned;
+        let b_data: &[f32] = match b.as_slice() {
+            Some(s) => s,
+            None => { b_owned = b.as_standard_layout().into_owned(); b_owned.as_slice().unwrap() }
+        };
+
+        let c_data = self.dispatch_notrans(a_data, b_data, m, n, k);
         Array2::from_shape_vec((m, n), c_data).unwrap()
     }
 
-    fn matmul_transb(&self, a: &Array2<f32>, b: &Array2<f32>) -> Array2<f32> {
+    fn matmul_transb(&self, a: ndarray::ArrayView2<f32>, b: ndarray::ArrayView2<f32>) -> Array2<f32> {
         let (m, k) = (a.shape()[0], a.shape()[1]);
         let n = b.shape()[0];
         debug_assert_eq!(a.shape()[1], b.shape()[1], "matmul_transb: K dims mismatch");
@@ -396,9 +423,18 @@ impl MatMulBackend for MetalBackend {
             return a.dot(&b.t());
         }
 
-        let a_data = Self::contiguous_data(a);
-        let b_data = Self::contiguous_data(b);
-        let c_data = self.dispatch_transb(&a_data, &b_data, m, n, k);
+        let a_owned;
+        let a_data: &[f32] = match a.as_slice() {
+            Some(s) => s,
+            None => { a_owned = a.as_standard_layout().into_owned(); a_owned.as_slice().unwrap() }
+        };
+        let b_owned;
+        let b_data: &[f32] = match b.as_slice() {
+            Some(s) => s,
+            None => { b_owned = b.as_standard_layout().into_owned(); b_owned.as_slice().unwrap() }
+        };
+
+        let c_data = self.dispatch_transb(a_data, b_data, m, n, k);
         Array2::from_shape_vec((m, n), c_data).unwrap()
     }
 
@@ -425,8 +461,13 @@ impl MatMulBackend for MetalBackend {
             }
 
             any_gpu = true;
-            let a_data = Self::contiguous_data(&op.a);
-            let b_data = Self::contiguous_data(&op.b);
+            let a_data = op.a.as_slice().unwrap_or_else(|| {
+                // Non-contiguous — this shouldn't happen for standard layout
+                panic!("MatMulOp.a is not contiguous");
+            });
+            let b_data = op.b.as_slice().unwrap_or_else(|| {
+                panic!("MatMulOp.b is not contiguous");
+            });
 
             let c_bytes = (m * n * std::mem::size_of::<f32>()) as u64;
             let buf_a = self.get_or_create_buffer(&a_data);

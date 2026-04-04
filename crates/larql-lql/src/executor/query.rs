@@ -215,6 +215,7 @@ impl Session {
                 } else {
                     format!("{:<14}", label)
                 };
+                let top_token = hit.meta.top_token.trim();
                 let down_top: String = hit
                     .meta
                     .top_k
@@ -224,8 +225,8 @@ impl Session {
                     .collect::<Vec<_>>()
                     .join(", ");
                 out.push(format!(
-                    "  L{:2}: {} F{:<5} gate={:+.1}  → [{}]",
-                    layer, label_str, hit.feature, hit.gate_score, down_top,
+                    "  L{:2}: {} F{:<5} gate={:+.1}  → {:15} [{}]",
+                    layer, label_str, hit.feature, hit.gate_score, top_token, down_top,
                 ));
             }
         }
@@ -935,8 +936,12 @@ impl Session {
         &self,
         prompt: &str,
         top: Option<u32>,
+        band: Option<crate::ast::LayerBand>,
+        relations_only: bool,
+        with_attention: bool,
     ) -> Result<Vec<String>, LqlError> {
         let top_k = top.unwrap_or(5) as usize;
+        let per_layer = top.unwrap_or(3) as usize;
 
         // Weight backend: dense inference trace (no feature labels)
         if let super::Backend::Weight { weights, tokenizer, .. } = &self.backend {
@@ -982,23 +987,108 @@ impl Session {
             .map_err(|e| LqlError::Execution(format!("tokenize error: {e}")))?;
         let token_ids: Vec<u32> = encoding.get_ids().to_vec();
 
+        // Decode tokens for attention display (None for special tokens like BOS/EOS)
+        let token_strs: Vec<Option<String>> = if with_attention {
+            token_ids.iter().map(|&id| {
+                larql_inference::decode_token(&tokenizer, id)
+            }).collect()
+        } else {
+            Vec::new()
+        };
+
         // PatchedVindex implements GateIndex — INSERT/DELETE/UPDATE affects inference.
         let walk_ffn = larql_inference::vindex::WalkFfn::new_with_trace(&weights, patched, 8092);
         let start = std::time::Instant::now();
-        let result = larql_inference::predict_with_ffn(
-            &weights, &tokenizer, &token_ids, top_k, &walk_ffn,
-        );
+
+        // Use attention-capturing forward pass when requested
+        let (predictions, attention_captures, lens_residuals) = if with_attention {
+            let r = larql_inference::predict_with_ffn_attention(
+                &weights, &tokenizer, &token_ids, top_k, &walk_ffn,
+            );
+            (r.predictions, r.attention, r.residuals)
+        } else {
+            let r = larql_inference::predict_with_ffn(
+                &weights, &tokenizer, &token_ids, top_k, &walk_ffn,
+            );
+            (r.predictions, Vec::new(), Vec::new())
+        };
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+        // Build attention lookup: layer → top attended tokens
+        let attention_map: std::collections::HashMap<usize, Vec<(String, f32)>> = if with_attention {
+            let mut map = std::collections::HashMap::new();
+            for cap in &attention_captures {
+                // Average attention across all heads
+                let n_heads = cap.weights.heads.len();
+                if n_heads == 0 || token_strs.is_empty() { continue; }
+                let seq_len = cap.weights.heads[0].len();
+                let mut avg = vec![0.0f32; seq_len];
+                for head in &cap.weights.heads {
+                    for (j, &w) in head.iter().enumerate() {
+                        avg[j] += w;
+                    }
+                }
+                for v in avg.iter_mut() { *v /= n_heads as f32; }
+                // Pair with content tokens only (skip BOS/EOS/special), sort by weight, take top 3
+                let mut pairs: Vec<(String, f32)> = avg.iter().copied().enumerate()
+                    .filter_map(|(j, w)| {
+                        let tok = token_strs.get(j)?.as_ref()?;
+                        Some((tok.trim().to_string(), w))
+                    })
+                    .collect();
+                pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                pairs.truncate(3);
+                map.insert(cap.layer, pairs);
+            }
+            map
+        } else {
+            std::collections::HashMap::new()
+        };
+
+        // Build logit lens: layer → (top_token, probability)
+        let lens_map: std::collections::HashMap<usize, (String, f64)> = if with_attention {
+            lens_residuals.iter()
+                .filter_map(|(layer, residual)| {
+                    let pred = larql_inference::logit_lens_top1(&weights, &tokenizer, residual)?;
+                    Some((*layer, pred))
+                })
+                .collect()
+        } else {
+            std::collections::HashMap::new()
+        };
 
         let trace = walk_ffn.take_trace();
         let classifier = self.relation_classifier();
 
+        // Resolve band to layer range for filtering
+        let last = config.num_layers.saturating_sub(1);
+        let bands = config.layer_bands.clone()
+            .or_else(|| larql_vindex::LayerBands::for_family(&config.family, config.num_layers))
+            .unwrap_or(larql_vindex::LayerBands {
+                syntax: (0, last),
+                knowledge: (0, last),
+                output: (0, last),
+            });
+        let layer_range: Option<(usize, usize)> = match band {
+            Some(crate::ast::LayerBand::Syntax) => Some(bands.syntax),
+            Some(crate::ast::LayerBand::Knowledge) => Some(bands.knowledge),
+            Some(crate::ast::LayerBand::Output) => Some(bands.output),
+            Some(crate::ast::LayerBand::All) | None => None,
+        };
+
+        let band_label = match band {
+            Some(crate::ast::LayerBand::Syntax) => " (syntax)",
+            Some(crate::ast::LayerBand::Knowledge) => " (knowledge)",
+            Some(crate::ast::LayerBand::Output) => " (output)",
+            _ => "",
+        };
+
         let mut out = Vec::new();
-        out.push(format!("Inference trace for {:?}:", prompt));
+        out.push(format!("Inference trace for {:?}{}:", prompt, band_label));
         out.push(format!(
             "Prediction: {} ({:.2}%) in {:.0}ms",
-            result.predictions.first().map(|(t, _)| t.as_str()).unwrap_or("?"),
-            result.predictions.first().map(|(_, p)| p * 100.0).unwrap_or(0.0),
+            predictions.first().map(|(t, _)| t.as_str()).unwrap_or("?"),
+            predictions.first().map(|(_, p)| p * 100.0).unwrap_or(0.0),
             elapsed_ms
         ));
         out.push(String::new());
@@ -1007,27 +1097,108 @@ impl Session {
             if hits.is_empty() {
                 continue;
             }
-            for hit in hits.iter().take(3) {
-                let label = classifier
-                    .and_then(|rc| rc.label_for_feature(*layer, hit.feature))
-                    .unwrap_or("");
-                let label_str = if label.is_empty() {
-                    format!("{:14}", "")
+            if let Some((lo, hi)) = layer_range {
+                if *layer < lo || *layer > hi {
+                    continue;
+                }
+            }
+            // When filtering to relations only, re-sort so positive gates
+            // (features contributing to the prediction) rank above negative
+            // gates of equal magnitude.
+            let labelled_hits: Vec<_> = if relations_only {
+                let mut lh: Vec<_> = hits.iter()
+                    .filter(|hit| {
+                        classifier
+                            .and_then(|rc| rc.label_for_feature(*layer, hit.feature))
+                            .map(|l| !l.is_empty())
+                            .unwrap_or(false)
+                    })
+                    .collect();
+                // Positive gate first (descending), then negative by magnitude
+                lh.sort_by(|a, b| {
+                    let a_pos = a.gate_score > 0.0;
+                    let b_pos = b.gate_score > 0.0;
+                    match (a_pos, b_pos) {
+                        (true, false) => std::cmp::Ordering::Less,
+                        (false, true) => std::cmp::Ordering::Greater,
+                        _ => b.gate_score.abs().partial_cmp(&a.gate_score.abs())
+                            .unwrap_or(std::cmp::Ordering::Equal),
+                    }
+                });
+                lh
+            } else {
+                hits.iter().collect()
+            };
+
+            if with_attention {
+                // Compact single-line format: feature + attention + logit lens
+                let hit = labelled_hits.first();
+                let feature_part = if let Some(hit) = hit {
+                    let label = classifier
+                        .and_then(|rc| rc.label_for_feature(*layer, hit.feature))
+                        .unwrap_or("");
+                    if relations_only && label.is_empty() {
+                        // Skip unlabelled when relations_only
+                        None
+                    } else {
+                        let top_token = hit.meta.top_token.trim();
+                        let name = if !label.is_empty() { label } else { top_token };
+                        Some(format!("{:<14} {:+.1}", name, hit.gate_score))
+                    }
                 } else {
-                    format!("{:<14}", label)
+                    None
                 };
-                let down_top: String = hit
-                    .meta
-                    .top_k
-                    .iter()
-                    .take(3)
-                    .map(|t| t.token.clone())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                out.push(format!(
-                    "  L{:2}: {} F{:<5} gate={:+.1}  → [{}]",
-                    layer, label_str, hit.feature, hit.gate_score, down_top,
-                ));
+                let empty = format!("{:19}", "");
+                let feature_str = feature_part.as_deref().unwrap_or(&empty);
+
+                let attn_part = attention_map.get(layer)
+                    .and_then(|attn| attn.first())
+                    .map(|(tok, w)| format!("{}({:.0}%)", tok, w * 100.0))
+                    .unwrap_or_default();
+
+                let lens_part = lens_map.get(layer)
+                    .map(|(tok, prob)| format!("{} ({:.1}%)", tok, prob * 100.0))
+                    .unwrap_or_default();
+
+                if feature_part.is_some() || !lens_part.is_empty() {
+                    out.push(format!(
+                        "  L{:2}  {:<19}  {:<16} → {}",
+                        layer, feature_str, attn_part, lens_part,
+                    ));
+                }
+            } else {
+                // Standard multi-line format without attention
+                let mut shown = 0;
+                for hit in &labelled_hits {
+                    if shown >= per_layer {
+                        break;
+                    }
+                    let label = classifier
+                        .and_then(|rc| rc.label_for_feature(*layer, hit.feature))
+                        .unwrap_or("");
+                    if relations_only && label.is_empty() {
+                        continue;
+                    }
+                    shown += 1;
+                    let label_str = if label.is_empty() {
+                        format!("{:14}", "")
+                    } else {
+                        format!("{:<14}", label)
+                    };
+                    let top_token = hit.meta.top_token.trim();
+                    let down_top: String = hit
+                        .meta
+                        .top_k
+                        .iter()
+                        .take(3)
+                        .map(|t| t.token.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    out.push(format!(
+                        "  L{:2}: {} F{:<5} gate={:+.1}  → {:15} [{}]",
+                        layer, label_str, hit.feature, hit.gate_score, top_token, down_top,
+                    ));
+                }
             }
         }
 

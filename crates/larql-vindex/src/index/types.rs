@@ -42,6 +42,13 @@ pub trait GateIndex {
     fn up_layer_matrix(&self, _layer: usize) -> Option<ndarray::ArrayView2<'_, f32>> { None }
     fn has_full_mmap_ffn(&self) -> bool { false }
 
+    /// Per-feature gate scoring: iterate all features, dot product each one.
+    /// No matrix multiplication — each feature scored individually.
+    /// Returns (feature_index, score) sorted by absolute score descending.
+    fn gate_walk(&self, _layer: usize, _residual: &Array1<f32>, _top_k: usize) -> Option<Vec<(usize, f32)>> {
+        None // Override in VectorIndex to use mmap
+    }
+
     fn gate_knn_batch(&self, layer: usize, x: &Array2<f32>, top_k: usize) -> Vec<usize> {
         let seq_len = x.shape()[0];
         let mut all = std::collections::BTreeSet::new();

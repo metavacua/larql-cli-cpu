@@ -476,7 +476,7 @@ fn parse_describe_minimal() {
             assert!(band.is_none());
             assert!(layer.is_none());
             assert!(!relations_only);
-            assert_eq!(mode, DescribeMode::Verbose); // verbose is now the default
+            assert_eq!(mode, DescribeMode::Brief); // brief is the default (clean output)
         }
         _ => panic!("expected Describe"),
     }
@@ -646,12 +646,15 @@ fn parse_explain_walk_with_layers_and_verbose() {
 fn parse_explain_infer_minimal() {
     let stmt = parse(r#"EXPLAIN INFER "The capital of France is";"#).unwrap();
     match stmt {
-        Statement::Explain { prompt, mode, layers, verbose, top } => {
+        Statement::Explain { prompt, mode, layers, band, verbose, top, relations_only, with_attention } => {
             assert_eq!(prompt, "The capital of France is");
             assert_eq!(mode, ExplainMode::Infer);
             assert!(layers.is_none());
+            assert!(band.is_none());
             assert!(!verbose);
             assert!(top.is_none());
+            assert!(!relations_only);
+            assert!(!with_attention);
         }
         _ => panic!("expected Explain"),
     }

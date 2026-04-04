@@ -65,6 +65,9 @@ pub struct VectorIndex {
     pub(crate) hnsw_cache: Mutex<Vec<Option<super::hnsw::HnswLayer>>>,
     pub(crate) hnsw_enabled: std::sync::atomic::AtomicBool,
     pub(crate) hnsw_ef_search: std::sync::atomic::AtomicUsize,
+    /// Mmap'd lm_head (output projection): [vocab_size, hidden_size], f32.
+    pub(crate) lm_head_mmap: Option<Arc<memmap2::Mmap>>,
+    pub vocab_size: usize,
 }
 
 impl Clone for VectorIndex {
@@ -91,6 +94,8 @@ impl Clone for VectorIndex {
             hnsw_ef_search: std::sync::atomic::AtomicUsize::new(
                 self.hnsw_ef_search.load(Ordering::Relaxed)
             ),
+            lm_head_mmap: self.lm_head_mmap.clone(),
+            vocab_size: self.vocab_size,
         }
     }
 }
@@ -120,6 +125,8 @@ impl VectorIndex {
             hnsw_cache: Mutex::new((0..num_layers).map(|_| None).collect()),
             hnsw_enabled: std::sync::atomic::AtomicBool::new(false),
             hnsw_ef_search: std::sync::atomic::AtomicUsize::new(200),
+            lm_head_mmap: None,
+            vocab_size: 0,
         }
     }
 
@@ -150,6 +157,8 @@ impl VectorIndex {
             hnsw_cache: Mutex::new((0..num_layers).map(|_| None).collect()),
             hnsw_enabled: std::sync::atomic::AtomicBool::new(false),
             hnsw_ef_search: std::sync::atomic::AtomicUsize::new(200),
+            lm_head_mmap: None,
+            vocab_size: 0,
         }
     }
 
@@ -308,6 +317,8 @@ impl VectorIndex {
             hnsw_cache: Mutex::new((0..num_layers).map(|_| None).collect()),
             hnsw_enabled: std::sync::atomic::AtomicBool::new(false),
             hnsw_ef_search: std::sync::atomic::AtomicUsize::new(200),
+            lm_head_mmap: None,
+            vocab_size: 0,
             num_layers,
             hidden_size,
         })

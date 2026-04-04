@@ -125,6 +125,7 @@ pub enum Keyword {
     Positions,
     Brief,
     Raw,
+    Attention,
 }
 
 impl Keyword {
@@ -221,6 +222,7 @@ impl Keyword {
             "POSITIONS" => Some(Self::Positions),
             "BRIEF" => Some(Self::Brief),
             "RAW" => Some(Self::Raw),
+            "ATTENTION" => Some(Self::Attention),
             _ => None,
         }
     }

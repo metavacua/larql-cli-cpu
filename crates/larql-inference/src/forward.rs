@@ -96,6 +96,11 @@ pub fn add_bias(x: &mut Array2<f32>, bias: &[f32]) {
 
 /// Embed token IDs with architecture-specific scaling.
 fn embed_tokens(weights: &ModelWeights, token_ids: &[u32]) -> Array2<f32> {
+    embed_tokens_pub(weights, token_ids)
+}
+
+/// Public embed for use by LayerGraph.
+pub fn embed_tokens_pub(weights: &ModelWeights, token_ids: &[u32]) -> Array2<f32> {
     let seq_len = token_ids.len();
     let hidden = weights.hidden_size;
     let scale = weights.arch.embed_scale();
@@ -135,7 +140,7 @@ fn run_attention_inner(
 }
 
 /// Run FFN for a single layer using the given backend. Returns the post-FFN residual.
-fn run_ffn(
+pub fn run_ffn(
     weights: &ModelWeights,
     h_post_attn: &Array2<f32>,
     layer: usize,
@@ -210,6 +215,15 @@ fn run_layer_with_capture(
 }
 
 /// Project the final hidden state to logits and return top-k predictions.
+pub fn logits_to_predictions_pub(
+    weights: &ModelWeights,
+    h: &Array2<f32>,
+    tokenizer: &tokenizers::Tokenizer,
+    top_k: usize,
+) -> PredictResult {
+    logits_to_predictions(weights, h, tokenizer, top_k)
+}
+
 fn logits_to_predictions(
     weights: &ModelWeights,
     h: &Array2<f32>,
@@ -426,6 +440,66 @@ pub fn predict_with_ffn(
     }
 
     logits_to_predictions(weights, &h, tokenizer, top_k)
+}
+
+/// Prediction result with per-layer attention captures and logit lens.
+pub struct PredictResultWithAttention {
+    pub predictions: Vec<(String, f64)>,
+    pub attention: Vec<LayerAttentionCapture>,
+    /// Per-layer residual vectors (last token position) for logit lens projection.
+    pub residuals: Vec<(usize, Vec<f32>)>,
+}
+
+/// Run a full forward pass with a custom FFN backend, capturing attention weights
+/// and per-layer residuals for logit lens.
+pub fn predict_with_ffn_attention(
+    weights: &ModelWeights,
+    tokenizer: &tokenizers::Tokenizer,
+    token_ids: &[u32],
+    top_k: usize,
+    ffn: &dyn FfnBackend,
+) -> PredictResultWithAttention {
+    let num_layers = weights.num_layers;
+    let seq_len = token_ids.len();
+    let mut h = embed_tokens(weights, token_ids);
+    let mut attention = Vec::with_capacity(num_layers);
+    let mut residuals = Vec::with_capacity(num_layers);
+
+    for layer in 0..num_layers {
+        match run_layer_with_capture(weights, &h, layer, ffn, false, true) {
+            Some((h_new, _, attn_weights)) => {
+                h = h_new;
+                // Capture last-token residual for logit lens
+                residuals.push((layer, h.row(seq_len - 1).to_vec()));
+                if let Some(w) = attn_weights {
+                    attention.push(LayerAttentionCapture { layer, weights: w });
+                }
+            }
+            None => continue,
+        }
+    }
+
+    let result = logits_to_predictions(weights, &h, tokenizer, top_k);
+    PredictResultWithAttention {
+        predictions: result.predictions,
+        attention,
+        residuals,
+    }
+}
+
+/// Project a single residual vector through final norm + lm_head to get top-1 prediction.
+/// This is the "logit lens" — what would the model predict if it stopped at this layer?
+pub fn logit_lens_top1(
+    weights: &ModelWeights,
+    tokenizer: &tokenizers::Tokenizer,
+    residual: &[f32],
+) -> Option<(String, f64)> {
+    let hidden = weights.hidden_size;
+    if residual.len() != hidden { return None; }
+
+    let h = Array2::from_shape_vec((1, hidden), residual.to_vec()).ok()?;
+    let result = logits_to_predictions(weights, &h, tokenizer, 1);
+    result.predictions.into_iter().next()
 }
 
 /// Forward pass with residual capture — returns predictions + per-layer residuals.

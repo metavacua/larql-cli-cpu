@@ -63,8 +63,11 @@ pub enum Statement {
         prompt: String,
         mode: ExplainMode,
         layers: Option<Range>,
+        band: Option<LayerBand>,
         verbose: bool,
         top: Option<u32>,
+        relations_only: bool,
+        with_attention: bool,
     },
 
     // ── Mutation ──
@@ -170,7 +173,7 @@ pub enum DescribeMode {
 }
 
 impl Default for DescribeMode {
-    fn default() -> Self { Self::Verbose }
+    fn default() -> Self { Self::Brief }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

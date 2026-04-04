@@ -12,7 +12,7 @@ pub mod metal;
 #[cfg(test)]
 mod tests;
 
-use ndarray::Array2;
+use ndarray::{Array2, ArrayView2};
 
 /// A single matmul operation for batch dispatch.
 pub struct MatMulOp {
@@ -25,12 +25,15 @@ pub struct MatMulOp {
 ///
 /// CPU implementation uses ndarray + BLAS (Accelerate on macOS).
 /// Metal implementation uses GPU compute shaders.
+///
+/// Methods accept ArrayView2 (zero-copy borrowed views) to avoid
+/// unnecessary data copies for mmap'd weight matrices.
 pub trait MatMulBackend: Send + Sync {
     /// C = A * B where A is [m, k] and B is [k, n].
-    fn matmul(&self, a: &Array2<f32>, b: &Array2<f32>) -> Array2<f32>;
+    fn matmul(&self, a: ArrayView2<f32>, b: ArrayView2<f32>) -> Array2<f32>;
 
     /// C = A * B^T where A is [m, k] and B is [n, k].
-    fn matmul_transb(&self, a: &Array2<f32>, b: &Array2<f32>) -> Array2<f32>;
+    fn matmul_transb(&self, a: ArrayView2<f32>, b: ArrayView2<f32>) -> Array2<f32>;
 
     /// Batch dispatch — multiple matmuls in one submission.
     /// Default: serial. Metal overrides with parallel GPU dispatch.
@@ -38,9 +41,9 @@ pub trait MatMulBackend: Send + Sync {
         ops.iter()
             .map(|op| {
                 if op.transpose_b {
-                    self.matmul_transb(&op.a, &op.b)
+                    self.matmul_transb(op.a.view(), op.b.view())
                 } else {
-                    self.matmul(&op.a, &op.b)
+                    self.matmul(op.a.view(), op.b.view())
                 }
             })
             .collect()
@@ -65,4 +68,37 @@ pub fn default_backend() -> Box<dyn MatMulBackend> {
         eprintln!("[backend] Metal device not available, falling back to CPU");
     }
     Box::new(cpu::CpuBackend)
+}
+
+/// CPU-only backend. Use when GPU should be disabled.
+pub fn cpu_backend() -> Box<dyn MatMulBackend> {
+    Box::new(cpu::CpuBackend)
+}
+
+/// dot_proj through a backend: a @ b^T.
+/// If backend is None, falls back to ndarray BLAS (CPU).
+/// Zero-copy: accepts any ndarray storage type via view conversion.
+pub fn dot_proj_gpu(
+    a: &ndarray::ArrayBase<impl ndarray::Data<Elem = f32>, ndarray::Ix2>,
+    b: &ndarray::ArrayBase<impl ndarray::Data<Elem = f32>, ndarray::Ix2>,
+    backend: Option<&dyn MatMulBackend>,
+) -> Array2<f32> {
+    match backend {
+        Some(be) => be.matmul_transb(a.view(), b.view()),
+        None => a.dot(&b.t()),
+    }
+}
+
+/// matmul through a backend: a @ b (no transpose).
+/// If backend is None, falls back to ndarray BLAS (CPU).
+/// Zero-copy: accepts any ndarray storage type via view conversion.
+pub fn matmul_gpu(
+    a: &ndarray::ArrayBase<impl ndarray::Data<Elem = f32>, ndarray::Ix2>,
+    b: &ndarray::ArrayBase<impl ndarray::Data<Elem = f32>, ndarray::Ix2>,
+    backend: Option<&dyn MatMulBackend>,
+) -> Array2<f32> {
+    match backend {
+        Some(be) => be.matmul(a.view(), b.view()),
+        None => a.dot(b),
+    }
 }

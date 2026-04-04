@@ -39,7 +39,7 @@ mod attention_projections {
         let backend = CpuBackend;
         let h_norm = synth_matrix(6, 256, 1); // scaled-down hidden
         let w_q = synth_matrix(256, 256, 2);  // [out, in] — transposed in dot_proj
-        let result = backend.matmul_transb(&h_norm, &w_q);
+        let result = backend.matmul_transb(h_norm.view(), w_q.view());
         assert_eq!(result.shape(), &[6, 256]);
         // Verify non-trivial output
         let norm: f32 = result.iter().map(|v| v * v).sum::<f32>().sqrt();
@@ -52,7 +52,7 @@ mod attention_projections {
         let backend = CpuBackend;
         let q = synth_matrix(6, 64, 10);
         let k = synth_matrix(6, 64, 20);
-        let scores = backend.matmul_transb(&q, &k);
+        let scores = backend.matmul_transb(q.view(), k.view());
         assert_eq!(scores.shape(), &[6, 6]);
         // Diagonal should be larger (self-attention)
         // Not guaranteed with random data, but shape is correct
@@ -70,7 +70,7 @@ mod attention_projections {
             }
         }
         let v = synth_matrix(6, 64, 30);
-        let context = backend.matmul(&scores, &v);
+        let context = backend.matmul(scores.view(), v.view());
         assert_eq!(context.shape(), &[6, 64]);
     }
 
@@ -80,7 +80,7 @@ mod attention_projections {
         let backend = CpuBackend;
         let attn = synth_matrix(6, 256, 40);
         let w_o = synth_matrix(256, 256, 50);
-        let out = backend.matmul_transb(&attn, &w_o);
+        let out = backend.matmul_transb(attn.view(), w_o.view());
         assert_eq!(out.shape(), &[6, 256]);
     }
 
@@ -108,7 +108,7 @@ mod attention_projections {
 
         // Verify batch matches serial
         for (i, op) in ops.iter().enumerate() {
-            let serial = backend.matmul_transb(&op.a, &op.b);
+            let serial = backend.matmul_transb(op.a.view(), op.b.view());
             assert!(
                 max_diff(&results[i], &serial) < 1e-6,
                 "head {i}: batch/serial mismatch"
@@ -126,7 +126,7 @@ mod ffn {
         let backend = CpuBackend;
         let x = synth_matrix(6, 256, 300);
         let w_gate = synth_matrix(512, 256, 301); // [intermediate, hidden]
-        let gate = backend.matmul_transb(&x, &w_gate);
+        let gate = backend.matmul_transb(x.view(), w_gate.view());
         assert_eq!(gate.shape(), &[6, 512]);
     }
 
@@ -135,7 +135,7 @@ mod ffn {
         let backend = CpuBackend;
         let x = synth_matrix(6, 256, 302);
         let w_up = synth_matrix(512, 256, 303);
-        let up = backend.matmul_transb(&x, &w_up);
+        let up = backend.matmul_transb(x.view(), w_up.view());
         assert_eq!(up.shape(), &[6, 512]);
     }
 
@@ -145,7 +145,7 @@ mod ffn {
         let backend = CpuBackend;
         let act = synth_matrix(6, 512, 304);
         let w_down = synth_matrix(256, 512, 305); // [hidden, intermediate]
-        let out = backend.matmul_transb(&act, &w_down);
+        let out = backend.matmul_transb(act.view(), w_down.view());
         assert_eq!(out.shape(), &[6, 256]);
     }
 }
@@ -159,7 +159,7 @@ mod logits {
         let backend = CpuBackend;
         let hidden = synth_matrix(1, 256, 400);
         let lm_head = synth_matrix(1000, 256, 401); // [vocab, hidden]
-        let logits = backend.matmul_transb(&hidden, &lm_head);
+        let logits = backend.matmul_transb(hidden.view(), lm_head.view());
         assert_eq!(logits.shape(), &[1, 1000]);
     }
 }
@@ -172,7 +172,7 @@ mod factory {
         let backend = default_backend();
         let a = synth_matrix(4, 8, 500);
         let b = synth_matrix(8, 6, 501);
-        let c = backend.matmul(&a, &b);
+        let c = backend.matmul(a.view(), b.view());
         assert_eq!(c.shape(), &[4, 6]);
     }
 
@@ -181,7 +181,7 @@ mod factory {
         let backend = default_backend();
         let a = synth_matrix(4, 8, 502);
         let b = synth_matrix(6, 8, 503);
-        let c = backend.matmul_transb(&a, &b);
+        let c = backend.matmul_transb(a.view(), b.view());
         assert_eq!(c.shape(), &[4, 6]);
     }
 
@@ -192,8 +192,8 @@ mod factory {
         let a = synth_matrix(8, 16, 600);
         let b = synth_matrix(16, 12, 601);
 
-        let c_cpu = cpu.matmul(&a, &b);
-        let c_def = def.matmul(&a, &b);
+        let c_cpu = cpu.matmul(a.view(), b.view());
+        let c_def = def.matmul(a.view(), b.view());
         assert!(
             max_diff(&c_cpu, &c_def) < 1e-4,
             "CPU and default backend disagree: max diff = {}",
@@ -208,8 +208,8 @@ mod factory {
         let a = synth_matrix(8, 16, 700);
         let b = synth_matrix(12, 16, 701);
 
-        let c_cpu = cpu.matmul_transb(&a, &b);
-        let c_def = def.matmul_transb(&a, &b);
+        let c_cpu = cpu.matmul_transb(a.view(), b.view());
+        let c_def = def.matmul_transb(a.view(), b.view());
         assert!(
             max_diff(&c_cpu, &c_def) < 1e-4,
             "CPU and default backend transb disagree: max diff = {}",
@@ -237,8 +237,8 @@ mod metal_tests {
         let a = synth_matrix(32, 128, 800);
         let b = synth_matrix(128, 64, 801);
 
-        let c_metal = metal.matmul(&a, &b);
-        let c_cpu = cpu.matmul(&a, &b);
+        let c_metal = metal.matmul(a.view(), b.view());
+        let c_cpu = cpu.matmul(a.view(), b.view());
         assert!(
             max_diff(&c_metal, &c_cpu) < 1e-3,
             "Metal/CPU matmul disagree: max diff = {}",
@@ -254,8 +254,8 @@ mod metal_tests {
         let a = synth_matrix(32, 128, 802);
         let b = synth_matrix(64, 128, 803);
 
-        let c_metal = metal.matmul_transb(&a, &b);
-        let c_cpu = cpu.matmul_transb(&a, &b);
+        let c_metal = metal.matmul_transb(a.view(), b.view());
+        let c_cpu = cpu.matmul_transb(a.view(), b.view());
         assert!(
             max_diff(&c_metal, &c_cpu) < 1e-3,
             "Metal/CPU transb disagree: max diff = {}",
@@ -293,8 +293,8 @@ mod metal_tests {
 
         let a = synth_matrix(4, 8, 1100);
         let b = synth_matrix(8, 3, 1101);
-        let c_metal = metal.matmul(&a, &b);
-        let c_cpu = cpu.matmul(&a, &b);
+        let c_metal = metal.matmul(a.view(), b.view());
+        let c_cpu = cpu.matmul(a.view(), b.view());
         assert!(
             max_diff(&c_metal, &c_cpu) < 1e-6,
             "Small matrix fallback mismatch"
@@ -309,8 +309,8 @@ mod metal_tests {
 
         let q = synth_matrix(24, 256, 1200);
         let k = synth_matrix(24, 256, 1201);
-        let c_metal = metal.matmul_transb(&q, &k);
-        let c_cpu = cpu.matmul_transb(&q, &k);
+        let c_metal = metal.matmul_transb(q.view(), k.view());
+        let c_cpu = cpu.matmul_transb(q.view(), k.view());
         assert!(
             max_diff(&c_metal, &c_cpu) < 1e-2,
             "Large QK^T Metal/CPU disagree: max diff = {}",

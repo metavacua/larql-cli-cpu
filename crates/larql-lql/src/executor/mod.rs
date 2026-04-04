@@ -114,10 +114,10 @@ impl Session {
             Statement::Select { fields, conditions, nearest, order, limit } => {
                 self.exec_select(fields, conditions, nearest.as_ref(), order.as_ref(), *limit)
             }
-            Statement::Explain { prompt, mode, layers, verbose, top } => {
+            Statement::Explain { prompt, mode, layers, band, verbose, top, relations_only, with_attention } => {
                 match mode {
                     ExplainMode::Walk => self.exec_explain(prompt, layers.as_ref(), *verbose),
-                    ExplainMode::Infer => self.exec_infer_trace(prompt, *top),
+                    ExplainMode::Infer => self.exec_infer_trace(prompt, *top, *band, *relations_only, *with_attention),
                 }
             }
             Statement::ShowRelations { layer, with_examples } => {
@@ -176,7 +176,7 @@ impl Session {
         match stmt {
             Statement::Use { target } => self.exec_use(target),
             Statement::Describe { entity, band, mode, .. } => {
-                self.remote_describe(entity, *band, *mode == crate::ast::DescribeMode::Verbose)
+                self.remote_describe(entity, *band, *mode)
             }
             Statement::Walk { prompt, top, layers, .. } => {
                 self.remote_walk(prompt, *top, layers.as_ref())
@@ -194,6 +194,12 @@ impl Session {
             Statement::Select { fields: _, conditions, nearest: _, order: _, limit } => {
                 self.remote_select(conditions, *limit)
             }
+            Statement::Explain { prompt, mode, layers, band, verbose: _, top, relations_only, with_attention } => {
+                match mode {
+                    ExplainMode::Infer => self.remote_explain_infer(prompt, *top, *band, *relations_only, *with_attention),
+                    ExplainMode::Walk => self.remote_walk(prompt, *top, layers.as_ref()),
+                }
+            }
             Statement::ApplyPatch { path } => self.remote_apply_local_patch(path),
             Statement::ShowPatches => self.remote_show_patches(),
             Statement::RemovePatch { path } => self.remote_remove_local_patch(path),
@@ -204,8 +210,9 @@ impl Session {
             }
             _ => Err(LqlError::Execution(
                 "this statement is not supported on a remote backend. \
-                 Supported: DESCRIBE, WALK, INFER, SELECT, STATS, SHOW RELATIONS, \
-                 INSERT, DELETE, UPDATE, APPLY PATCH, SHOW PATCHES, REMOVE PATCH, USE"
+                 Supported: DESCRIBE, WALK, INFER, EXPLAIN INFER, EXPLAIN WALK, SELECT, STATS, \
+                 SHOW RELATIONS, INSERT, DELETE, UPDATE, APPLY PATCH, SHOW PATCHES, REMOVE PATCH, USE. \
+                 TRACE requires a local vindex (USE \"path.vindex\")."
                     .into(),
             )),
         }

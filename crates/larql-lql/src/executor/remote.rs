@@ -80,9 +80,11 @@ impl Session {
         &self,
         entity: &str,
         band: Option<LayerBand>,
-        verbose: bool,
+        mode: crate::ast::DescribeMode,
     ) -> Result<Vec<String>, LqlError> {
         let (url, client) = self.require_remote()?;
+        let verbose = mode == crate::ast::DescribeMode::Verbose;
+        let show_also = matches!(mode, crate::ast::DescribeMode::Verbose | crate::ast::DescribeMode::Raw);
 
         let band_str = match band {
             Some(LayerBand::Syntax) => "syntax",
@@ -115,17 +117,31 @@ impl Session {
                     let relation = edge["relation"].as_str().unwrap_or("");
                     let source = edge["source"].as_str().unwrap_or("");
 
-                    let label = if !relation.is_empty() {
+                    let show_labels = mode != crate::ast::DescribeMode::Raw;
+                    let label = if show_labels && !relation.is_empty() {
                         format!("{:<12}", relation)
                     } else {
                         format!("{:<12}", "")
                     };
 
-                    let tag = if source == "probe" { "  (probe)" } else { "" };
+                    let tag = if show_labels && source == "probe" { "  (probe)" } else { "" };
+
+                    let also_str = if show_also {
+                        edge["also"].as_array()
+                            .map(|arr| arr.iter()
+                                .filter_map(|v| v.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", "))
+                            .filter(|s| !s.is_empty())
+                            .map(|s| format!("  also: {s}"))
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
 
                     out.push(format!(
-                        "    {} → {:20} {:>7.1}  L{:<3}{}",
-                        label, target, gate, layer, tag,
+                        "    {} → {:20} {:>7.1}  L{:<3}{}{}",
+                        label, target, gate, layer, tag, also_str,
                     ));
                 }
             }
@@ -298,6 +314,163 @@ impl Session {
         Ok(out)
     }
 
+    pub(crate) fn remote_explain_infer(
+        &self,
+        prompt: &str,
+        top: Option<u32>,
+        band: Option<LayerBand>,
+        relations_only: bool,
+        with_attention: bool,
+    ) -> Result<Vec<String>, LqlError> {
+        let (url, client) = self.require_remote()?;
+
+        let per_layer = top.unwrap_or(3);
+        let band_str = match band {
+            Some(LayerBand::Syntax) => "syntax",
+            Some(LayerBand::Knowledge) => "knowledge",
+            Some(LayerBand::Output) => "output",
+            Some(LayerBand::All) => "all",
+            None => "all",
+        };
+
+        let body = serde_json::json!({
+            "prompt": prompt,
+            "top": top.unwrap_or(5),
+            "per_layer": per_layer,
+            "band": band_str,
+            "relations_only": relations_only,
+            "with_attention": with_attention,
+        });
+
+        let resp = client
+            .post(format!("{url}/v1/explain-infer"))
+            .json(&body)
+            .send()
+            .map_err(|e| LqlError::Execution(format!("request failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().unwrap_or_default();
+            return Err(LqlError::Execution(format!("explain-infer failed ({}): {}", status, text)));
+        }
+
+        let result: serde_json::Value = resp
+            .json()
+            .map_err(|e| LqlError::Execution(format!("invalid response: {e}")))?;
+
+        let band_label = match band {
+            Some(LayerBand::Syntax) => " (syntax)",
+            Some(LayerBand::Knowledge) => " (knowledge)",
+            Some(LayerBand::Output) => " (output)",
+            _ => "",
+        };
+
+        let mut out = Vec::new();
+        out.push(format!("Inference trace for {:?}{}:", prompt, band_label));
+
+        if let Some(preds) = result["predictions"].as_array() {
+            if let Some(first) = preds.first() {
+                let tok = first["token"].as_str().unwrap_or("?");
+                let prob = first["probability"].as_f64().unwrap_or(0.0);
+                out.push(format!("Prediction: {} ({:.2}%)", tok, prob * 100.0));
+            }
+        }
+        out.push(String::new());
+
+        if let Some(layers) = result["trace"].as_array() {
+            for layer_obj in layers {
+                let layer = layer_obj["layer"].as_u64().unwrap_or(0);
+                let features = layer_obj["features"].as_array();
+
+                if with_attention {
+                    // Compact single-line format
+                    let feat = features.and_then(|f| f.first());
+                    let feature_str = if let Some(feat) = feat {
+                        let relation = feat["relation"].as_str()
+                            .or_else(|| feat["relation"].as_null().map(|_| ""))
+                            .unwrap_or("");
+                        if relations_only && relation.is_empty() {
+                            None
+                        } else {
+                            let gate = feat["gate_score"].as_f64().unwrap_or(0.0);
+                            let top_token = feat["top_token"].as_str().unwrap_or("?");
+                            let name = if !relation.is_empty() { relation } else { top_token };
+                            Some(format!("{:<14} {:+.1}", name, gate))
+                        }
+                    } else {
+                        None
+                    };
+                    let empty = format!("{:19}", "");
+                    let feature_part = feature_str.as_deref().unwrap_or(&empty);
+
+                    let attn_part = layer_obj.get("attention")
+                        .and_then(|a| a.as_array())
+                        .and_then(|arr| arr.first())
+                        .and_then(|v| {
+                            let tok = v["token"].as_str()?;
+                            let w = v["weight"].as_f64()?;
+                            Some(format!("{}({:.0}%)", tok, w * 100.0))
+                        })
+                        .unwrap_or_default();
+
+                    let lens_part = layer_obj.get("lens")
+                        .and_then(|l| {
+                            let tok = l["token"].as_str()?;
+                            let prob = l["probability"].as_f64()?;
+                            Some(format!("{} ({:.1}%)", tok, prob * 100.0))
+                        })
+                        .unwrap_or_default();
+
+                    if feature_str.is_some() || !lens_part.is_empty() {
+                        out.push(format!(
+                            "  L{:2}  {:<19}  {:<16} → {}",
+                            layer, feature_part, attn_part, lens_part,
+                        ));
+                    }
+                } else {
+                    // Standard multi-line format
+                    if let Some(features) = features {
+                        for feat in features {
+                            let feature = feat["feature"].as_u64().unwrap_or(0);
+                            let gate = feat["gate_score"].as_f64().unwrap_or(0.0);
+                            let relation = feat["relation"].as_str()
+                                .or_else(|| feat["relation"].as_null().map(|_| ""))
+                                .unwrap_or("");
+                            if relations_only && relation.is_empty() {
+                                continue;
+                            }
+                            let label_str = if relation.is_empty() {
+                                format!("{:14}", "")
+                            } else {
+                                format!("{:<14}", relation)
+                            };
+                            let top_token = feat["top_token"].as_str().unwrap_or("?");
+                            let top_tokens: String = feat["top_tokens"]
+                                .as_array()
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|v| v.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                })
+                                .unwrap_or_default();
+                            out.push(format!(
+                                "  L{:2}: {} F{:<5} gate={:+.1}  → {:15} [{}]",
+                                layer, label_str, feature, gate, top_token, top_tokens,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(ms) = result["latency_ms"].as_f64() {
+            out.push(format!("\n{:.0}ms (remote)", ms));
+        }
+
+        Ok(out)
+    }
+
     pub(crate) fn remote_stats(&self) -> Result<Vec<String>, LqlError> {
         let (url, client) = self.require_remote()?;
 
@@ -358,17 +531,34 @@ impl Session {
             .map_err(|e| LqlError::Execution(format!("invalid response: {e}")))?;
 
         let mut out = Vec::new();
-        out.push(format!(
-            "{:<25} {:>8}",
-            "Token", "Count"
-        ));
-        out.push("-".repeat(35));
 
+        // Probe-confirmed relations (from feature_labels.json)
+        if let Some(probes) = body["probe_relations"].as_array() {
+            if !probes.is_empty() {
+                let probe_count = body["probe_count"].as_u64().unwrap_or(0);
+                out.push(format!("Probe-confirmed relations ({probe_count} labels):"));
+                out.push(format!("{:<25} {:>8}", "Relation", "Features"));
+                out.push("-".repeat(35));
+                for rel in probes {
+                    let name = rel["name"].as_str().unwrap_or("?");
+                    let count = rel["count"].as_u64().unwrap_or(0);
+                    out.push(format!("{:<25} {:>8}", name, count));
+                }
+                out.push(String::new());
+            }
+        }
+
+        // Raw token relations (from down_meta scan)
         if let Some(rels) = body["relations"].as_array() {
-            for rel in rels {
-                let name = rel["name"].as_str().unwrap_or("?");
-                let count = rel["count"].as_u64().unwrap_or(0);
-                out.push(format!("{:<25} {:>8}", name, count));
+            if !rels.is_empty() {
+                out.push(format!("Top output tokens:"));
+                out.push(format!("{:<25} {:>8}", "Token", "Count"));
+                out.push("-".repeat(35));
+                for rel in rels {
+                    let name = rel["name"].as_str().unwrap_or("?");
+                    let count = rel["count"].as_u64().unwrap_or(0);
+                    out.push(format!("{:<25} {:>8}", name, count));
+                }
             }
         }
 
@@ -625,27 +815,27 @@ impl Session {
             .map_err(|e| LqlError::Execution(format!("invalid response: {e}")))?;
 
         let mut out = Vec::new();
-        out.push(format!(
-            "{:<8} {:<8} {:<20} {:>10}  {}",
-            "Layer", "Feature", "Token", "Score", "Relation"
-        ));
-        out.push("-".repeat(60));
 
         if let Some(edges) = result["edges"].as_array() {
-            for edge in edges {
-                let layer = edge["layer"].as_u64().unwrap_or(0);
-                let feature = edge["feature"].as_u64().unwrap_or(0);
-                let target = edge["target"].as_str().unwrap_or("?");
-                let score = edge["c_score"].as_f64().unwrap_or(0.0);
-                let relation = edge["relation"].as_str().unwrap_or("");
-                out.push(format!(
-                    "L{:<7} F{:<7} {:20} {:>10.4}  {}",
-                    layer, feature, target, score, relation
-                ));
-            }
-
             if edges.is_empty() {
                 out.push("  (no matching edges)".into());
+            } else {
+                out.push(format!(
+                    "  {:<20} {:<15} {:>6}  {:<6} {}",
+                    "Target", "Relation", "Score", "Layer", "Feature"
+                ));
+                out.push(format!("  {}", "-".repeat(65)));
+                for edge in edges {
+                    let layer = edge["layer"].as_u64().unwrap_or(0);
+                    let feature = edge["feature"].as_u64().unwrap_or(0);
+                    let target = edge["target"].as_str().unwrap_or("?");
+                    let score = edge["c_score"].as_f64().unwrap_or(0.0);
+                    let relation = edge["relation"].as_str().unwrap_or("");
+                    out.push(format!(
+                        "  {:<20} {:<15} {:>6.3}  L{:<5} F{}",
+                        target, relation, score, layer, feature
+                    ));
+                }
             }
         }
 
