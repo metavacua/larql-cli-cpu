@@ -68,6 +68,10 @@ pub struct VectorIndex {
     /// Mmap'd lm_head (output projection): [vocab_size, hidden_size], f32.
     pub(crate) lm_head_mmap: Option<Arc<memmap2::Mmap>>,
     pub vocab_size: usize,
+    /// Interleaved FFN data: [gate|up|down] per layer in one contiguous file.
+    pub(crate) interleaved_mmap: Option<Arc<memmap2::Mmap>>,
+    /// Q4_0 quantized interleaved FFN data (7x smaller, dequant on read).
+    pub(crate) interleaved_q4_mmap: Option<Arc<memmap2::Mmap>>,
 }
 
 impl Clone for VectorIndex {
@@ -96,6 +100,8 @@ impl Clone for VectorIndex {
             ),
             lm_head_mmap: self.lm_head_mmap.clone(),
             vocab_size: self.vocab_size,
+            interleaved_mmap: self.interleaved_mmap.clone(),
+            interleaved_q4_mmap: self.interleaved_q4_mmap.clone(),
         }
     }
 }
@@ -127,6 +133,8 @@ impl VectorIndex {
             hnsw_ef_search: std::sync::atomic::AtomicUsize::new(200),
             lm_head_mmap: None,
             vocab_size: 0,
+            interleaved_mmap: None,
+            interleaved_q4_mmap: None,
         }
     }
 
@@ -159,6 +167,8 @@ impl VectorIndex {
             hnsw_ef_search: std::sync::atomic::AtomicUsize::new(200),
             lm_head_mmap: None,
             vocab_size: 0,
+            interleaved_mmap: None,
+            interleaved_q4_mmap: None,
         }
     }
 
@@ -319,6 +329,8 @@ impl VectorIndex {
             hnsw_ef_search: std::sync::atomic::AtomicUsize::new(200),
             lm_head_mmap: None,
             vocab_size: 0,
+            interleaved_mmap: None,
+            interleaved_q4_mmap: None,
             num_layers,
             hidden_size,
         })
@@ -456,5 +468,49 @@ impl GateIndex for VectorIndex {
 
     fn has_full_mmap_ffn(&self) -> bool {
         self.has_full_mmap_ffn()
+    }
+
+    fn has_interleaved(&self) -> bool {
+        self.has_interleaved()
+    }
+
+    fn interleaved_gate(&self, layer: usize) -> Option<ndarray::ArrayView2<'_, f32>> {
+        self.interleaved_gate(layer)
+    }
+
+    fn interleaved_up(&self, layer: usize) -> Option<ndarray::ArrayView2<'_, f32>> {
+        self.interleaved_up(layer)
+    }
+
+    fn interleaved_down(&self, layer: usize) -> Option<ndarray::ArrayView2<'_, f32>> {
+        self.interleaved_down(layer)
+    }
+
+    fn prefetch_interleaved_layer(&self, layer: usize) {
+        self.prefetch_interleaved_layer(layer)
+    }
+
+    fn has_interleaved_q4(&self) -> bool {
+        self.has_interleaved_q4()
+    }
+
+    fn interleaved_q4_gate(&self, layer: usize) -> Option<ndarray::Array2<f32>> {
+        self.interleaved_q4_gate(layer)
+    }
+
+    fn interleaved_q4_up(&self, layer: usize) -> Option<ndarray::Array2<f32>> {
+        self.interleaved_q4_up(layer)
+    }
+
+    fn interleaved_q4_down(&self, layer: usize) -> Option<ndarray::Array2<f32>> {
+        self.interleaved_q4_down(layer)
+    }
+
+    fn prefetch_interleaved_q4_layer(&self, layer: usize) {
+        self.prefetch_interleaved_q4_layer(layer)
+    }
+
+    fn interleaved_q4_mmap_ref(&self) -> Option<&[u8]> {
+        self.interleaved_q4_mmap.as_ref().map(|m| m.as_ref() as &[u8])
     }
 }

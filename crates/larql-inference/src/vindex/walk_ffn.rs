@@ -164,9 +164,159 @@ impl<'a> WalkFfn<'a> {
         Some((out, full_activation))
     }
 
+    /// Q4 interleaved walk: C kernel with vdotq_s32 for gate/up, scalar for down.
+    /// Reads 44MB per layer instead of 315MB. Matches BLAS f32 speed on warm,
+    /// faster on cold cache (7x less data to page in).
+    fn walk_ffn_q4_interleaved(
+        &self,
+        layer: usize,
+        x: &Array2<f32>,
+    ) -> Option<(Array2<f32>, Array2<f32>)> {
+        use larql_models::quant::ggml::{q4_0_matvec_ffi, q4_0_vecmat_ffi};
+
+        let q4_mmap = self.index.interleaved_q4_mmap_ref()?;
+        let intermediate = self.index.num_features(layer);
+        if intermediate == 0 { return None; }
+        let hidden = x.shape()[1];
+        let seq_len = x.shape()[0];
+
+        let q4_bytes_per_matrix = intermediate * hidden / 32 * 18;
+        let q4_bytes_per_layer = q4_bytes_per_matrix * 3;
+        let layer_start = layer * q4_bytes_per_layer;
+
+        let gate_q4 = &q4_mmap[layer_start..layer_start + q4_bytes_per_matrix];
+        let up_q4 = &q4_mmap[layer_start + q4_bytes_per_matrix..layer_start + 2 * q4_bytes_per_matrix];
+        let down_q4 = &q4_mmap[layer_start + 2 * q4_bytes_per_matrix..layer_start + 3 * q4_bytes_per_matrix];
+
+        // Prefetch next layer
+        self.index.prefetch_interleaved_q4_layer(layer + 1);
+
+        let arch = &*self.weights.arch;
+        let use_gelu = matches!(
+            arch.activation(),
+            larql_models::Activation::GeluTanh | larql_models::Activation::Gelu
+        );
+
+        let mut out = Array2::<f32>::zeros((seq_len, hidden));
+        let mut full_activation = Array2::<f32>::zeros((seq_len, intermediate));
+
+        // Check for Metal Q4 backend
+        let metal_q4 = self.backend.and_then(|be| if be.has_q4() { Some(be) } else { None });
+
+        if let Some(be) = metal_q4 {
+            // Metal: ONE GPU submission for all gate+up across ALL seq positions
+            let x_flat = x.as_slice().unwrap();
+            let (all_gate, all_up) = be.q4_matvec_pair_batch(
+                gate_q4, up_q4, x_flat, seq_len, intermediate, hidden,
+            ).unwrap();
+
+            // GEGLU on CPU (element-wise, all positions)
+            let mut all_activation: Vec<Vec<f32>> = Vec::with_capacity(seq_len);
+            for s in 0..seq_len {
+                let mut activation = vec![0.0f32; intermediate];
+                for i in 0..intermediate {
+                    let g = all_gate[s][i];
+                    let u = all_up[s][i];
+                    activation[i] = if use_gelu {
+                        crate::ffn::gelu_tanh(g) * u
+                    } else {
+                        g * crate::ffn::sigmoid(g) * u
+                    };
+                    full_activation[[s, i]] = activation[i];
+                }
+                all_activation.push(activation);
+            }
+
+            // Down: one submission per position (GPU vecmat)
+            for s in 0..seq_len {
+                let down_result = be.q4_vecmat(&all_activation[s], down_q4, intermediate, hidden).unwrap();
+                let mut out_row = out.row_mut(s);
+                for j in 0..hidden { out_row[j] = down_result[j]; }
+            }
+        } else {
+            // C kernel path: vdotq for gate/up, scalar for down
+            for s in 0..seq_len {
+                let x_row = x.row(s);
+                let x_slice = x_row.as_slice().unwrap();
+
+                let gate_scores = q4_0_matvec_ffi(gate_q4, x_slice, intermediate, hidden);
+                let up_scores = q4_0_matvec_ffi(up_q4, x_slice, intermediate, hidden);
+
+                let mut activation = vec![0.0f32; intermediate];
+                for i in 0..intermediate {
+                    let g = gate_scores[i];
+                    let u = up_scores[i];
+                    activation[i] = if use_gelu {
+                        crate::ffn::gelu_tanh(g) * u
+                    } else {
+                        g * crate::ffn::sigmoid(g) * u
+                    };
+                    full_activation[[s, i]] = activation[i];
+                }
+
+                let down_result = q4_0_vecmat_ffi(&activation, down_q4, intermediate, hidden);
+                let mut out_row = out.row_mut(s);
+                for j in 0..hidden { out_row[j] = down_result[j]; }
+            }
+        }
+
+        if let Some(bias) = arch.ffn_down_bias_key(layer)
+            .and_then(|k| self.weights.vectors.get(&k))
+        {
+            crate::forward::add_bias(&mut out, bias);
+        }
+
+        Some((out, full_activation))
+    }
+
+    /// Interleaved walk: gate + up + down from one contiguous mmap per layer.
+    /// Eliminates TLB thrash from 3 separate files. Prefetches next layer.
+    fn walk_ffn_interleaved(
+        &self,
+        layer: usize,
+        x: &Array2<f32>,
+    ) -> Option<(Array2<f32>, Array2<f32>)> {
+        // All three matrices from one contiguous region
+        let gate_view = self.index.interleaved_gate(layer)?;
+        let up_view = self.index.interleaved_up(layer)?;
+        let down_view = self.index.interleaved_down(layer)?;
+
+        // Prefetch next layer while we compute this one
+        self.index.prefetch_interleaved_layer(layer + 1);
+
+        let arch = &*self.weights.arch;
+        let use_gelu = matches!(
+            arch.activation(),
+            larql_models::Activation::GeluTanh | larql_models::Activation::Gelu
+        );
+
+        // gate_scores = gate_vectors @ x^T (one BLAS gemv from contiguous region)
+        let gate_scores = crate::backend::dot_proj_gpu(x, &gate_view, self.backend);
+
+        // up_scores = x @ up_vectors^T (contiguous, right after gate in memory)
+        let up_scores = crate::backend::dot_proj_gpu(x, &up_view, self.backend);
+
+        // GEGLU
+        let activation = if use_gelu {
+            crate::ffn::gelu_tanh_gate_up(&gate_scores, &up_scores)
+        } else {
+            crate::ffn::silu_gate_up(&gate_scores, &up_scores)
+        };
+
+        // down: activation @ down_matrix (contiguous, right after up in memory)
+        let mut out = crate::backend::matmul_gpu(&activation, &down_view, self.backend);
+
+        if let Some(bias) = arch.ffn_down_bias_key(layer)
+            .and_then(|k| self.weights.vectors.get(&k))
+        {
+            crate::forward::add_bias(&mut out, bias);
+        }
+
+        Some((out, activation))
+    }
+
     /// Full mmap walk: gate + up + down all from mmap. Zero safetensor reads.
     /// Currently slower than exact path due to 3 separate mmap file reads.
-    /// Will activate when gate+up+down are coalesced into one mmap region.
     #[allow(dead_code)]
     ///
     /// gate_scores = gate_vectors @ x^T     (mmap, one BLAS gemm)
@@ -353,9 +503,24 @@ impl<'a> FfnBackend for WalkFfn<'a> {
             self.trace_residuals.borrow_mut().push((layer, last_row));
         }
 
-        // Full mmap walk: gate + up + down all from mmap. No model weight reads.
-        // At high K (>50% intermediate), uses full mmap matmuls (fastest).
-        // At low K (<50%), uses per-feature sparse walk (fewer ops).
+        // Q4 interleaved: only when Metal backend is available (GPU Q4 beats CPU f32).
+        // Without Metal, f32 BLAS is faster than C kernel Q4 dequant.
+        if self.index.has_interleaved_q4() && self.backend.map_or(false, |be| be.has_q4()) {
+            if let Some(result) = self.walk_ffn_q4_interleaved(layer, x) {
+                return result;
+            }
+        }
+
+        // f32 interleaved: gate+up+down contiguous per layer.
+        if self.index.has_interleaved() {
+            if let Some(result) = self.walk_ffn_interleaved(layer, x) {
+                return result;
+            }
+        }
+
+        // Full mmap walk: gate + up + down from 3 separate mmap files.
+        // At high K (>50% intermediate), uses full mmap matmuls.
+        // At low K (<50%), uses per-feature sparse walk.
         if self.index.has_full_mmap_ffn() {
             let intermediate = self.index.num_features(layer);
             if intermediate > 0 && self.top_k * 2 < intermediate {

@@ -57,7 +57,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     index.load_down_features(&vindex_path)?;
     index.load_up_features(&vindex_path)?;
     index.load_lm_head(&vindex_path)?;
-    println!("Vindex: lm_head loaded (vocab={})\n", index.vocab_size);
+    match index.load_interleaved(&vindex_path) {
+        Ok(()) => print!("interleaved "),
+        Err(_) => {}
+    }
+    match index.load_interleaved_q4(&vindex_path) {
+        Ok(()) => print!("Q4 "),
+        Err(_) => {}
+    }
+    println!("lm_head (vocab={})\n", index.vocab_size);
 
     let dense_ffn = WeightFfn { weights };
     let walk_ffn_cpu = WalkFfn::new(weights, &index, 8092);
@@ -90,8 +98,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cw_cpu = build_adaptive_graph(&cache, &walk_cpu_graph, num_layers, &(0..=12));
     let (cw_cpu_tok, _, cw_cpu_ms) = bench(weights, tokenizer, &token_ids, &cw_cpu, n);
 
-    // 3. Cache+Walk (GPU) — FFN mmap through Metal + attention through Metal
-    let walk_gpu_graph = WalkLayerGraph { ffn: &walk_ffn_gpu, backend: Some(&*gpu_be) };
+    // 3. Cache+Walk (Metal Q4 FFN, CPU attention)
+    let walk_gpu_graph = WalkLayerGraph { ffn: &walk_ffn_gpu, backend: None };
     let cw_gpu = build_adaptive_graph(&cache, &walk_gpu_graph, num_layers, &(0..=12));
     let (cw_gpu_tok, _, cw_gpu_ms) = bench(weights, tokenizer, &token_ids, &cw_gpu, n);
 
@@ -104,7 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (full_cpu_tok, _) = full_cpu_r.predictions.first()
         .map(|(t, p)| (t.clone(), *p)).unwrap_or_default();
 
-    // 5. Full pipeline (GPU): Cache+Walk(GPU)+Vindex logits
+    // 5. Full pipeline (Metal Q4 FFN, CPU attention, vindex logits)
     let _ = predict_with_graph_vindex_logits(weights, tokenizer, &token_ids, 5, &cw_gpu, &index);
     let t0 = Instant::now();
     for _ in 0..n { let _ = predict_with_graph_vindex_logits(weights, tokenizer, &token_ids, 5, &cw_gpu, &index); }

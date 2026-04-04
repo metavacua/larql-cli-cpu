@@ -41,6 +41,17 @@ pub trait GateIndex {
     fn gate_scores_batch(&self, _layer: usize, _x: &Array2<f32>) -> Option<Array2<f32>> { None }
     fn up_layer_matrix(&self, _layer: usize) -> Option<ndarray::ArrayView2<'_, f32>> { None }
     fn has_full_mmap_ffn(&self) -> bool { false }
+    fn has_interleaved(&self) -> bool { false }
+    fn interleaved_gate(&self, _layer: usize) -> Option<ndarray::ArrayView2<'_, f32>> { None }
+    fn interleaved_up(&self, _layer: usize) -> Option<ndarray::ArrayView2<'_, f32>> { None }
+    fn interleaved_down(&self, _layer: usize) -> Option<ndarray::ArrayView2<'_, f32>> { None }
+    fn prefetch_interleaved_layer(&self, _layer: usize) {}
+    fn has_interleaved_q4(&self) -> bool { false }
+    fn interleaved_q4_gate(&self, _layer: usize) -> Option<ndarray::Array2<f32>> { None }
+    fn interleaved_q4_up(&self, _layer: usize) -> Option<ndarray::Array2<f32>> { None }
+    fn interleaved_q4_down(&self, _layer: usize) -> Option<ndarray::Array2<f32>> { None }
+    fn prefetch_interleaved_q4_layer(&self, _layer: usize) {}
+    fn interleaved_q4_mmap_ref(&self) -> Option<&[u8]> { None }
 
     /// Per-feature gate scoring: iterate all features, dot product each one.
     /// No matrix multiplication — each feature scored individually.

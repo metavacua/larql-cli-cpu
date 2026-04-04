@@ -51,6 +51,39 @@ pub trait MatMulBackend: Send + Sync {
 
     /// Human-readable name for logging/benchmarks.
     fn name(&self) -> &str;
+
+    /// Q4 matvec: scores[N] = Q4[N,K] @ Q8_x[K]. Returns None if not supported.
+    fn q4_matvec(
+        &self,
+        _q4_data: &[u8], _q8_x: &[i8], _q8_scales: &[f32],
+        _num_rows: usize, _hidden: usize,
+    ) -> Option<Vec<f32>> { None }
+
+    /// Q4 vecmat: out[K] = activation[N] @ Q4[N,K]. Returns None if not supported.
+    fn q4_vecmat(
+        &self,
+        _activation: &[f32], _q4_data: &[u8],
+        _intermediate: usize, _hidden: usize,
+    ) -> Option<Vec<f32>> { None }
+
+    /// Batched Q4 gate+up for ALL seq positions in one submission.
+    fn q4_matvec_pair_batch(
+        &self,
+        _gate_q4: &[u8], _up_q4: &[u8],
+        _x_matrix: &[f32], _seq_len: usize,
+        _num_rows: usize, _hidden: usize,
+    ) -> Option<(Vec<Vec<f32>>, Vec<Vec<f32>>)> { None }
+
+    /// Batched Q4 gate+up in one GPU submission. Returns (gate_scores, up_scores).
+    fn q4_matvec_pair(
+        &self,
+        _gate_q4: &[u8], _up_q4: &[u8],
+        _q8_x: &[i8], _q8_scales: &[f32],
+        _num_rows: usize, _hidden: usize,
+    ) -> Option<(Vec<f32>, Vec<f32>)> { None }
+
+    /// Whether this backend supports Q4 operations.
+    fn has_q4(&self) -> bool { false }
 }
 
 /// Create the best available backend.

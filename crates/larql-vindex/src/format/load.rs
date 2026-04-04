@@ -34,7 +34,7 @@ impl VectorIndex {
 
         let gate_path = dir.join("gate_vectors.bin");
         let gate_file = std::fs::File::open(&gate_path)?;
-        let gate_mmap = unsafe { memmap2::Mmap::map(&gate_file)? };
+        let gate_mmap = unsafe { crate::mmap_util::mmap_optimized(&gate_file)? };
         let bpf = crate::config::dtype::bytes_per_float(config.dtype);
 
         // Build per-layer slice info — offsets in floats (not bytes)

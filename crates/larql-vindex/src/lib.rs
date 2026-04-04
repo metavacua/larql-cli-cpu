@@ -15,6 +15,7 @@ pub mod extract;
 pub mod format;
 pub mod index;
 pub mod patch;
+pub mod mmap_util;
 pub mod vindexfile;
 
 // ── Re-export dependencies ──
