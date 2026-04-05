@@ -4,7 +4,7 @@
 //! This crate owns the complete vindex lifecycle:
 //! extract, load, query, mutate, patch, save, compile.
 
-extern crate blas_src;
+// BLAS provided by larql-compute dependency (no direct blas_src needed)
 
 // ── Module structure ──
 pub mod clustering;

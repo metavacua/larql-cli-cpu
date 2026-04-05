@@ -320,8 +320,13 @@ impl VectorIndex {
         };
         let lm_view = ndarray::ArrayView2::from_shape((vocab, hidden), data).unwrap();
 
-        // Single BLAS gemv: scores = lm_head @ query → [vocab]
-        let scores = lm_view.dot(query);
+        // gemv via larql-compute: scores = lm_head @ query → [vocab]
+        let hidden = self.hidden_size;
+        let x = query.view().into_shape_with_order((1, hidden)).unwrap();
+        let cpu = larql_compute::CpuBackend;
+        use larql_compute::ComputeBackend;
+        let result = cpu.matmul(x, lm_view); // [1, vocab]
+        let scores = ndarray::Array1::from_vec(result.into_raw_vec_and_offset().0);
 
         // Top-K selection
         let mut indexed: Vec<(u32, f32)> = scores.iter().copied().enumerate()

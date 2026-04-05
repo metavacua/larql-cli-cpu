@@ -77,7 +77,13 @@ impl RouterIndex {
     pub fn route(&self, layer: usize, embedding: &Array1<f32>) -> Option<RouteResult> {
         if layer >= self.weights.len() { return None; }
 
-        let scores_raw = self.weights[layer].dot(embedding) + &self.biases[layer];
+        let hidden = embedding.len();
+        let x = embedding.view().into_shape_with_order((1, hidden)).unwrap();
+        let cpu = larql_compute::CpuBackend;
+        use larql_compute::ComputeBackend;
+        let proj = cpu.matmul(x, self.weights[layer].view()); // [1, num_classes]
+        let scores_1d = ndarray::Array1::from_vec(proj.into_raw_vec_and_offset().0);
+        let scores_raw = scores_1d + &self.biases[layer];
 
         // Top-K selection
         let mut indexed: Vec<(usize, f32)> = scores_raw.iter().copied().enumerate().collect();

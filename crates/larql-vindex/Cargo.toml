@@ -10,13 +10,13 @@ categories = ["science"]
 
 [dependencies]
 larql-models = { path = "../larql-models" }
+larql-compute = { path = "../larql-compute" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
-# Matrix ops (BLAS-accelerated)
+# Matrix types (BLAS provided by larql-compute)
 ndarray = { version = "0.16", features = ["blas"] }
-blas-src = { version = "0.10", features = ["accelerate"] }
 
 # Tokenizer (for embeddings loading + token resolution)
 tokenizers = "0.21"

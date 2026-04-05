@@ -327,7 +327,9 @@ pub fn build_vindex_streaming(
                     down_matrices.iter().map(|m| m.shape()[1]).sum());
 
                 let w_chunk = w_down.slice(ndarray::s![.., batch_start..batch_end]).to_owned();
-                let chunk_logits = embed.dot(&w_chunk);
+                let cpu = larql_compute::CpuBackend;
+                use larql_compute::ComputeBackend;
+                let chunk_logits = cpu.matmul(embed.view(), w_chunk.view());
 
                 for feat in batch_start..batch_end {
                     let col = chunk_logits.column(feat - batch_start);

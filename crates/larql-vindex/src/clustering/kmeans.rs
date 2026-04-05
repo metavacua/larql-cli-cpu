@@ -23,7 +23,9 @@ pub fn kmeans(
 
     for _iter in 0..max_iterations {
         // BLAS: similarities = data @ centres.T → (n, k)
-        let sims = data.dot(&centres.t());
+        let cpu = larql_compute::CpuBackend;
+        use larql_compute::ComputeBackend;
+        let sims = cpu.matmul_transb(data.view(), centres.view());
 
         let mut changed = false;
         for i in 0..n {
@@ -103,7 +105,12 @@ fn kmeans_pp_init(data: &Array2<f32>, k: usize) -> Array2<f32> {
 
     for c in 1..k {
         let prev = centres.row(c - 1);
-        let sims = data.dot(&prev);
+        let dim = prev.len();
+        let prev_2d = prev.view().into_shape_with_order((dim, 1)).unwrap();
+        let cpu = larql_compute::CpuBackend;
+        use larql_compute::ComputeBackend;
+        let sims_2d = cpu.matmul(data.view(), prev_2d.view()); // [n, 1]
+        let sims = ndarray::Array1::from_vec(sims_2d.into_raw_vec_and_offset().0);
         for i in 0..n {
             let dist = 1.0 - sims[i];
             if dist < min_dists[i] {

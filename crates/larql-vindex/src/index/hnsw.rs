@@ -76,7 +76,9 @@ impl HnswLayer {
 
         // Random projection: dim -> PROJ_DIM
         let proj_matrix = Self::random_projection_matrix(dim, PROJ_DIM);
-        let projected = vectors.dot(&proj_matrix);
+        let cpu = larql_compute::CpuBackend;
+        use larql_compute::ComputeBackend;
+        let projected = cpu.matmul(vectors.view(), proj_matrix.view());
 
         // Assign random levels
         let mut node_levels = vec![0u8; n];
