@@ -181,11 +181,27 @@ model.vindex/
 ## Testing
 
 ```bash
-cargo test -p larql-vindex                                    # 84 tests
-cargo run -p larql-vindex --example vindex_demo               # Feature showcase
-cargo run -p larql-vindex --example vindex_bench --release     # Core benchmarks
-cargo run -p larql-vindex --example bench_scaling --release    # Production dimensions
+cargo test -p larql-vindex                                                      # 140 tests
+cargo run -p larql-vindex --example vindex_demo                                 # Feature showcase
+cargo run -p larql-vindex --example vindex_bench --release                      # Core benchmarks
+cargo run -p larql-vindex --example bench_scaling --release                     # Production dims (CPU)
+cargo run -p larql-vindex --features metal --example bench_scaling --release    # Production dims (Metal)
+cargo run -p larql-vindex --example build_gate_vectors_q4 --release -- <vindex> # Build Q4 gates
 ```
+
+Test coverage (140 tests):
+- Construction, dimensions, layer counts, feature counts
+- Gate KNN: brute-force, f32, Q4 via compute backend, top-K ordering
+- Gate walk: BLAS gemv path matches brute-force KNN
+- Walk: multi-layer tracing, metadata annotation
+- LM head KNN: top-K token lookup via matmul_transb
+- HNSW: enable/disable, integration with VectorIndex, valid results
+- Q4 gate: load round-trip, data slice correctness, Q4 vs f32 top-1 match
+- Mutation: set gate vectors, metadata, patch overlay
+- Patching: apply, revert, bake down
+- Binary serialization: checksums, dtype, config
+- MoE: expert-scoped queries, multiple experts per layer
+- Streaming extraction: safetensors mmap, one layer at a time
 
 ## Benchmarks
 

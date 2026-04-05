@@ -74,7 +74,7 @@ src/
       f32_matmul.rs         — BLAS sgemm/sgemm_transb       (3 tests)
       q4_matvec.rs          — C kernel Q4×Q8 matvec          (2 tests)
       q4_vecmat.rs          — C kernel Q4 vecmat             (2 tests)
-      q4_common.rs          — Q4/Q8 quantize, C FFI decls    (2 tests)
+      q4_common.rs          — Q4/Q8 quantize, C FFI decls    (7 tests)
       q8_matvec.rs          — Q8 matvec + weight quantizer   (2 tests)
       vector.rs             — dot, norm, cosine similarity    (6 tests)
       geglu.rs              — SiLU gate activation            (3 tests)
@@ -120,7 +120,7 @@ src/
 ## Tests
 
 ```bash
-# CPU tests only (23 unit + 6 integration + 2 doc = 31 tests)
+# CPU tests only (28 unit + 6 integration + 2 doc = 36 tests)
 cargo test -p larql-compute
 
 # CPU + Metal tests
@@ -129,6 +129,7 @@ cargo test -p larql-compute --features metal
 
 Test coverage:
 - f32 matmul: CPU vs ndarray reference, identity, shapes
+- Q4 quantize: output size, zero input, round-trip accuracy, alignment check, end-to-end matvec
 - Q4 matvec: CPU kernel, Metal v4, zero input, small matrix, Metal vs CPU
 - Q4 vecmat: CPU kernel, Metal, zero activation
 - Q4 sparse: Metal sparse matches dense at selected indices

@@ -99,4 +99,105 @@ mod tests {
         assert!(q8.iter().all(|&v| v == 0));
         assert!(scales[0] == 0.0);
     }
+
+    // ── quantize_q4_0 tests ──
+
+    #[test]
+    fn q4_output_size() {
+        // 64 floats = 2 blocks of 32, each block → 18 bytes (2 f16 scale + 16 nibbles)
+        let data = vec![1.0f32; 64];
+        let q4 = quantize_q4_0(&data);
+        assert_eq!(q4.len(), 2 * 18);
+
+        let data = vec![1.0f32; 256];
+        let q4 = quantize_q4_0(&data);
+        assert_eq!(q4.len(), 8 * 18);
+    }
+
+    #[test]
+    fn q4_zero_input() {
+        let data = vec![0.0f32; 32];
+        let q4 = quantize_q4_0(&data);
+        assert_eq!(q4.len(), 18);
+        // Scale should be zero (f16 zero = 0x0000)
+        assert_eq!(q4[0], 0);
+        assert_eq!(q4[1], 0);
+        // All nibbles should encode 8 (zero quantized = 0 + bias 8)
+        for &b in &q4[2..18] {
+            assert_eq!(b, 0x88, "zero input should quantize to bias value 0x88");
+        }
+    }
+
+    #[test]
+    fn q4_round_trip_accuracy() {
+        // Quantize then dequantize, check values are close
+        let data: Vec<f32> = (0..32).map(|i| (i as f32 - 16.0) * 0.5).collect();
+        let q4 = quantize_q4_0(&data);
+
+        // Dequantize: read f16 scale, unpack nibbles, multiply
+        let scale_bits = u16::from_le_bytes([q4[0], q4[1]]);
+        let scale = f16_to_f32(scale_bits);
+
+        let mut decoded = Vec::with_capacity(32);
+        for j in 0..16 {
+            let byte = q4[2 + j];
+            let lo = (byte & 0x0F) as i32 - 8;
+            let hi = (byte >> 4) as i32 - 8;
+            decoded.push(lo as f32 * scale);
+            decoded.push(hi as f32 * scale);
+        }
+
+        // Check approximate reconstruction (Q4 is lossy, but should be close)
+        let max_err: f32 = data.iter().zip(decoded.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(max_err < 2.0, "Q4 round-trip max error {max_err} exceeds 2.0");
+    }
+
+    #[test]
+    #[should_panic(expected = "multiple of 32")]
+    fn q4_rejects_non_aligned() {
+        let data = vec![1.0f32; 33];
+        let _ = quantize_q4_0(&data);
+    }
+
+    #[test]
+    fn q4_matvec_uses_quantized_data() {
+        // End-to-end: quantize a matrix, run matvec, verify nonzero output
+        let hidden = 256;
+        let rows = 64;
+        let matrix: Vec<f32> = (0..rows * hidden).map(|i| (i as f32 * 0.001).cos()).collect();
+        let q4 = quantize_q4_0(&matrix);
+        let x: Vec<f32> = (0..hidden).map(|i| (i as f32 * 0.01).sin()).collect();
+        let (q8_x, q8_scales) = quantize_to_q8(&x);
+
+        let mut scores = vec![0.0f32; rows];
+        unsafe {
+            q4_0_matvec_c(
+                q4.as_ptr(), q8_x.as_ptr(), q8_scales.as_ptr(),
+                scores.as_mut_ptr(), rows, hidden,
+            );
+        }
+        assert!(scores.iter().any(|&v| v.abs() > 0.01), "Q4 matvec should produce nonzero");
+    }
+
+    /// Decode f16 bits to f32 (for test verification).
+    fn f16_to_f32(bits: u16) -> f32 {
+        let sign = ((bits >> 15) & 1) as u32;
+        let exp = ((bits >> 10) & 0x1F) as i32;
+        let mant = (bits & 0x3FF) as u32;
+        if exp == 0 {
+            if mant == 0 { return if sign == 1 { -0.0 } else { 0.0 }; }
+            // Subnormal
+            let val = mant as f32 / 1024.0 * 2.0f32.powi(-14);
+            return if sign == 1 { -val } else { val };
+        }
+        if exp == 31 {
+            return if mant == 0 {
+                if sign == 1 { f32::NEG_INFINITY } else { f32::INFINITY }
+            } else { f32::NAN };
+        }
+        let val = (1.0 + mant as f32 / 1024.0) * 2.0f32.powi(exp - 15);
+        if sign == 1 { -val } else { val }
+    }
 }

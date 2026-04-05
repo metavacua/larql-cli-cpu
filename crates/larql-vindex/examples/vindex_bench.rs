@@ -332,54 +332,50 @@ fn main() {
             },
         ];
 
-        println!("  │ {:20} {:>6} {:>7} {:>10} {:>10} {:>10} {:>8} │",
-            "Model", "Layers", "Params", "Gate Disk", "Browse RAM", "Infer RAM", "Machine");
-        println!("  │ {:20} {:>6} {:>7} {:>10} {:>10} {:>10} {:>8} │",
-            "─".repeat(20), "──────", "───────", "──────────", "──────────", "──────────", "────────");
+        // Measured Q4 Metal baseline: 0.5ms for 10240×2560 (Gemma 3 4B).
+        // Scale linearly with features × hidden for other models.
+        let q4_metal_base_ms = 0.5;
+        let q4_metal_base_flops = 10240.0 * 2560.0;
+
+        println!("  │ {:16} {:>6} {:>7} {:>8} {:>8} {:>8} {:>8} {:>8} │",
+            "Model", "Layers", "Params", "Infer", "Q4 Gate", "Walk", "tok/s", "Full");
+        println!("  │ {:16} {:>6} {:>7} {:>8} {:>8} {:>8} {:>8} {:>8} │",
+            "", "", "", "RAM", "/layer", "(know)", "(Q4)", "Infer");
+        println!("  │ {:16} {:>6} {:>7} {:>8} {:>8} {:>8} {:>8} {:>8} │",
+            "─".repeat(16), "──────", "───────", "────────", "────────", "────────", "────────", "────────");
 
         for m in &models {
             let features_per_layer = m.intermediate * m.num_experts;
-            // Gate vectors: layers × features × hidden × 2 bytes (f16)
             let gate_bytes = m.layers as f64 * features_per_layer as f64 * m.hidden as f64 * 2.0;
             let gate_gb = gate_bytes / 1_073_741_824.0;
 
-            // Knowledge band layers
             let knowledge_layers = m.knowledge_band.1 - m.knowledge_band.0 + 1;
-            let _knowledge_pct = knowledge_layers as f64 / m.layers as f64;
 
-            // Browse RAM with true lazy mmap (no copy to heap):
-            // Walk processes one layer at a time. Peak = 1 layer's gate slice.
-            // For MoE: KNN runs across all experts but only 1 layer at a time.
             let gate_per_layer_gb = gate_gb / m.layers as f64;
-            let browse_ram_gb = gate_per_layer_gb; // single layer peak
 
-            // Attention weights: layers × 4 × hidden × hidden × 2 bytes (Q,K,V,O)
-            // For GQA: K,V are smaller, but we estimate conservatively
             let attn_bytes = m.layers as f64 * 4.0 * m.hidden as f64 * m.hidden as f64 * 2.0;
             let attn_gb = attn_bytes / 1_073_741_824.0;
-
-            // Inference RAM with mmap: forward pass is sequential.
-            // Peak = 1 layer gate + 1 layer attn + embeddings.
             let attn_per_layer_gb = attn_gb / m.layers as f64;
-            let embed_gb = m.hidden as f64 * 262144.0 * 2.0 / 1_073_741_824.0; // rough vocab estimate
-            let infer_ram_gb = gate_per_layer_gb + attn_per_layer_gb + embed_gb.min(5.0);
+            let embed_gb = (m.hidden as f64 * 262144.0 * 2.0 / 1_073_741_824.0).min(5.0);
+            let infer_ram_gb = gate_per_layer_gb + attn_per_layer_gb + embed_gb;
 
-            // Machine recommendation
-            let machine = if browse_ram_gb < 8.0 {
-                "laptop"
-            } else if browse_ram_gb < 32.0 {
-                "32GB"
-            } else if browse_ram_gb < 64.0 {
-                "64GB"
-            } else if browse_ram_gb < 128.0 {
-                "128GB"
-            } else {
-                "server"
+            // Q4 Metal KNN estimate (linear scaling from measured baseline)
+            let layer_flops = features_per_layer as f64 * m.hidden as f64;
+            let q4_ms = q4_metal_base_ms * layer_flops / q4_metal_base_flops;
+            let walk_ms = q4_ms * knowledge_layers as f64;
+            let tps = if walk_ms > 0.0 { 1000.0 / walk_ms } else { 0.0 };
+
+            // Full inference RAM
+            let param_count: f64 = match m.total_params {
+                "4B" => 4e9, "8B" => 8e9, "70B" => 70e9, "405B" => 405e9,
+                "141B" => 141e9, "120B" => 120e9, "671B" => 671e9,
+                _ => 1000e9,
             };
+            let full_gb = param_count * 2.0 / 1_073_741_824.0;
 
-            println!("  │ {:20} {:>6} {:>7} {:>8.1} GB {:>8.1} GB {:>8.1} GB {:>8} │",
+            println!("  │ {:16} {:>6} {:>7} {:>6.1} GB {:>6.1}ms {:>5.0}ms {:>5.0} t/s {:>5.0} GB │",
                 m.name, m.layers, m.total_params,
-                gate_gb, browse_ram_gb, infer_ram_gb, machine);
+                infer_ram_gb, q4_ms, walk_ms, tps, full_gb);
         }
 
         println!("  │                                                                                  │");

@@ -351,59 +351,82 @@ fn main() {
         println!("  Inference RAM (1 layer mmap): {:.2} GB", gate_gb / layers as f64);
     }
 
-    // ── 7. Model scaling with walk latency ──
-    println!("\n── 7. Scaling Projections (measured KNN × projected layers) ──\n");
+    // ── 7. Model scaling with Q4 walk latency ──
+    println!("\n── 7. Scaling Projections (Q4 {} KNN × projected layers) ──\n",
+        default_backend.name());
     {
-        // Measure KNN at key hidden sizes
-        let measurements: Vec<(&str, usize, usize, usize, usize, f64)> = vec![
-            ("Gemma 3 4B",   34, 10240, 2560, 14, 0.0),
-            ("Llama 3 8B",   32, 14336, 4096, 16, 0.0),
-            ("Llama 3 70B",  80, 28672, 8192, 48, 0.0),
-            ("Llama 3 405B", 126, 53248, 16384, 76, 0.0),
-            ("DeepSeek V3",  61, 524288, 7168, 37, 0.0),
+        use larql_compute::cpu::q4::{quantize_q4_0, quantize_to_q8};
+
+        let best_backend: &dyn larql_compute::ComputeBackend = if has_gpu {
+            default_backend.as_ref()
+        } else {
+            cpu_backend.as_ref()
+        };
+        let backend_label = if has_gpu { "Q4 GPU" } else { "Q4 CPU" };
+
+        let measurements: Vec<(&str, usize, usize, usize, usize)> = vec![
+            ("Gemma 3 4B",   34, 10240, 2560, 14),
+            ("Llama 3 8B",   32, 14336, 4096, 16),
+            ("Llama 3 70B",  80, 28672, 8192, 48),
+            ("Llama 3 405B", 126, 53248, 16384, 76),
+            ("DeepSeek V3",  61, 524288, 7168, 37),
         ];
 
-        println!("  {:20} {:>6} {:>10} {:>12} {:>12} {:>12}",
-            "Model", "Layers", "Infer RAM", "KNN/layer", "Walk (know)", "Walk tok/s");
-        println!("  {:20} {:>6} {:>10} {:>12} {:>12} {:>12}",
-            "─".repeat(20), "──────", "──────────", "────────────", "────────────", "────────────");
+        println!("  {:18} {:>6} {:>9} {:>10} {:>10} {:>10} {:>10} {:>9}",
+            "Model", "Layers", "Infer RAM", "f32 BLAS", backend_label, "Walk", "tok/s", "Q4 gate");
+        println!("  {:18} {:>6} {:>9} {:>10} {:>10} {:>10} {:>10} {:>9}",
+            "─".repeat(18), "──────", "─────────", "──────────", "──────────", "──────────", "──────────", "─────────");
 
-        for (name, layers, features, hidden, knowledge_layers, _) in &measurements {
+        for (name, layers, features, hidden, knowledge_layers) in &measurements {
             let features = *features;
             let hidden = *hidden;
             let layers = *layers;
             let knowledge_layers = *knowledge_layers;
 
-            // For very large feature counts, cap at 131072 to keep bench runnable
+            // Cap features for bench time
             let bench_features = features.min(131072);
-
-            let gate = synth_matrix(bench_features, hidden, 42);
-            let idx = VectorIndex::new(vec![Some(gate)], vec![None], 1, hidden);
-            let query = random_query(hidden);
             let n = 10;
 
+            // f32 brute-force
+            let gate = synth_matrix(bench_features, hidden, 42);
+            let idx = VectorIndex::new(vec![Some(gate.clone())], vec![None], 1, hidden);
+            let query = random_query(hidden);
             for _ in 0..3 { idx.gate_knn(0, &query, 10); }
             let t0 = Instant::now();
             for _ in 0..n { idx.gate_knn(0, &query, 10); }
-            let knn_ms = t0.elapsed().as_secs_f64() * 1000.0 / n as f64;
+            let f32_ms = t0.elapsed().as_secs_f64() * 1000.0 / n as f64;
+            let f32_scaled = f32_ms * features as f64 / bench_features as f64;
 
-            // Scale linearly for features beyond cap
-            let knn_scaled = knn_ms * features as f64 / bench_features as f64;
-            let walk_ms = knn_scaled * knowledge_layers as f64;
+            // Q4 via best backend
+            let gate_f32 = gate.into_raw_vec_and_offset().0;
+            let q4_data = quantize_q4_0(&gate_f32);
+            let q4_size_mb = (features as f64 * hidden as f64 / 32.0 * 18.0) / 1_048_576.0;
+            let x_slice = query.as_slice().unwrap();
+            let (q8_x, q8_scales) = quantize_to_q8(x_slice);
+            let _ = best_backend.q4_matvec(&q4_data, &q8_x, &q8_scales, bench_features, hidden);
+            let t0 = Instant::now();
+            for _ in 0..n {
+                let _ = best_backend.q4_matvec(&q4_data, &q8_x, &q8_scales, bench_features, hidden);
+            }
+            let q4_ms = t0.elapsed().as_secs_f64() * 1000.0 / n as f64;
+            let q4_scaled = q4_ms * features as f64 / bench_features as f64;
+
+            let walk_ms = q4_scaled * knowledge_layers as f64;
             let tps = 1000.0 / walk_ms;
 
-            // Infer RAM: 1 layer gate + 1 layer attn + embeddings (f16)
+            // Infer RAM
             let gate_per_layer = features as f64 * hidden as f64 * 2.0 / 1_073_741_824.0;
             let attn_per_layer = 4.0 * hidden as f64 * hidden as f64 * 2.0 / 1_073_741_824.0;
             let embed_gb = (hidden as f64 * 262144.0 * 2.0 / 1_073_741_824.0).min(5.0);
             let infer_gb = gate_per_layer + attn_per_layer + embed_gb;
 
-            let note = if features > bench_features { " *" } else { "" };
-            println!("  {:20} {:>6} {:>8.1} GB {:>9.2}ms{} {:>9.1}ms {:>9.0} t/s",
-                name, layers, infer_gb, knn_scaled, note, walk_ms, tps);
+            let note = if features > bench_features { "*" } else { " " };
+            println!("  {:18} {:>6} {:>7.1} GB {:>8.1}ms{} {:>8.2}ms{} {:>8.1}ms {:>8.0} t/s {:>7.1} MB",
+                name, layers, infer_gb, f32_scaled, note, q4_scaled, note, walk_ms, tps, q4_size_mb);
         }
         println!();
-        println!("  * = KNN scaled linearly from {} features (capped for benchmark time)", 131072);
+        println!("  * = scaled linearly from {} features (capped for benchmark time)", 131072);
+        println!("  Backend: {} ({})", best_backend.name(), best_backend.device_info());
         println!("  Infer RAM = 1 layer gate + 1 layer attn + embeddings (f16, mmap)");
     }
 
