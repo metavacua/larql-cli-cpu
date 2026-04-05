@@ -124,7 +124,7 @@ fn main() {
             let attn_weights: Vec<Array2<f32>> = (0..21).map(|l| synth(2560, 2560, 1000 + l)).collect();
 
             t.run("Mixed: CPU attn (f32) + Metal FFN (Q4) × 21", || {
-                let mut h = synth(6, hidden, 42);
+                let h = synth(6, hidden, 42);
                 for l in 0..21 {
                     // Attention (CPU f32): 4 projections
                     let _ = cpu.matmul_transb(h.view(), attn_weights[l].view());

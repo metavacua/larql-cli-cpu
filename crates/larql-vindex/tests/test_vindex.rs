@@ -2595,7 +2595,7 @@ fn residency_pin_and_evict() {
 
 #[test]
 fn residency_budget_enforcement() {
-    use larql_vindex::{ResidencyManager, LayerState};
+    use larql_vindex::ResidencyManager;
 
     // Budget: 5 KB = 5120 bytes. Each layer's Q4 = 4608 bytes. Can fit 1, not 2.
     let mut rm = ResidencyManager::new(0, 2, 256, vec![32, 32]);
@@ -2607,7 +2607,7 @@ fn residency_budget_enforcement() {
     // Use raw bytes to test budget: 4608 bytes per layer, budget just under 2 layers
     // We need a budget in MB that fits 1 layer but not 2.
     // 4608 * 2 = 9216 bytes. Create a manager and pin with exact byte checks.
-    let mut rm2 = ResidencyManager::new(1, 2, 256, vec![32, 32]); // 1 MB budget
+    let _rm2 = ResidencyManager::new(1, 2, 256, vec![32, 32]); // 1 MB budget
     // 1 MB >> 9216 bytes, so both will fit. Instead test with large layers.
     // Use features=4096 so each layer is 4096*256/32*18 = 589,824 bytes = 0.56 MB
     let big_features = 4096;

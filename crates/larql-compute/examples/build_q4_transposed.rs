@@ -45,7 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let floats_per_gate = inter * hidden;
     let floats_per_up = inter * hidden;
-    let floats_per_down = inter * hidden; // same total, different layout
+    let _floats_per_down = inter * hidden; // same total, different layout
 
     let q4_per_gate = floats_per_gate / 32 * 18;
     let q4_per_up = floats_per_up / 32 * 18;

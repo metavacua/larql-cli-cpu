@@ -16,7 +16,7 @@ pub fn dispatch(
     bufs: &BufferCache,
     f32_transb_pipeline: &ComputePipelineState,
     causal_attn_pipeline: &ComputePipelineState,
-    q4: &Q4Pipelines,
+    _q4: &Q4Pipelines,
     // Attention weights (f32)
     w_q: &[f32], w_k: &[f32], w_v: &[f32], w_o: &[f32],
     // FFN weights (Q4)

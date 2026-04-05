@@ -294,7 +294,7 @@ fn metal_backend_implements_trait() {
 
 #[test]
 fn q8_matvec_metal_nonzero() {
-    let metal = get_metal();
+    let _metal = get_metal();
     let hidden = 256;
     let rows = 64;
 
@@ -431,8 +431,8 @@ fn geglu_matches_cpu() {
     let queue = device.new_command_queue();
 
     let n = 256;
-    let gate: Vec<f32> = (0..n).map(|i| (i as f32 * 0.1 - 12.8)).collect();
-    let up: Vec<f32> = (0..n).map(|i| (i as f32 * 0.05)).collect();
+    let gate: Vec<f32> = (0..n).map(|i| i as f32 * 0.1 - 12.8).collect();
+    let up: Vec<f32> = (0..n).map(|i| i as f32 * 0.05).collect();
 
     // CPU reference
     let cpu_result = larql_compute::cpu::ops::geglu::geglu_silu_alloc(&gate, &up);

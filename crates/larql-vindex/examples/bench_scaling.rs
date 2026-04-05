@@ -434,7 +434,7 @@ fn main() {
     println!("\n── 8. Adaptive Residency (Llama 70B: memory budget → performance) ──\n");
     {
         use larql_compute::cpu::q4::{quantize_q4_0, quantize_to_q8};
-        use larql_vindex::{ResidencyManager, LayerState};
+        use larql_vindex::ResidencyManager;
 
         // Simulate Llama 70B dimensions (capped features for bench speed)
         let layers = 80;

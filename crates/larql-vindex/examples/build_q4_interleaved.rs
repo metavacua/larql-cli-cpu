@@ -66,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for layer in 0..num_layers {
         let layer_offset = layer * bytes_per_layer_f32;
 
-        for (comp, comp_name) in [(0, "gate"), (1, "up"), (2, "down")] {
+        for (comp, _comp_name) in [(0, "gate"), (1, "up"), (2, "down")] {
             let start = layer_offset + comp * bytes_per_matrix_f32;
             let end = start + bytes_per_matrix_f32;
 

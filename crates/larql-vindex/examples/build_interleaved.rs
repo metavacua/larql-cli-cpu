@@ -57,8 +57,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Verify sizes
     let expected_gate = gate_bytes_per_layer * num_layers;
-    let expected_up = up_bytes_per_layer * num_layers;
-    let expected_down = down_bytes_per_layer * num_layers;
+    let _expected_up = up_bytes_per_layer * num_layers;
+    let _expected_down = down_bytes_per_layer * num_layers;
 
     if gate_mmap.len() != expected_gate {
         println!("WARNING: gate_vectors.bin size {} != expected {}", gate_mmap.len(), expected_gate);

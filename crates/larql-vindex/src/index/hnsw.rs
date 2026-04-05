@@ -168,7 +168,11 @@ impl HnswLayer {
 
         // Project query to low-dim (PROJ_DIM) for fast graph traversal
         let proj_view = self.projected.view();
-        let proj_query = query.dot(&self.proj_matrix);
+        let cpu = larql_compute::CpuBackend;
+        use larql_compute::ComputeBackend;
+        let x = query.view().into_shape_with_order((1, query.len())).unwrap();
+        let proj_2d = cpu.matmul(x, self.proj_matrix.view());
+        let proj_query = Array1::from_vec(proj_2d.into_raw_vec_and_offset().0);
 
         // Upper levels: greedy descent using projected vectors (dim=64, fast)
         let mut ep = self.entry_point;
