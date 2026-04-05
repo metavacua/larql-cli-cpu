@@ -95,6 +95,7 @@ pub enum Statement {
     ShowRelations {
         layer: Option<u32>,
         with_examples: bool,
+        mode: DescribeMode,
     },
     ShowLayers {
         range: Option<Range>,

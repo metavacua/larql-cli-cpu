@@ -127,8 +127,8 @@ impl Session {
                     ExplainMode::Infer => self.exec_infer_trace(prompt, *top, *band, *relations_only, *with_attention),
                 }
             }
-            Statement::ShowRelations { layer, with_examples } => {
-                self.exec_show_relations(*layer, *with_examples)
+            Statement::ShowRelations { layer, with_examples, mode } => {
+                self.exec_show_relations(*layer, *with_examples, *mode)
             }
             Statement::ShowLayers { range } => self.exec_show_layers(range.as_ref()),
             Statement::ShowFeatures { layer, conditions, limit } => {
@@ -192,7 +192,7 @@ impl Session {
                 self.remote_infer(prompt, *top, *compare)
             }
             Statement::Stats { .. } => self.remote_stats(),
-            Statement::ShowRelations { .. } => self.remote_show_relations(),
+            Statement::ShowRelations { mode, with_examples, .. } => self.remote_show_relations(*mode, *with_examples),
             Statement::Insert { entity, relation, target, layer, confidence } => {
                 self.remote_insert(entity, relation, target, *layer, *confidence)
             }

@@ -9,7 +9,6 @@
 //! Usage:
 //!   cargo run --release -p larql-vindex --example build_interleaved -- output/gemma3-4b-v2.vindex
 
-extern crate blas_src;
 
 use std::io::Write;
 use std::path::Path;

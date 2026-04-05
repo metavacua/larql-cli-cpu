@@ -10,7 +10,7 @@
 //!   cargo run --release -p larql-vindex --example bench_bandwidth -- \
 //!     output/gemma3-4b-v2.vindex/down_features.bin
 
-extern crate blas_src;
+extern crate larql_compute; // provides BLAS
 use std::time::Instant;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

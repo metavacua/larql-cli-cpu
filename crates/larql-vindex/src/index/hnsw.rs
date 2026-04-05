@@ -207,7 +207,7 @@ impl HnswLayer {
 
     #[inline(always)]
     fn dot(a: &ArrayView1<f32>, b: &ArrayView1<f32>) -> f32 {
-        a.dot(b)
+        larql_compute::dot(a, b)
     }
 
     fn greedy_closest(&self, vectors: &ArrayView2<f32>, query: &ArrayView1<f32>, mut ep: usize, level: usize) -> usize {

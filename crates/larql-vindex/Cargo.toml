@@ -15,8 +15,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
-# Matrix types (BLAS provided by larql-compute)
-ndarray = { version = "0.16", features = ["blas"] }
+# Matrix types (all compute via larql-compute)
+ndarray = "0.16"
 
 # Tokenizer (for embeddings loading + token resolution)
 tokenizers = "0.21"

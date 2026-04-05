@@ -147,7 +147,7 @@ pub fn auto_label_clusters_from_embeddings(
         for (word, cat_embed) in &cat_embeds {
             let mean_sim: f32 = members
                 .iter()
-                .map(|m| m.dot(cat_embed))
+                .map(|m| larql_compute::dot(&m.view(), &cat_embed.view()))
                 .sum::<f32>()
                 / members.len() as f32;
             if mean_sim > best_sim {
@@ -273,7 +273,7 @@ pub fn encode_token_with_tokenizer(
         return None;
     }
     avg /= n as f32;
-    let norm = avg.dot(&avg).sqrt();
+    let norm = larql_compute::norm(&avg.view());
     if norm > 1e-8 {
         avg /= norm;
         Some(avg)

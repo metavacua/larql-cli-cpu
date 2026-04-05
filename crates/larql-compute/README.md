@@ -49,6 +49,14 @@ let c = backend.matmul_transb(a.view(), b.view());
 if backend.has_q4() {
     let scores = backend.q4_matvec(&q4_data, &q8_x, &q8_scales, rows, hidden);
 }
+
+// Vector operations (BLAS-backed)
+use larql_compute::{dot, norm, cosine};
+let similarity = cosine(&a_vec.view(), &b_vec.view());
+
+// Q4 quantization utility (for benchmarks/tooling)
+use larql_compute::cpu::q4::quantize_q4_0;
+let q4_data = quantize_q4_0(&f32_weights);
 ```
 
 ## Architecture
@@ -66,8 +74,9 @@ src/
       f32_matmul.rs         — BLAS sgemm/sgemm_transb       (3 tests)
       q4_matvec.rs          — C kernel Q4×Q8 matvec          (2 tests)
       q4_vecmat.rs          — C kernel Q4 vecmat             (2 tests)
-      q4_common.rs          — Q8 quantize, C FFI decls       (2 tests)
+      q4_common.rs          — Q4/Q8 quantize, C FFI decls    (2 tests)
       q8_matvec.rs          — Q8 matvec + weight quantizer   (2 tests)
+      vector.rs             — dot, norm, cosine similarity    (6 tests)
       geglu.rs              — SiLU gate activation            (3 tests)
       attention.rs          — Causal attention (fused QKV)    (3 tests)
 
@@ -111,10 +120,10 @@ src/
 ## Tests
 
 ```bash
-# CPU tests only (17 tests)
+# CPU tests only (23 unit + 6 integration + 2 doc = 31 tests)
 cargo test -p larql-compute
 
-# CPU + Metal tests (44 tests)
+# CPU + Metal tests
 cargo test -p larql-compute --features metal
 ```
 
@@ -124,6 +133,7 @@ Test coverage:
 - Q4 vecmat: CPU kernel, Metal, zero activation
 - Q4 sparse: Metal sparse matches dense at selected indices
 - Q8 matvec: CPU kernel, Q8 vs f32 cosine > 0.999, Metal nonzero
+- Vector ops: dot product, norm, cosine similarity (identical, orthogonal, opposite)
 - GEGLU: SiLU basic, Metal vs CPU cross-validation
 - Residual: Metal add correctness
 - Attention: single token, causal mask, output shape
@@ -136,11 +146,17 @@ Test coverage:
 ## Benchmarks
 
 ```bash
-# Every operation, CPU + Metal side by side
+# All operations at representative sizes (CPU + Metal side by side)
+cargo run --release -p larql-compute --features metal --example bench_full
+
+# Per-operation benchmarks
 cargo run --release -p larql-compute --features metal --example bench_shaders
 
 # Kernel variant comparison (v1-v5 + sparse)
 cargo run --release -p larql-compute --features metal --example bench_kernel_variants
+
+# Q4 attention projections (single + 21-layer)
+cargo run --release -p larql-compute --features metal --example bench_q4_attention
 
 # Multi-layer pipeline, mixed backend, generation simulation
 cargo run --release -p larql-compute --features metal --example bench_pipeline
@@ -149,13 +165,17 @@ cargo run --release -p larql-compute --features metal --example bench_pipeline
 cargo run --release -p larql-compute --features metal --example bench_full_pipeline
 
 # Token generation with KV cache
+cargo run --release -p larql-compute --features metal --example bench_generation
 cargo run --release -p larql-compute --features metal --example bench_kv_cache
 
-# All operations at representative sizes
-cargo run --release -p larql-compute --features metal --example bench_full
+# Raw memory bandwidth test
+cargo run --release -p larql-compute --example bench_bandwidth -- <file>
 
 # Backend auto-detection demo
 cargo run --release -p larql-compute --features metal --example demo
+
+# Criterion statistical benchmarks
+cargo bench -p larql-compute --bench matmul
 ```
 
 ## Design principles
@@ -168,6 +188,7 @@ cargo run --release -p larql-compute --features metal --example demo
 6. **Auto-calibration** — Metal benchmarks CPU vs GPU at startup for optimal routing.
 7. **Batch API** — multi-layer pipeline encodes all operations in one command buffer.
 8. **Mixed precision** — Q4 for Q/K/O projections + FFN, Q8 for V projection (validated by cosine similarity testing).
+9. **Shared utilities** — `quantize_q4_0` and `quantize_to_q8` are public, used by all benchmarks/tests/tooling (no code duplication).
 
 ## Adding a new backend
 

@@ -3,7 +3,8 @@
 extern crate blas_src;
 
 use ndarray::Array2;
-use larql_compute::{ComputeBackend, cpu_backend};
+use larql_compute::cpu_backend;
+use larql_compute::cpu::q4::quantize_q4_0;
 
 fn synth_matrix(rows: usize, cols: usize, seed: u64) -> Array2<f32> {
     let mut state = seed;
@@ -87,38 +88,3 @@ fn default_backend_has_name() {
     assert!(!be.name().is_empty());
 }
 
-// ── Helper: Q4 quantization for tests ──
-
-fn quantize_q4_0(data: &[f32]) -> Vec<u8> {
-    assert!(data.len() % 32 == 0);
-    let n_blocks = data.len() / 32;
-    let mut out = Vec::with_capacity(n_blocks * 18);
-    for i in 0..n_blocks {
-        let block = &data[i * 32..(i + 1) * 32];
-        let amax = block.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
-        let scale = amax / 7.0;
-        let inv = if scale > 0.0 { 1.0 / scale } else { 0.0 };
-        // f16 encode scale
-        let scale_f16 = f32_to_f16(scale);
-        out.extend_from_slice(&scale_f16.to_le_bytes());
-        for j in 0..16 {
-            let lo = ((block[j * 2] * inv).round() as i32 + 8).clamp(0, 15) as u8;
-            let hi = ((block[j * 2 + 1] * inv).round() as i32 + 8).clamp(0, 15) as u8;
-            out.push(lo | (hi << 4));
-        }
-    }
-    out
-}
-
-fn f32_to_f16(v: f32) -> u16 {
-    let bits = v.to_bits();
-    let sign = (bits >> 16) & 0x8000;
-    let exp = ((bits >> 23) & 0xFF) as i32;
-    let mant = bits & 0x7FFFFF;
-    if exp == 0 { return sign as u16; }
-    if exp == 255 { return (sign | 0x7C00 | (mant >> 13) as u32) as u16; }
-    let new_exp = exp - 127 + 15;
-    if new_exp >= 31 { return (sign | 0x7C00) as u16; }
-    if new_exp <= 0 { return sign as u16; }
-    (sign | ((new_exp as u32) << 10) | (mant >> 13)) as u16
-}

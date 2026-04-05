@@ -10,8 +10,9 @@ extern crate blas_src;
 
 use std::time::Instant;
 use ndarray::Array2;
-use larql_compute::{ComputeBackend, default_backend, cpu_backend};
+use larql_compute::cpu_backend;
 use larql_compute::cpu::q4;
+use larql_compute::cpu::q4::quantize_q4_0;
 
 fn synth(rows: usize, cols: usize, seed: u64) -> Array2<f32> {
     let mut s = seed;
@@ -19,33 +20,6 @@ fn synth(rows: usize, cols: usize, seed: u64) -> Array2<f32> {
         s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
         ((s >> 33) as f32) / (u32::MAX as f32) * 2.0 - 1.0
     })
-}
-
-fn quantize_q4_0(data: &[f32]) -> Vec<u8> {
-    assert!(data.len() % 32 == 0);
-    let n = data.len() / 32;
-    let mut out = Vec::with_capacity(n * 18);
-    for i in 0..n {
-        let blk = &data[i * 32..(i + 1) * 32];
-        let amax = blk.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
-        let scale = amax / 7.0;
-        let inv = if scale > 0.0 { 1.0 / scale } else { 0.0 };
-        let bits = scale.to_bits();
-        let sign = (bits >> 16) & 0x8000;
-        let exp = ((bits >> 23) & 0xFF) as i32;
-        let mant = bits & 0x7FFFFF;
-        let f16 = if exp == 0 { sign as u16 }
-            else if exp >= 31 + 127 - 15 { (sign | 0x7C00) as u16 }
-            else if exp <= -15 + 127 { sign as u16 }
-            else { (sign | (((exp - 127 + 15) as u32) << 10) | (mant >> 13)) as u16 };
-        out.extend_from_slice(&f16.to_le_bytes());
-        for j in 0..16 {
-            let lo = ((blk[j * 2] * inv).round() as i32 + 8).clamp(0, 15) as u8;
-            let hi = ((blk[j * 2 + 1] * inv).round() as i32 + 8).clamp(0, 15) as u8;
-            out.push(lo | (hi << 4));
-        }
-    }
-    out
 }
 
 struct Timer { n: usize }
@@ -65,6 +39,7 @@ fn main() {
     let hidden = 2560;
     let inter = 10240;
     let head_dim = 320;
+    #[allow(unused_variables)]
     let num_q = 8;
     let num_kv = 4;
     let kv_dim = num_kv * head_dim;
@@ -98,10 +73,13 @@ fn main() {
         let h = synth(6, hidden, 42);
         for l in 0..21 {
             let wq = Array2::from_shape_vec((hidden, hidden), attn_wq[l].clone()).unwrap();
+            let wk = Array2::from_shape_vec((kv_dim, hidden), attn_wk[l].clone()).unwrap();
+            let wv = Array2::from_shape_vec((kv_dim, hidden), attn_wv[l].clone()).unwrap();
+            let wo = Array2::from_shape_vec((hidden, hidden), attn_wo[l].clone()).unwrap();
             let _ = cpu.matmul_transb(h.view(), wq.view());
-            let _ = cpu.matmul_transb(h.view(), wq.view());
-            let _ = cpu.matmul_transb(h.view(), wq.view());
-            let _ = cpu.matmul_transb(h.view(), wq.view());
+            let _ = cpu.matmul_transb(h.view(), wk.view());
+            let _ = cpu.matmul_transb(h.view(), wv.view());
+            let _ = cpu.matmul_transb(h.view(), wo.view());
         }
     });
 
@@ -143,10 +121,13 @@ fn main() {
             // Attention: 4 projections (simulate)
             let h_arr = Array2::from_shape_vec((1, hidden), h.clone()).unwrap();
             let wq = Array2::from_shape_vec((hidden, hidden), attn_wq[l].clone()).unwrap();
+            let wk = Array2::from_shape_vec((kv_dim, hidden), attn_wk[l].clone()).unwrap();
+            let wv = Array2::from_shape_vec((kv_dim, hidden), attn_wv[l].clone()).unwrap();
+            let wo = Array2::from_shape_vec((hidden, hidden), attn_wo[l].clone()).unwrap();
             let _ = cpu.matmul_transb(h_arr.view(), wq.view());
-            let _ = cpu.matmul_transb(h_arr.view(), wq.view()); // K reuses wq for simplicity
-            let _ = cpu.matmul_transb(h_arr.view(), wq.view()); // V
-            let _ = cpu.matmul_transb(h_arr.view(), wq.view()); // O
+            let _ = cpu.matmul_transb(h_arr.view(), wk.view());
+            let _ = cpu.matmul_transb(h_arr.view(), wv.view());
+            let _ = cpu.matmul_transb(h_arr.view(), wo.view());
             // FFN: Q4
             let (gate_q4, up_q4, down_t_q4) = &layers_q4[l];
             let g = q4::q4_matvec(gate_q4, &h, inter, hidden);

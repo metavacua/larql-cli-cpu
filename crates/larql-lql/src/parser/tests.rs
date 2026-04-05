@@ -913,9 +913,10 @@ fn parse_merge_keep_target() {
 fn parse_show_relations_minimal() {
     let stmt = parse("SHOW RELATIONS;").unwrap();
     match stmt {
-        Statement::ShowRelations { layer, with_examples } => {
+        Statement::ShowRelations { layer, with_examples, mode } => {
             assert!(layer.is_none());
             assert!(!with_examples);
+            assert_eq!(mode, DescribeMode::Brief); // Brief is the default
         }
         _ => panic!("expected ShowRelations"),
     }
@@ -935,6 +936,36 @@ fn parse_show_relations_at_layer() {
     let stmt = parse("SHOW RELATIONS AT LAYER 26;").unwrap();
     match stmt {
         Statement::ShowRelations { layer, .. } => assert_eq!(layer, Some(26)),
+        _ => panic!("expected ShowRelations"),
+    }
+}
+
+#[test]
+fn parse_show_relations_verbose() {
+    let stmt = parse("SHOW RELATIONS VERBOSE;").unwrap();
+    match stmt {
+        Statement::ShowRelations { mode, .. } => assert_eq!(mode, DescribeMode::Verbose),
+        _ => panic!("expected ShowRelations"),
+    }
+}
+
+#[test]
+fn parse_show_relations_raw() {
+    let stmt = parse("SHOW RELATIONS RAW;").unwrap();
+    match stmt {
+        Statement::ShowRelations { mode, .. } => assert_eq!(mode, DescribeMode::Raw),
+        _ => panic!("expected ShowRelations"),
+    }
+}
+
+#[test]
+fn parse_show_relations_verbose_with_examples() {
+    let stmt = parse("SHOW RELATIONS VERBOSE WITH EXAMPLES;").unwrap();
+    match stmt {
+        Statement::ShowRelations { mode, with_examples, .. } => {
+            assert_eq!(mode, DescribeMode::Verbose);
+            assert!(with_examples);
+        }
         _ => panic!("expected ShowRelations"),
     }
 }

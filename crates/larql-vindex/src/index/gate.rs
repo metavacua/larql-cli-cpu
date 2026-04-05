@@ -15,14 +15,17 @@ fn gemv(view: &ArrayView2<f32>, vec: &Array1<f32>) -> Array1<f32> {
     let hidden = vec.len();
     let x = vec.view().into_shape_with_order((1, hidden)).unwrap();
     let cpu = larql_compute::CpuBackend;
-    let result = cpu.matmul(x, *view); // [1, N]
+    // x[1, hidden] @ view[N, hidden]^T → [1, N]
+    let result = cpu.matmul_transb(x, *view);
     Array1::from_vec(result.into_raw_vec_and_offset().0)
 }
 
-/// Matrix-matrix multiply: a × b^T via larql-compute.
-fn gemm_transb(a: &ArrayView2<f32>, b: &ArrayView2<f32>) -> Array2<f32> {
+/// Gate scores batch: gate[N, hidden] × x[seq, hidden]^T → [N, seq].
+/// Equivalent to original gate.dot(&x.t()).
+fn gate_matmul(gate: &ArrayView2<f32>, x: &ArrayView2<f32>) -> Array2<f32> {
     let cpu = larql_compute::CpuBackend;
-    cpu.matmul_transb(*a, *b)
+    // gate[N, hidden] @ x[seq, hidden]^T = matmul_transb(gate, x) → [N, seq]
+    cpu.matmul_transb(*gate, *x)
 }
 
 /// Resolved gate matrix data — owned f32 with feature count.
@@ -218,7 +221,7 @@ impl VectorIndex {
         let gate_view = ArrayView2::from_shape((num_features, hidden), gate_data).unwrap();
         let mut scores = Vec::with_capacity(num_features);
         for feat in 0..num_features {
-            scores.push(gate_view.row(feat).dot(residual));
+            scores.push(larql_compute::dot(&gate_view.row(feat), &residual.view()));
         }
 
         // Top-K selection
@@ -511,7 +514,7 @@ impl VectorIndex {
         let scores_2d = if let Some(s) = self.gate_scores_2d_fast(layer, x) {
             s
         } else if let Some(gate) = self.resolve_gate(layer) {
-            gemm_transb(&x.view(), &gate.view(self.hidden_size))
+            gate_matmul(&gate.view(self.hidden_size), &x.view())
         } else {
             return vec![];
         };
@@ -554,7 +557,7 @@ impl VectorIndex {
             s
         } else {
             let gate = self.resolve_gate(layer)?;
-            gemm_transb(&x.view(), &gate.view(self.hidden_size))
+            gate_matmul(&gate.view(self.hidden_size), &x.view())
         };
         Some(scores_2d.t().to_owned())
     }
@@ -568,7 +571,7 @@ impl VectorIndex {
                 let nf = self.gate_mmap_slices.get(layer).map(|s| s.num_features).unwrap_or(0);
                 if nf > 0 {
                     let view = ArrayView2::from_shape((nf, self.hidden_size), data.as_slice()).unwrap();
-                    return Some(gemm_transb(&x.view(), &view));
+                    return Some(gate_matmul(&view, &x.view()));
                 }
             }
         }
@@ -585,7 +588,7 @@ impl VectorIndex {
                         std::slice::from_raw_parts(ptr, slice.num_features * self.hidden_size)
                     };
                     let view = ArrayView2::from_shape((slice.num_features, self.hidden_size), data).unwrap();
-                    return Some(gemm_transb(&x.view(), &view));
+                    return Some(gate_matmul(&view, &x.view()));
                 }
             }
         }

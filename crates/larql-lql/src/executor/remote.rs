@@ -527,7 +527,8 @@ impl Session {
         Ok(out)
     }
 
-    pub(crate) fn remote_show_relations(&self) -> Result<Vec<String>, LqlError> {
+    pub(crate) fn remote_show_relations(&self, mode: crate::ast::DescribeMode, with_examples: bool) -> Result<Vec<String>, LqlError> {
+        use crate::ast::DescribeMode;
         let (url, client, _sid) = self.require_remote()?;
 
         let resp = client
@@ -541,32 +542,62 @@ impl Session {
 
         let mut out = Vec::new();
 
-        // Probe-confirmed relations (from feature_labels.json)
-        if let Some(probes) = body["probe_relations"].as_array() {
-            if !probes.is_empty() {
-                let probe_count = body["probe_count"].as_u64().unwrap_or(0);
-                out.push(format!("Probe-confirmed relations ({probe_count} labels):"));
-                out.push(format!("{:<25} {:>8}", "Relation", "Features"));
-                out.push("-".repeat(35));
-                for rel in probes {
-                    let name = rel["name"].as_str().unwrap_or("?");
-                    let count = rel["count"].as_u64().unwrap_or(0);
-                    out.push(format!("{:<25} {:>8}", name, count));
+        // Probe-confirmed relations (skip for Raw mode)
+        if mode != DescribeMode::Raw {
+            if let Some(probes) = body["probe_relations"].as_array() {
+                if !probes.is_empty() {
+                    let probe_count = body["probe_count"].as_u64().unwrap_or(0);
+                    out.push(format!("Probe-confirmed relations ({probe_count} labels):"));
+                    out.push(format!("{:<25} {:>8}", "Relation", "Features"));
+                    out.push("-".repeat(35));
+                    for rel in probes {
+                        let name = rel["name"].as_str().unwrap_or("?");
+                        let count = rel["count"].as_u64().unwrap_or(0);
+                        out.push(format!("{:<25} {:>8}", name, count));
+                    }
+                    out.push(String::new());
                 }
-                out.push(String::new());
             }
         }
 
-        // Raw token relations (from down_meta scan)
-        if let Some(rels) = body["relations"].as_array() {
-            if !rels.is_empty() {
-                out.push("Top output tokens:".to_string());
-                out.push(format!("{:<25} {:>8}", "Token", "Count"));
-                out.push("-".repeat(35));
-                for rel in rels {
-                    let name = rel["name"].as_str().unwrap_or("?");
-                    let count = rel["count"].as_u64().unwrap_or(0);
-                    out.push(format!("{:<25} {:>8}", name, count));
+        // Raw token relations (show for Verbose, Raw, or when no probes)
+        let show_raw = mode == DescribeMode::Raw
+            || mode == DescribeMode::Verbose
+            || out.is_empty();
+
+        if show_raw {
+            if let Some(rels) = body["relations"].as_array() {
+                if !rels.is_empty() {
+                    out.push("Top output tokens:".to_string());
+                    out.push(format!(
+                        "{:<25} {:>8} {:>8} {:>10}",
+                        "Token", "Count", "Score", "Layers"
+                    ));
+                    out.push("-".repeat(55));
+                    for rel in rels {
+                        let name = rel["name"].as_str().unwrap_or("?");
+                        let count = rel["count"].as_u64().unwrap_or(0);
+                        let score = rel["max_score"].as_f64().unwrap_or(0.0);
+                        let min_l = rel["min_layer"].as_u64().unwrap_or(0);
+                        let max_l = rel["max_layer"].as_u64().unwrap_or(0);
+                        let examples_str = if with_examples {
+                            if let Some(arr) = rel["examples"].as_array() {
+                                let ex: Vec<&str> = arr.iter()
+                                    .filter_map(|v| v.as_str())
+                                    .collect();
+                                if ex.is_empty() { String::new() }
+                                else { format!("  e.g. {}", ex.join(", ")) }
+                            } else {
+                                String::new()
+                            }
+                        } else {
+                            String::new()
+                        };
+                        out.push(format!(
+                            "{:<25} {:>8} {:>8.2} {:>5}-{}{}",
+                            name, count, score, min_l, max_l, examples_str,
+                        ));
+                    }
                 }
             }
         }

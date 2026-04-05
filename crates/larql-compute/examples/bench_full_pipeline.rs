@@ -5,34 +5,10 @@
 
 extern crate blas_src;
 
+#[allow(unused_imports)]
 use std::time::Instant;
-
-fn quantize_q4_0(data: &[f32]) -> Vec<u8> {
-    assert!(data.len() % 32 == 0);
-    let n = data.len() / 32;
-    let mut out = Vec::with_capacity(n * 18);
-    for i in 0..n {
-        let blk = &data[i * 32..(i + 1) * 32];
-        let amax = blk.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
-        let scale = amax / 7.0;
-        let inv = if scale > 0.0 { 1.0 / scale } else { 0.0 };
-        let bits = scale.to_bits();
-        let sign = (bits >> 16) & 0x8000;
-        let exp = ((bits >> 23) & 0xFF) as i32;
-        let mant = bits & 0x7FFFFF;
-        let f16 = if exp == 0 { sign as u16 }
-            else if exp >= 31 + 127 - 15 { (sign | 0x7C00) as u16 }
-            else if exp <= -15 + 127 { sign as u16 }
-            else { (sign | (((exp - 127 + 15) as u32) << 10) | (mant >> 13)) as u16 };
-        out.extend_from_slice(&f16.to_le_bytes());
-        for j in 0..16 {
-            let lo = ((blk[j * 2] * inv).round() as i32 + 8).clamp(0, 15) as u8;
-            let hi = ((blk[j * 2 + 1] * inv).round() as i32 + 8).clamp(0, 15) as u8;
-            out.push(lo | (hi << 4));
-        }
-    }
-    out
-}
+#[allow(unused_imports)]
+use larql_compute::cpu::q4::quantize_q4_0;
 
 fn main() {
     #[cfg(not(feature = "metal"))]
@@ -108,14 +84,28 @@ fn main() {
         }
         let ffn_ms = t0.elapsed().as_secs_f64() * 1000.0 / n as f64;
 
-        // CPU Q4 baseline (C kernel for FFN)
-        let cpu = larql_compute::cpu_backend();
-        use larql_compute::ComputeBackend;
-        let cpu_attn_ms = 20.0; // previously measured CPU BLAS f32 attn
+        // Measure CPU BLAS attn for comparison
+        let cpu_attn_ms = {
+            let x_arr = ndarray::Array2::from_shape_vec((1, hidden), x.clone()).unwrap();
+            let wq_f32: Vec<f32> = (0..q_dim * hidden).map(|i| (i as f32 * 0.0001).cos()).collect();
+            let wq_arr = ndarray::Array2::from_shape_vec((q_dim, hidden), wq_f32).unwrap();
+            // Warmup
+            let _ = x_arr.dot(&wq_arr.t());
+            let t0 = Instant::now();
+            for _ in 0..n {
+                for _ in 0..num_layers {
+                    let _ = x_arr.dot(&wq_arr.t()); // Q
+                    let _ = x_arr.dot(&wq_arr.t()); // K (approx)
+                    let _ = x_arr.dot(&wq_arr.t()); // V (approx)
+                    let _ = x_arr.dot(&wq_arr.t()); // O
+                }
+            }
+            t0.elapsed().as_secs_f64() * 1000.0 / n as f64
+        };
 
         println!("  Metal full pipeline (attn+FFN, 1 cmd):  {full_ms:>6.1}ms  ({tps:.0} tok/s)");
         println!("  Metal FFN-only (1 cmd):                 {ffn_ms:>6.1}ms");
-        println!("  CPU BLAS attn-only (4 proj × 21L):      {cpu_attn_ms:>6.1}ms");
+        println!("  CPU BLAS attn-only (4 proj × {num_layers}L):    {cpu_attn_ms:>6.1}ms");
         println!("  Attention overhead in pipeline:          {:.1}ms", full_ms - ffn_ms);
         println!();
         println!("  Projected with vindex logits + cache:");

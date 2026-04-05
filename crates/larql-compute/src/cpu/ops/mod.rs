@@ -8,5 +8,6 @@ pub mod q4_matvec;
 pub mod q4_vecmat;
 pub mod q4_common;
 pub mod q8_matvec;
+pub mod vector;
 pub mod attention;
 pub mod geglu;

@@ -8,6 +8,7 @@
 
 extern crate blas_src;
 
+#[allow(unused_imports)]
 use std::time::Instant;
 
 fn main() {

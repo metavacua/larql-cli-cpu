@@ -7,7 +7,7 @@
 extern crate blas_src;
 
 use ndarray::Array2;
-use larql_compute::{ComputeBackend, default_backend, cpu_backend};
+use larql_compute::{default_backend, cpu_backend};
 
 fn synth_matrix(rows: usize, cols: usize, seed: u64) -> Array2<f32> {
     let mut state = seed;

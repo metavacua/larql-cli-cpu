@@ -41,18 +41,18 @@ pub fn classify_direction(
     let mut best_c = 0;
     let mut best_sim = f32::NEG_INFINITY;
 
-    let d_norm = direction.dot(direction).sqrt();
+    let d_norm = larql_compute::norm(&direction.view());
     if d_norm < 1e-8 {
         return (0, 0.0);
     }
 
     for (c, centre) in centres.iter().enumerate() {
         let centre_arr = Array1::from_vec(centre.clone());
-        let c_norm = centre_arr.dot(&centre_arr).sqrt();
+        let c_norm = larql_compute::norm(&centre_arr.view());
         if c_norm < 1e-8 {
             continue;
         }
-        let sim = direction.dot(&centre_arr) / (d_norm * c_norm);
+        let sim = larql_compute::dot(&direction.view(), &centre_arr.view()) / (d_norm * c_norm);
         if sim > best_sim {
             best_sim = sim;
             best_c = c;

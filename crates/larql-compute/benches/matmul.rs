@@ -4,7 +4,8 @@ extern crate blas_src;
 
 use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
 use ndarray::Array2;
-use larql_compute::{ComputeBackend, cpu_backend};
+use larql_compute::cpu_backend;
+use larql_compute::cpu::q4;
 
 fn synth_matrix(rows: usize, cols: usize, seed: u64) -> Array2<f32> {
     let mut state = seed;
@@ -35,20 +36,15 @@ fn bench_matmul_transb(c: &mut Criterion) {
 }
 
 fn bench_q4_matvec(c: &mut Criterion) {
-    let backend = cpu_backend();
-    if !backend.has_q4() { return; }
-
     let hidden = 2560;
     let intermediate = 10240;
     let x: Vec<f32> = (0..hidden).map(|i| (i as f32 * 0.001).sin()).collect();
     let matrix: Vec<f32> = (0..intermediate * hidden).map(|i| (i as f32 * 0.0001).cos()).collect();
-    let q4_data = larql_compute::cpu::q4::q4_matvec_data(&matrix);
-
-    let (q8_x, q8_scales) = larql_compute::cpu::q4::quantize_to_q8(&x);
+    let q4_data = q4::quantize_q4_0(&matrix);
 
     c.bench_function("q4_matvec_cpu", |bench| {
         bench.iter(|| {
-            backend.q4_matvec(&q4_data, &q8_x, &q8_scales, intermediate, hidden)
+            q4::q4_matvec(&q4_data, &x, intermediate, hidden)
         });
     });
 }

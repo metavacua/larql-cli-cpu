@@ -12,6 +12,7 @@ impl Session {
         &self,
         layer_filter: Option<u32>,
         with_examples: bool,
+        mode: DescribeMode,
     ) -> Result<Vec<String>, LqlError> {
         let (_path, _config, patched) = self.require_vindex()?;
 
@@ -22,6 +23,23 @@ impl Session {
             all_layers.iter().copied().filter(|l| *l >= 14 && *l <= 27).collect()
         };
 
+        // ── Probe-confirmed relations (skip for Raw mode) ──
+        let classifier = self.relation_classifier();
+        let mut probe_relations: HashMap<String, usize> = HashMap::new();
+        if mode != DescribeMode::Raw {
+            if let Some(rc) = classifier {
+                for &layer in &scan_layers {
+                    let num_features = patched.num_features(layer);
+                    for feat in 0..num_features {
+                        if let Some(label) = rc.label_for_feature(layer, feat) {
+                            *probe_relations.entry(label.to_string()).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Raw token relations (skip for Brief mode unless no probes) ──
         struct TokenInfo {
             count: usize,
             max_score: f32,
@@ -31,50 +49,50 @@ impl Session {
             examples: Vec<String>,
         }
 
-        let mut tokens: HashMap<String, TokenInfo> = HashMap::new();
+        let show_raw = mode == DescribeMode::Raw
+            || mode == DescribeMode::Verbose
+            || probe_relations.is_empty();
 
-        for &layer in &scan_layers {
-            if let Some(metas) = patched.down_meta_at(layer) {
-                for meta in metas.iter().flatten() {
-                    let tok = meta.top_token.trim();
-                    if !is_content_token(tok) {
-                        continue;
-                    }
-                    if meta.c_score < 0.2 {
-                        continue;
-                    }
-                    let key = tok.to_lowercase();
-                    let examples: Vec<String> = meta.top_k.iter()
-                        .filter(|t| t.token.trim() != tok && is_content_token(t.token.trim()))
-                        .take(3)
-                        .map(|t| t.token.trim().to_string())
-                        .collect();
-                    let entry = tokens.entry(key).or_insert(TokenInfo {
-                        count: 0,
-                        max_score: 0.0,
-                        min_layer: layer,
-                        max_layer: layer,
-                        original: tok.to_string(),
-                        examples,
-                    });
-                    entry.count += 1;
-                    if meta.c_score > entry.max_score {
-                        entry.max_score = meta.c_score;
-                    }
-                    if layer < entry.min_layer {
-                        entry.min_layer = layer;
-                    }
-                    if layer > entry.max_layer {
-                        entry.max_layer = layer;
+        let mut tokens: HashMap<String, TokenInfo> = HashMap::new();
+        if show_raw {
+            for &layer in &scan_layers {
+                if let Some(metas) = patched.down_meta_at(layer) {
+                    for meta in metas.iter().flatten() {
+                        let tok = meta.top_token.trim();
+                        if !is_content_token(tok) {
+                            continue;
+                        }
+                        if meta.c_score < 0.2 {
+                            continue;
+                        }
+                        let key = tok.to_lowercase();
+                        let examples: Vec<String> = meta.top_k.iter()
+                            .filter(|t| t.token.trim() != tok && is_content_token(t.token.trim()))
+                            .take(3)
+                            .map(|t| t.token.trim().to_string())
+                            .collect();
+                        let entry = tokens.entry(key).or_insert(TokenInfo {
+                            count: 0,
+                            max_score: 0.0,
+                            min_layer: layer,
+                            max_layer: layer,
+                            original: tok.to_string(),
+                            examples,
+                        });
+                        entry.count += 1;
+                        if meta.c_score > entry.max_score {
+                            entry.max_score = meta.c_score;
+                        }
+                        if layer < entry.min_layer {
+                            entry.min_layer = layer;
+                        }
+                        if layer > entry.max_layer {
+                            entry.max_layer = layer;
+                        }
                     }
                 }
             }
         }
-
-        let mut sorted: Vec<(&str, &TokenInfo)> = tokens.values().map(|info| (info.original.as_str(), info))
-            .collect();
-        sorted.sort_by(|a, b| b.1.count.cmp(&a.1.count));
-        sorted.truncate(30);
 
         let mut out = Vec::new();
         let layer_label = if let Some(l) = layer_filter {
@@ -82,31 +100,67 @@ impl Session {
         } else {
             "L14-27".into()
         };
-        out.push(format!(
-            "{:<25} {:>8} {:>8} {:>10}",
-            format!("Token ({})", layer_label), "Count", "Score", "Layers"
-        ));
-        out.push("-".repeat(55));
 
-        for (tok, info) in &sorted {
-            let examples_str = if with_examples && !info.examples.is_empty() {
-                format!("  e.g. {}", info.examples.join(", "))
-            } else {
-                String::new()
-            };
-            out.push(format!(
-                "{:<25} {:>8} {:>8.2} {:>5}-{}{}",
-                tok,
-                info.count,
-                info.max_score,
-                info.min_layer,
-                info.max_layer,
-                examples_str,
-            ));
+        // ── Probe-confirmed section ──
+        if !probe_relations.is_empty() {
+            let total_labels: usize = probe_relations.values().sum();
+            out.push(format!("Probe-confirmed relations ({} labels):", total_labels));
+            out.push(format!("{:<25} {:>8}", "Relation", "Features"));
+            out.push("-".repeat(35));
+
+            let mut probe_sorted: Vec<(&String, &usize)> = probe_relations.iter().collect();
+            probe_sorted.sort_by(|a, b| b.1.cmp(a.1));
+
+            let limit = if mode == DescribeMode::Brief { 30 } else { probe_sorted.len() };
+            for (name, count) in probe_sorted.into_iter().take(limit) {
+                out.push(format!("{:<25} {:>8}", name, count));
+            }
         }
 
-        if sorted.is_empty() {
-            out.push("  (no content tokens found)".into());
+        // ── Raw token section ──
+        if show_raw && !tokens.is_empty() {
+            if !probe_relations.is_empty() {
+                out.push(String::new());
+            }
+
+            let mut sorted: Vec<(&str, &TokenInfo)> = tokens.values()
+                .map(|info| (info.original.as_str(), info))
+                .collect();
+            sorted.sort_by(|a, b| b.1.count.cmp(&a.1.count));
+
+            let limit = if mode == DescribeMode::Verbose { 50 } else { 30 };
+            sorted.truncate(limit);
+
+            out.push(format!(
+                "Top output tokens ({}):",
+                layer_label
+            ));
+            out.push(format!(
+                "{:<25} {:>8} {:>8} {:>10}",
+                "Token", "Count", "Score", "Layers"
+            ));
+            out.push("-".repeat(55));
+
+            for (tok, info) in &sorted {
+                let examples_str = if with_examples && !info.examples.is_empty() {
+                    format!("  e.g. {}", info.examples.join(", "))
+                } else {
+                    String::new()
+                };
+                out.push(format!(
+                    "{:<25} {:>8} {:>8.2} {:>5}-{}{}",
+                    tok,
+                    info.count,
+                    info.max_score,
+                    info.min_layer,
+                    info.max_layer,
+                    examples_str,
+                ));
+            }
+        }
+
+        if out.is_empty() || (probe_relations.is_empty() && tokens.is_empty()) {
+            out.push("  (no relations found)".into());
         }
 
         Ok(out)

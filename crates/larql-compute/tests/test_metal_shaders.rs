@@ -12,6 +12,7 @@ extern crate blas_src;
 
 use ndarray::Array2;
 use larql_compute::{ComputeBackend, cpu::q4};
+use larql_compute::cpu::q4::quantize_q4_0;
 
 // ── Test helpers ──
 
@@ -21,33 +22,6 @@ fn synth(rows: usize, cols: usize, seed: u64) -> Array2<f32> {
         s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
         ((s >> 33) as f32) / (u32::MAX as f32) * 2.0 - 1.0
     })
-}
-
-fn quantize_q4_0(data: &[f32]) -> Vec<u8> {
-    assert!(data.len() % 32 == 0);
-    let n = data.len() / 32;
-    let mut out = Vec::with_capacity(n * 18);
-    for i in 0..n {
-        let blk = &data[i * 32..(i + 1) * 32];
-        let amax = blk.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
-        let scale = amax / 7.0;
-        let inv = if scale > 0.0 { 1.0 / scale } else { 0.0 };
-        let bits = scale.to_bits();
-        let sign = (bits >> 16) & 0x8000;
-        let exp = ((bits >> 23) & 0xFF) as i32;
-        let mant = bits & 0x7FFFFF;
-        let f16 = if exp == 0 { sign as u16 }
-            else if exp >= 31 + 127 - 15 { (sign | 0x7C00) as u16 }
-            else if exp <= -15 + 127 { sign as u16 }
-            else { (sign | (((exp - 127 + 15) as u32) << 10) | (mant >> 13)) as u16 };
-        out.extend_from_slice(&f16.to_le_bytes());
-        for j in 0..16 {
-            let lo = ((blk[j * 2] * inv).round() as i32 + 8).clamp(0, 15) as u8;
-            let hi = ((blk[j * 2 + 1] * inv).round() as i32 + 8).clamp(0, 15) as u8;
-            out.push(lo | (hi << 4));
-        }
-    }
-    out
 }
 
 fn max_diff(a: &[f32], b: &[f32]) -> f32 {

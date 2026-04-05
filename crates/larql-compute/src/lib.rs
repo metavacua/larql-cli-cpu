@@ -10,14 +10,14 @@
 //!
 //! | Backend | Feature | Operations |
 //! |---------|---------|------------|
-//! | CPU | (always) | BLAS f32, C kernel Q4 (ARM vdotq_s32) |
+//! | CPU | (always) | BLAS f32, C kernel Q4 (ARM vdotq_s32), vector ops |
 //! | Metal | `metal` | Tiled f32, simdgroup Q4, multi-layer pipeline |
 //! | CUDA | (planned) | — |
 //!
 //! ## Quick start
 //!
 //! ```rust,no_run
-//! use larql_compute::{ComputeBackend, default_backend, cpu_backend};
+//! use larql_compute::{ComputeBackend, default_backend, cpu_backend, dot, norm, cosine};
 //!
 //! let backend = default_backend();
 //! println!("Using: {}", backend.name());
@@ -41,6 +41,7 @@ pub mod metal;
 
 pub use backend::{ComputeBackend, MatMulOp, dot_proj_gpu, matmul_gpu};
 pub use cpu::CpuBackend;
+pub use cpu::ops::vector::{dot, norm, cosine};
 
 #[cfg(feature = "metal")]
 pub use metal::MetalBackend;

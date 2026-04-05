@@ -17,7 +17,7 @@ pub mod ops;
 
 // Re-export for backward compatibility (used by benchmarks/examples)
 pub mod q4 {
-    pub use super::ops::q4_common::{quantize_to_q8, q4_0_matvec_c, q4_0_vecmat_c};
+    pub use super::ops::q4_common::{quantize_to_q8, quantize_q4_0, q4_0_matvec_c, q4_0_vecmat_c};
     pub use super::ops::q4_matvec::dispatch as q4_matvec;
     pub use super::ops::q4_vecmat::dispatch as q4_vecmat;
 }

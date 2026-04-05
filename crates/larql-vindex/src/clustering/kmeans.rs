@@ -68,7 +68,7 @@ pub fn kmeans(
                 for j in 0..dim {
                     new_centres[[c, j]] /= cnt;
                 }
-                let norm: f32 = new_centres.row(c).dot(&new_centres.row(c)).sqrt();
+                let norm: f32 = larql_compute::norm(&new_centres.row(c));
                 if norm > 1e-8 {
                     for j in 0..dim {
                         new_centres[[c, j]] /= norm;
@@ -93,7 +93,7 @@ fn kmeans_pp_init(data: &Array2<f32>, k: usize) -> Array2<f32> {
     let mut best_norm = 0.0f32;
     let mut first = 0;
     for i in 0..n {
-        let norm: f32 = data.row(i).dot(&data.row(i));
+        let norm: f32 = larql_compute::dot(&data.row(i), &data.row(i));
         if norm > best_norm {
             best_norm = norm;
             first = i;

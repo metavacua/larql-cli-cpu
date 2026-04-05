@@ -13,6 +13,7 @@ impl Parser {
                 self.advance();
                 let mut layer = None;
                 let mut with_examples = false;
+                let mut mode = DescribeMode::default();
 
                 loop {
                     match self.peek() {
@@ -26,11 +27,23 @@ impl Parser {
                             self.expect_keyword(Keyword::Examples)?;
                             with_examples = true;
                         }
+                        Token::Keyword(Keyword::Verbose) => {
+                            self.advance();
+                            mode = DescribeMode::Verbose;
+                        }
+                        Token::Keyword(Keyword::Brief) => {
+                            self.advance();
+                            mode = DescribeMode::Brief;
+                        }
+                        Token::Keyword(Keyword::Raw) => {
+                            self.advance();
+                            mode = DescribeMode::Raw;
+                        }
                         _ => break,
                     }
                 }
                 self.eat_semicolon();
-                Ok(Statement::ShowRelations { layer, with_examples })
+                Ok(Statement::ShowRelations { layer, with_examples, mode })
             }
             Token::Keyword(Keyword::Layers) => {
                 self.advance();
