@@ -39,6 +39,7 @@ pub use index::core::{
     FeatureMeta, GateIndex, IndexLoadCallbacks, SilentLoadCallbacks, VectorIndex, WalkHit, WalkTrace,
 };
 pub use index::router::{RouterIndex, RouteResult};
+pub use index::residency::{ResidencyManager, LayerState};
 
 // Describe
 pub use describe::{DescribeEdge, LabelSource};

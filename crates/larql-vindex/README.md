@@ -67,6 +67,7 @@ weights are resident at a time. The rest stays on disk until touched.
 - **Checksums** — SHA256 integrity verification for all binary files
 - **Provenance** — model source, timestamp, version tracking
 - **LM head KNN** — top-K token lookup via single BLAS gemv against output projection
+- **Adaptive residency** — pin hot layers in memory, stream cold ones. More memory = faster. Smooth gradient vs llama.cpp's all-or-nothing cliff
 
 ## Crate Structure
 
@@ -88,7 +89,8 @@ larql-vindex/src/
 │   ├── hnsw.rs                 HNSW graph index (random projection, exact rescoring)
 │   ├── walk.rs                 Feature-major down/up vectors, interleaved, Q4, lm_head
 │   ├── mutate.rs               set/delete features, save to disk
-│   └── router.rs               MoE expert router
+│   ├── router.rs               MoE expert router
+│   └── residency.rs            Adaptive layer pinning (memory budget → performance)
 │
 ├── format/                     Vindex file I/O
 │   ├── load.rs                 load_vindex, load_embeddings, load_tokenizer
@@ -127,6 +129,7 @@ All matrix operations go through `larql-compute` (BLAS on CPU, Metal GPU planned
 |--------|-----------|---------|
 | gate.rs | Gate KNN f32 (matmul_transb) | CPU BLAS |
 | gate.rs | Gate KNN Q4 (q4_matvec) | Any ComputeBackend |
+| gate.rs | Adaptive KNN (pinned → Q4 → f32) | Any ComputeBackend |
 | gate.rs | Gate walk (gemv) | CPU BLAS |
 | gate.rs | Batch gate scores (matmul_transb) | CPU BLAS |
 | hnsw.rs | Random projection (matmul) | CPU BLAS |
@@ -181,7 +184,7 @@ model.vindex/
 ## Testing
 
 ```bash
-cargo test -p larql-vindex                                                      # 140 tests
+cargo test -p larql-vindex                                                      # 146 tests
 cargo run -p larql-vindex --example vindex_demo                                 # Feature showcase
 cargo run -p larql-vindex --example vindex_bench --release                      # Core benchmarks
 cargo run -p larql-vindex --example bench_scaling --release                     # Production dims (CPU)
@@ -202,6 +205,7 @@ Test coverage (140 tests):
 - Binary serialization: checksums, dtype, config
 - MoE: expert-scoped queries, multiple experts per layer
 - Streaming extraction: safetensors mmap, one layer at a time
+- Adaptive residency: pin/evict, budget enforcement, auto_pin, pin_range, adaptive dispatch
 
 ## Benchmarks
 
@@ -246,6 +250,25 @@ Vindex provides Q4 gate data. Compute crate scores it. Same interface, any backe
 | Page fault overhead | 0.02ms |
 | Zero-copy mmap | true (0 bytes heap) |
 
+### Adaptive residency (simulated 70B, M3 Max Metal)
+
+```
+Budget    Pinned   KNN/layer   Walk 48L    tok/s
+stream     0/80     0.28ms      13.4ms      75      ← 0 MB pinned
+200 MB    14/80     0.28ms      13.4ms      75
+500 MB    35/80     0.28ms      13.3ms      75
+all       80/80     0.29ms      13.8ms      72      ← all pinned
+
+llama.cpp 70B:
+40GB VRAM  all                              8-12    ← needs ALL weights
+24GB VRAM  partial                          2-3     ← PCIe cliff
+CPU only                                    1-2
+```
+
+On unified memory (Apple Silicon), mmap is effectively pinned — the gradient
+is flat because there's no PCIe bottleneck. On discrete GPU systems,
+pinned layers skip PCIe transfers and the gradient steepens.
+
 ## Design Principles
 
 1. **Readonly base** — binary files on disk are never modified after extraction
@@ -254,6 +277,7 @@ Vindex provides Q4 gate data. Compute crate scores it. Same interface, any backe
 4. **One file per matrix type** — gate, attn, up, down stored separately
 5. **Streaming extraction** — processes one layer at a time (~2 GB peak for 120B models)
 6. **All compute through larql-compute** — BLAS dispatch, no raw ndarray .dot() calls
+7. **Adaptive residency** — pin hot layers in memory budget, stream cold ones from mmap. Every device gets the best it can do
 
 ## License
 

@@ -16,6 +16,8 @@ mod walk;
 pub mod hnsw;
 pub mod mutate;
 pub mod router;
+pub mod residency;
 
 pub use core::*;
 pub use router::RouterIndex;
+pub use residency::{ResidencyManager, LayerState};

@@ -660,6 +660,48 @@ impl VectorIndex {
         Some(results)
     }
 
+    /// Adaptive gate KNN — automatically picks the fastest path per layer.
+    ///
+    /// Dispatch order:
+    /// 1. Pinned Q4 → backend.q4_matvec (pre-loaded, no page faults)
+    /// 2. Mmap Q4 → backend.q4_matvec (paged on demand)
+    /// 3. f32 mmap/heap → BLAS brute-force (fallback)
+    ///
+    /// The residency manager tracks which layers are pinned.
+    /// More memory budget → more pinned layers → faster walk.
+    pub fn gate_knn_adaptive(
+        &self,
+        layer: usize,
+        residual: &Array1<f32>,
+        top_k: usize,
+        residency: &mut super::residency::ResidencyManager,
+        backend: &dyn larql_compute::ComputeBackend,
+    ) -> Vec<(usize, f32)> {
+        residency.record_access(layer);
+
+        // 1. Pinned Q4 (fastest — data already in RAM)
+        if let Some(q4_data) = residency.pinned_q4(layer) {
+            if backend.has_q4() {
+                let x = residual.as_slice().unwrap();
+                let (q8_x, q8_scales) = larql_compute::cpu::q4::quantize_to_q8(x);
+                let num_features = self.num_features(layer);
+                if let Some(scores_vec) = backend.q4_matvec(
+                    q4_data, &q8_x, &q8_scales, num_features, self.hidden_size,
+                ) {
+                    return Self::top_k_from_scores(&Array1::from_vec(scores_vec), top_k);
+                }
+            }
+        }
+
+        // 2. Mmap Q4 (Q4 file loaded but not pinned — OS pages on demand)
+        if let Some(hits) = self.gate_knn_q4(layer, residual, top_k, backend) {
+            return hits;
+        }
+
+        // 3. f32 brute-force (fallback)
+        self.gate_knn(layer, residual, top_k)
+    }
+
     /// Gate KNN via Q4 matvec — scored by a ComputeBackend.
     ///
     /// The vindex provides the raw Q4 data. The backend scores it.
