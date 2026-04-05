@@ -37,7 +37,7 @@ Gate KNN [10240,2560]          0.91ms      0.90ms      —          vindex scori
 - Ollama uses Q4_K_M/Q6_K (group scaling) vs our Q4_0/Q8_0 (per-block scaling)
 - Our Q4 logits are **faster** than Ollama (0.57ms vs ~1ms)
 
-## Shaders (16 Metal kernels, all compiled and tested)
+## Shaders (22 Metal kernels, all compiled and tested)
 
 | Shader | Purpose | Status |
 |--------|---------|--------|
@@ -130,7 +130,7 @@ src/
 # CPU tests (28 unit + 6 integration + 2 doc = 36 tests)
 cargo test -p larql-compute
 
-# CPU + Metal tests (62 tests)
+# CPU + Metal tests (64 tests)
 cargo test -p larql-compute --features metal
 ```
 

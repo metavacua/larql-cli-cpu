@@ -16,7 +16,9 @@ fn main() {
                               "q4_f32_matvec", "geglu_silu", "quantize_q8", "causal_attention",
                               "rope_apply", "fused_attention",
                               "kv_attention", "kv_cache_append",
-                              "q4_matvec_v2", "q4_matvec_v3", "q4_matvec_v4", "q4_matvec_v5"] {
+                              "q4_matvec_v2", "q4_matvec_v3", "q4_matvec_v4", "q4_matvec_v5",
+                              "rms_norm_q8", "residual_norm", "residual_norm_q8",
+                              "rms_norm", "residual_add", "q8_matvec"] {
                     match lib.get_function(name, None) {
                         Ok(_) => println!("  ✓ {name}"),
                         Err(e) => println!("  ✗ {name}: {e}"),

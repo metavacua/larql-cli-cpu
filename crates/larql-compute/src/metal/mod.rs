@@ -48,6 +48,9 @@ pub struct MetalBackend {
     q8_matvec_pipeline: ComputePipelineState,
     rms_norm_pipeline: ComputePipelineState,
     residual_add_pipeline: ComputePipelineState,
+    rms_norm_q8_pipeline: ComputePipelineState,
+    residual_norm_pipeline: ComputePipelineState,
+    residual_norm_q8_pipeline: ComputePipelineState,
     flop_threshold: AtomicUsize,
 }
 
@@ -102,6 +105,14 @@ impl MetalBackend {
         let rms_norm_pipeline = device.new_compute_pipeline_state_with_function(&rms_norm_fn).ok()?;
         let residual_add_pipeline = device.new_compute_pipeline_state_with_function(&residual_add_fn).ok()?;
 
+        // Fused ops (norm+quantize, residual+norm, residual+norm+quantize)
+        let rms_norm_q8_fn = library.get_function("rms_norm_q8", None).ok()?;
+        let residual_norm_fn = library.get_function("residual_norm", None).ok()?;
+        let residual_norm_q8_fn = library.get_function("residual_norm_q8", None).ok()?;
+        let rms_norm_q8_pipeline = device.new_compute_pipeline_state_with_function(&rms_norm_q8_fn).ok()?;
+        let residual_norm_pipeline = device.new_compute_pipeline_state_with_function(&residual_norm_fn).ok()?;
+        let residual_norm_q8_pipeline = device.new_compute_pipeline_state_with_function(&residual_norm_q8_fn).ok()?;
+
         // Fused attention (RoPE + GQA + softcap)
         let fused_attn_fn = library.get_function("fused_attention", None).ok()?;
         let fused_attn_pipeline = device.new_compute_pipeline_state_with_function(&fused_attn_fn).ok()?;
@@ -118,6 +129,7 @@ impl MetalBackend {
             kv_attend_pipeline, kv_append_pipeline,
             q8_matvec_pipeline,
             rms_norm_pipeline, residual_add_pipeline,
+            rms_norm_q8_pipeline, residual_norm_pipeline, residual_norm_q8_pipeline,
             flop_threshold: AtomicUsize::new(calibrate::DEFAULT_FLOP_THRESHOLD),
         })
     }
@@ -228,6 +240,7 @@ impl MetalBackend {
             None,
             &self.q8_matvec_pipeline,
             &self.rms_norm_pipeline, &self.residual_add_pipeline,
+            &self.rms_norm_q8_pipeline, &self.residual_norm_q8_pipeline,
             &full_layers, x, hidden, inter, q_dim, kv_dim,
             1, 0, 0, 0, 0.0, false, 0.0,
         )
@@ -301,6 +314,7 @@ impl ComputeBackend for MetalBackend {
             Some(&self.fused_attn_pipeline),
             &self.q8_matvec_pipeline,
             &self.rms_norm_pipeline, &self.residual_add_pipeline,
+            &self.rms_norm_q8_pipeline, &self.residual_norm_q8_pipeline,
             layers, x, hidden, inter, q_dim, kv_dim,
             seq_len, num_q_heads, num_kv_heads, head_dim,
             rope_base, use_qk_norm, softcap,

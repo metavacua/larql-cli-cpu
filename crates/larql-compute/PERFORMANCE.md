@@ -100,23 +100,32 @@ Date        Milestone                        Time      tok/s
 2026-04-06  Honest production (CPU)          201ms     5.0 (correct output)
 ```
 
+## Optimizations Applied
+
+1. **Fused rms_norm_q8**: norm + Q8 quantize in one kernel (saves 42 encoders/21L)
+2. **Fused residual_norm_q8**: residual + norm + Q8 in one kernel (saves 42 more)
+3. **Merged Q/K/V dispatches**: 3 matvecs in one encoder
+4. **Merged gate/up dispatches**: 2 matvecs in one encoder
+5. **Q8 attention projections**: higher precision than Q4 (like Ollama's Q6_K)
+6. **22 shaders total**: all compiled, all tested against CPU reference
+
 ## Gap to Ollama
 
 ```
-Component              LARQL        Ollama      Gap
+Component              LARQL        Ollama      Gap          Fix
 Full pipeline          25.9ms       10.1ms      2.6x
-  Attn projections     ~10ms (Q8)   ~1.5ms      Q4_K_M group scaling
-  FFN batch            8.4ms        ~5ms        1.7x (GEGLU on GPU vs separate)
-  Norms + residuals    ~3ms         <1ms        dispatch overhead
-  Q8 inter-stage       ~3ms         0ms         Ollama keeps data on GPU
+  Attn (Q8 proj+fused) 17.5ms       ~5ms        separate dispatch vs fused kernel
+  FFN batch (Q4)         8.4ms       ~5ms        1.7x (close)
   
-Projected optimizations:
-  Reduce Q8 inter-stage quantize:  -3ms
-  Fuse norm+residual into single kernel: -2ms  
-  Optimize attention dispatch:     -3ms
-  → ~18ms = 56 tok/s (projected)
-  
-With KV cache (decode mode):       
-  Skip K/V recompute:             -4ms
-  → ~14ms = 71 tok/s
+Remaining optimizations:
+  Fused Q8 attention kernel (dequant+matvec+RoPE in one):  17.5ms → ~5ms
+  KV cache (decode mode, skip K/V recompute):              saves ~4ms
+  → ~10ms = 100 tok/s (projected Ollama parity)
 ```
+
+The FFN is essentially at parity. The gap is attention dispatch count:
+- LARQL: norm_q8 + Q8_Q + Q8_K + Q8_V + fused_attn + Q8_O = 6 dispatches
+- Ollama: fused_dequant_matvec_rope_QKV + fused_attn + fused_O = ~2 dispatches
+
+The fix: one fused kernel that reads Q8 weights, dequantizes, multiplies,
+applies RoPE, and outputs f32 Q/K/V — all in one dispatch.

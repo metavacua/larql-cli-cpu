@@ -135,6 +135,8 @@ pub fn dispatch_full_pipeline(
     q8_matvec_pipeline: &ComputePipelineState,
     rms_norm_pipeline: &ComputePipelineState,
     residual_add_pipeline: &ComputePipelineState,
+    rms_norm_q8_pipeline: &ComputePipelineState,
+    residual_norm_q8_pipeline: &ComputePipelineState,
     layers: &[crate::FullPipelineLayer],
     x: &[f32],
     hidden: usize,
@@ -228,39 +230,26 @@ pub fn dispatch_full_pipeline(
         let norm_offset = layers[l].norm_offset;
         let has_post_norms = layers[l].has_post_norms;
 
-        // ── 1. Input norm: rms_norm(h, input_norm) → norm_out ──
+        // ── 1. FUSED: rms_norm + Q8 quantize (replaces 2 separate dispatches) ──
         {
             let enc = cmd.new_compute_command_encoder();
-            encode_rms_norm(enc, rms_norm_pipeline,
-                &h_bufs[l], &input_norm_bufs[l], &norm_outs[l], hidden, eps, norm_offset);
+            enc.set_compute_pipeline_state(rms_norm_q8_pipeline);
+            enc.set_buffer(0, Some(&h_bufs[l]), 0);
+            enc.set_buffer(1, Some(&input_norm_bufs[l]), 0);
+            enc.set_buffer(2, Some(&q8_bufs[l]), 0);
+            enc.set_buffer(3, Some(&q8s_bufs[l]), 0);
+            enc.set_bytes(4, 4, &hidden_val as *const u32 as *const c_void);
+            enc.set_bytes(5, 4, &eps as *const f32 as *const c_void);
+            enc.set_bytes(6, 4, &norm_offset as *const f32 as *const c_void);
+            enc.dispatch_threads(MTLSize::new(hidden as u64, 1, 1), MTLSize::new(256.min(hidden as u64), 1, 1));
             enc.end_encoding();
         }
 
-        // ── 2. Q8 quantize normed input for Q4 projections ──
-        {
-            let enc = cmd.new_compute_command_encoder();
-            enc.set_compute_pipeline_state(q8_quant_pipeline);
-            enc.set_buffer(0, Some(&norm_outs[l]), 0);
-            enc.set_buffer(1, Some(&q8_bufs[l]), 0);
-            enc.set_buffer(2, Some(&q8s_bufs[l]), 0);
-            enc.set_bytes(3, 4, &hidden_val as *const u32 as *const c_void);
-            enc.dispatch_threads(MTLSize::new(n_blocks as u64, 1, 1), MTLSize::new(256.min(n_blocks as u64), 1, 1));
-            enc.end_encoding();
-        }
-
-        // ── 3. Q8 Q/K/V projections (higher precision for attention) ──
+        // ── 3. Q8 Q/K/V projections — all 3 in one encoder ──
         {
             let enc = cmd.new_compute_command_encoder();
             encode_q8_matvec(enc, q8_matvec_pipeline, &wq_bufs[l], &q8_bufs[l], &wq_scale_bufs[l], &q8s_bufs[l], &q_outs[l], q_dim, hidden);
-            enc.end_encoding();
-        }
-        {
-            let enc = cmd.new_compute_command_encoder();
             encode_q8_matvec(enc, q8_matvec_pipeline, &wk_bufs[l], &q8_bufs[l], &wk_scale_bufs[l], &q8s_bufs[l], &k_outs[l], kv_dim, hidden);
-            enc.end_encoding();
-        }
-        {
-            let enc = cmd.new_compute_command_encoder();
             encode_q8_matvec(enc, q8_matvec_pipeline, &wv_bufs[l], &q8_bufs[l], &wv_scale_bufs[l], &q8s_bufs[l], &v_outs[l], kv_dim, hidden);
             enc.end_encoding();
         }
@@ -318,58 +307,56 @@ pub fn dispatch_full_pipeline(
             enc.end_encoding();
         }
 
-        // ── 6. Post-attention: norm (if post_norms) + residual add ──
+        // ── 6. Post-attention residual + pre-FFN norm + Q8 quantize ──
+        // For post-norm models (Gemma): norm(O) + residual → norm → Q8
+        // For standard models (Llama): residual + O → norm → Q8
+        // Using FUSED: residual_norm_q8 = residual_add + rms_norm + Q8 in one kernel
         if has_post_norms {
-            if let Some(ref post_attn_buf) = Some(&post_attn_norm_bufs[l]) {
-                // Post-norm: norm the attention output, then add to residual
-                let normed = bufs.output((hidden * 4) as u64);
+            // Post-norm: first norm the attention output
+            let normed = bufs.output((hidden * 4) as u64);
+            {
                 let enc = cmd.new_compute_command_encoder();
-                encode_rms_norm(enc, rms_norm_pipeline, &o_outs[l], post_attn_buf, &normed, hidden, eps, norm_offset);
+                encode_rms_norm(enc, rms_norm_pipeline, &o_outs[l], &post_attn_norm_bufs[l], &normed, hidden, eps, norm_offset);
                 enc.end_encoding();
-
+            }
+            // Then fused: residual_add(h, normed) + pre_ffn_norm + Q8
+            let pre_ffn_buf = pre_ffn_norm_bufs[l].as_ref().unwrap_or(&post_attn_norm_bufs[l]);
+            {
                 let enc = cmd.new_compute_command_encoder();
-                encode_residual_add(enc, residual_add_pipeline, &h_bufs[l], &normed, &h_post_attns[l], hidden);
+                enc.set_compute_pipeline_state(residual_norm_q8_pipeline);
+                enc.set_buffer(0, Some(&h_bufs[l]), 0);       // residual a
+                enc.set_buffer(1, Some(&normed), 0);           // attention output b
+                enc.set_buffer(2, Some(pre_ffn_buf), 0);       // norm weight
+                enc.set_buffer(3, Some(&ffn_q8_bufs[l]), 0);   // Q8 output
+                enc.set_buffer(4, Some(&ffn_q8s_bufs[l]), 0);  // Q8 scales
+                enc.set_buffer(5, Some(&h_post_attns[l]), 0);  // f32 sum output (h for next residual)
+                enc.set_bytes(6, 4, &hidden_val as *const u32 as *const c_void);
+                enc.set_bytes(7, 4, &eps as *const f32 as *const c_void);
+                enc.set_bytes(8, 4, &norm_offset as *const f32 as *const c_void);
+                enc.dispatch_threads(MTLSize::new(hidden as u64, 1, 1), MTLSize::new(256.min(hidden as u64), 1, 1));
                 enc.end_encoding();
             }
         } else {
-            // Standard: h = h + o_out
+            // Standard: FUSED residual_add(h, o_out) + post_attn_norm + Q8
             let enc = cmd.new_compute_command_encoder();
-            encode_residual_add(enc, residual_add_pipeline, &h_bufs[l], &o_outs[l], &h_post_attns[l], hidden);
+            enc.set_compute_pipeline_state(residual_norm_q8_pipeline);
+            enc.set_buffer(0, Some(&h_bufs[l]), 0);
+            enc.set_buffer(1, Some(&o_outs[l]), 0);
+            enc.set_buffer(2, Some(&post_attn_norm_bufs[l]), 0);
+            enc.set_buffer(3, Some(&ffn_q8_bufs[l]), 0);
+            enc.set_buffer(4, Some(&ffn_q8s_bufs[l]), 0);
+            enc.set_buffer(5, Some(&h_post_attns[l]), 0);
+            enc.set_bytes(6, 4, &hidden_val as *const u32 as *const c_void);
+            enc.set_bytes(7, 4, &eps as *const f32 as *const c_void);
+            enc.set_bytes(8, 4, &norm_offset as *const f32 as *const c_void);
+            enc.dispatch_threads(MTLSize::new(hidden as u64, 1, 1), MTLSize::new(256.min(hidden as u64), 1, 1));
             enc.end_encoding();
         }
 
-        // ── 7. Pre-FFN norm ──
-        {
-            let norm_buf = if has_post_norms {
-                pre_ffn_norm_bufs[l].as_ref().unwrap_or(&post_attn_norm_bufs[l])
-            } else {
-                &post_attn_norm_bufs[l]
-            };
-            let enc = cmd.new_compute_command_encoder();
-            encode_rms_norm(enc, rms_norm_pipeline, &h_post_attns[l], norm_buf, &ffn_norm_outs[l], hidden, eps, norm_offset);
-            enc.end_encoding();
-        }
-
-        // ── 8. Q8 quantize FFN input ──
-        {
-            let enc = cmd.new_compute_command_encoder();
-            enc.set_compute_pipeline_state(q8_quant_pipeline);
-            enc.set_buffer(0, Some(&ffn_norm_outs[l]), 0);
-            enc.set_buffer(1, Some(&ffn_q8_bufs[l]), 0);
-            enc.set_buffer(2, Some(&ffn_q8s_bufs[l]), 0);
-            enc.set_bytes(3, 4, &hidden_val as *const u32 as *const c_void);
-            enc.dispatch_threads(MTLSize::new(n_blocks as u64, 1, 1), MTLSize::new(256.min(n_blocks as u64), 1, 1));
-            enc.end_encoding();
-        }
-
-        // ── 9. Q4 FFN: gate → up → GEGLU → down ──
+        // ── 9. Q4 FFN: gate+up in one encoder, GEGLU, down ──
         {
             let enc = cmd.new_compute_command_encoder();
             encode_q4_matvec(enc, &q4.matvec, &gate_bufs[l], &ffn_q8_bufs[l], &ffn_q8s_bufs[l], &gate_outs[l], inter, hidden);
-            enc.end_encoding();
-        }
-        {
-            let enc = cmd.new_compute_command_encoder();
             encode_q4_matvec(enc, &q4.matvec, &up_bufs[l], &ffn_q8_bufs[l], &ffn_q8s_bufs[l], &up_outs[l], inter, hidden);
             enc.end_encoding();
         }
