@@ -133,7 +133,7 @@ pub fn dispatch_full_pipeline(
     q8_quant_pipeline: &ComputePipelineState,
     fused_attn_pipeline: Option<&ComputePipelineState>,
     q8_matvec_pipeline: &ComputePipelineState,
-    q8_qkv_pipeline: &ComputePipelineState,
+    q8_qkv_proj_pipeline: &ComputePipelineState,
     rms_norm_pipeline: &ComputePipelineState,
     residual_add_pipeline: &ComputePipelineState,
     rms_norm_q8_pipeline: &ComputePipelineState,
@@ -255,7 +255,7 @@ pub fn dispatch_full_pipeline(
             let total_rows = q_dim + kv_dim + kv_dim;
 
             let enc = cmd.new_compute_command_encoder();
-            enc.set_compute_pipeline_state(q8_qkv_pipeline);
+            enc.set_compute_pipeline_state(q8_qkv_proj_pipeline);
             enc.set_buffer(0, Some(&wq_bufs[l]), 0);
             enc.set_buffer(1, Some(&wk_bufs[l]), 0);
             enc.set_buffer(2, Some(&wv_bufs[l]), 0);

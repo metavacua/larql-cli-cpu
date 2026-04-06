@@ -245,7 +245,7 @@ impl MetalBackend {
             &self.geglu_pipeline, &self.q8_quant_pipeline,
             None,
             &self.q8_matvec_pipeline,
-            &self.q8_qkv_proj_pipeline,
+            &self.q8_qkv_proj_pipeline,  // fused Q+K+V in one dispatch
             &self.rms_norm_pipeline, &self.residual_add_pipeline,
             &self.rms_norm_q8_pipeline, &self.residual_norm_q8_pipeline,
             &full_layers, x, hidden, inter, q_dim, kv_dim,
@@ -320,7 +320,7 @@ impl ComputeBackend for MetalBackend {
             &self.geglu_pipeline, &self.q8_quant_pipeline,
             Some(&self.fused_attn_pipeline),
             &self.q8_matvec_pipeline,
-            &self.q8_qkv_proj_pipeline,
+            &self.q8_qkv_proj_pipeline,  // fused Q+K+V in one dispatch
             &self.rms_norm_pipeline, &self.residual_add_pipeline,
             &self.rms_norm_q8_pipeline, &self.residual_norm_q8_pipeline,
             layers, x, hidden, inter, q_dim, kv_dim,

@@ -52,6 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let weights = model.weights();
     let tokenizer = model.tokenizer();
     let num_layers = weights.num_layers;
+    check_norms(weights);
 
     let mut cb = SilentLoadCallbacks;
     let mut index = VectorIndex::load_vindex(&vindex_path, &mut cb)?;
@@ -200,6 +201,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Honest vs Dense:     {:.1}x ({:.0}ms saved)", dense_ms / honest_ms, dense_ms - honest_ms);
     println!("  Honest vs Ollama:    {:.1}x (Ollama ~10ms = 98 tok/s)", 10.0 / honest_ms);
 
+    // Diagnostic: GPU single-layer vs CPU full pipeline
+    {
+        let single_gpu = predict_honest(weights, tokenizer, &token_ids, 5, &index, &*gpu_be, &cache, 13..14);
+        let cpu_be = larql_inference::cpu_backend();
+        let single_cpu = predict_honest(weights, tokenizer, &token_ids, 5, &index,
+            &*cpu_be, &cache, 13..14);
+        eprintln!("  L13 only — GPU: {:?}  CPU: {:?}",
+            single_gpu.predictions.first().map(|(t,_)| t.as_str()),
+            single_cpu.predictions.first().map(|(t,_)| t.as_str()));
+    }
+
     println!("=== Done ===");
     Ok(())
+}
+
+// Diagnostic: check norm weights are loaded
+fn check_norms(weights: &larql_inference::ModelWeights) {
+    let arch = &*weights.arch;
+    for layer in [0, 13, 33] {
+        let key = arch.input_layernorm_key(layer);
+        let has = weights.vectors.contains_key(&key);
+        let len = weights.vectors.get(&key).map(|v| v.len()).unwrap_or(0);
+        eprintln!("  norm L{layer}: {key} → has={has} len={len}");
+    }
 }
