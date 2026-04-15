@@ -17,6 +17,7 @@ pub mod layer;
 pub mod predict;
 pub mod trace;
 pub mod memit;
+pub mod target_delta;
 
 use ndarray::Array2;
 use crate::attention::AttentionWeights;
@@ -111,6 +112,7 @@ pub use predict::{
     predict, predict_with_ffn, predict_with_ffn_attention, predict_with_ffn_trace,
     predict_with_router, predict_with_strategy, predict_from_hidden, predict_from_hidden_with_ffn,
     logits_to_predictions_pub, logit_lens_top1,
+    forward_raw_logits, RawForward,
 };
 pub use trace::{
     forward_to_layer, capture_residuals, capture_decoy_residuals,
@@ -119,3 +121,4 @@ pub use trace::{
     calibrate_scalar_gains,
 };
 pub use memit::{run_memit, MemitFact, MemitResult, MemitFactResult};
+pub use target_delta::{TargetDelta, TargetDeltaOpts};

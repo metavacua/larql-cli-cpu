@@ -711,13 +711,29 @@ impl Session {
             .collect();
 
         let mut overrides_applied = 0usize;
+        // Column-replace bake of gate/up/down overlays from install_compiled_slot.
+        // This is the primary compile path: at N≤10 per layer it
+        // produces working retrieval in the compiled vindex.
+        //
+        // MEMIT ΔW_down is applied as an ADDITIONAL layer on top of
+        // this bake (see apply_memit_deltas_to_down_weights below).
+        // At current parameters (target_alpha=5, ridge=0.1) MEMIT's
+        // delta is tuned too conservatively to produce retrieval on
+        // its own — its role here is to add a distributed write-back
+        // signal that complements the column-replace for the
+        // safetensors export path. For N>>10 scale with MEMIT as
+        // primary, the delta strength needs per-model tuning
+        // (tracked as task #38 / #41).
         if down_overrides.is_empty() {
-            // Pure structural compile — hard-link down_weights.bin too.
             let src = path.join("down_weights.bin");
             let dst = output_dir.join("down_weights.bin");
             if src.exists() {
                 let _ = std::fs::remove_file(&dst);
-                if std::fs::hard_link(&src, &dst).is_err() {
+                // Copy (not hard-link) when MEMIT will edit bytes.
+                if memit_results.is_some() {
+                    std::fs::copy(&src, &dst)
+                        .map_err(|e| LqlError::exec("copy down_weights for MEMIT", e))?;
+                } else if std::fs::hard_link(&src, &dst).is_err() {
                     std::fs::copy(&src, &dst)
                         .map_err(|e| LqlError::exec("copy down_weights", e))?;
                 }

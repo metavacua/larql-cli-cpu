@@ -89,6 +89,103 @@ pub fn predict(
     predict_with_ffn(weights, tokenizer, token_ids, top_k, &ffn)
 }
 
+/// Raw-logits forward pass used by target-delta optimisation.
+///
+/// Returns (pre-final-norm residual, final-norm residual, logits) at
+/// the LAST token position. If `perturb_at_layer` is Some, adds `delta`
+/// to the residual's last position after that layer's block runs —
+/// matching the Python reference `ffn_out[0, -1, :] += delta; h = h + ffn_out`
+/// (since `run_layer_with_ffn` already collapses the block's output +
+/// skip, perturbing the post-block `h[-1]` is algebraically the same).
+pub fn forward_raw_logits(
+    weights: &ModelWeights,
+    token_ids: &[u32],
+    perturb: Option<(usize, ndarray::ArrayView1<f32>)>,
+) -> RawForward {
+    let num_layers = weights.num_layers;
+    let seq_len = token_ids.len();
+    let mut h = embed_tokens(weights, token_ids);
+    let ple_inputs = precompute_per_layer_inputs(weights, &h, token_ids);
+    let ffn = WeightFfn { weights };
+
+    let mut kv_cache: std::collections::HashMap<usize, SharedKV> =
+        std::collections::HashMap::new();
+
+    for layer in 0..num_layers {
+        let shared_kv = weights
+            .arch
+            .kv_shared_source_layer(layer)
+            .and_then(|src| kv_cache.get(&src));
+
+        if let Some((h_new, _, kv_out)) = run_layer_with_ffn(
+            weights,
+            &h,
+            layer,
+            &ffn,
+            false,
+            ple_inputs.get(layer),
+            shared_kv,
+        ) {
+            h = h_new;
+            if let Some(kv) = kv_out {
+                kv_cache.insert(layer, kv);
+            }
+            // Perturb after this layer's block (its FFN output already
+            // merged into h via the in-block skip connection).
+            if let Some((target_layer, delta)) = perturb {
+                if layer == target_layer {
+                    let last = seq_len - 1;
+                    let mut row = h.row_mut(last);
+                    for (i, d) in delta.iter().enumerate() {
+                        if i < row.len() {
+                            row[i] += *d;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Snapshot pre-norm residual for the caller's backward pass.
+    let h_pre_norm = h.clone();
+
+    let norm_offset = weights.arch.norm_weight_offset();
+    let h_final = apply_norm(weights, &h, weights.arch.final_norm_key(), norm_offset);
+
+    let logits_scale = weights.arch.logits_scaling();
+    let final_softcap = weights.arch.final_logit_softcapping();
+    let last_2d = h_final.slice(ndarray::s![seq_len - 1..seq_len, ..]);
+    let logits_raw = dot_proj(&last_2d, &weights.lm_head);
+    let inv_scale = 1.0 / logits_scale;
+    let logits: ndarray::Array1<f32> = logits_raw
+        .row(0)
+        .iter()
+        .map(|&v| {
+            let mut logit = v * inv_scale;
+            if let Some(cap) = final_softcap {
+                logit = (logit / cap).tanh() * cap;
+            }
+            logit
+        })
+        .collect();
+
+    RawForward {
+        h_pre_norm,
+        h_final,
+        logits,
+    }
+}
+
+/// Return type for [`forward_raw_logits`]. `h_pre_norm` is the residual
+/// at the last transformer block's output (pre-final-norm), `h_final`
+/// is after final-norm, and `logits` are the raw logits at the final
+/// token position (pre-softmax).
+pub struct RawForward {
+    pub h_pre_norm: Array2<f32>,
+    pub h_final: Array2<f32>,
+    pub logits: ndarray::Array1<f32>,
+}
+
 /// Run a full forward pass with a custom FFN backend for all layers.
 pub fn predict_with_ffn(
     weights: &ModelWeights,

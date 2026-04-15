@@ -44,6 +44,7 @@ pub use forward::{
     LayerAttentionCapture, LayerMode, PredictResult, PredictResultWithAttention,
     PredictResultWithResiduals, TraceResult,
     run_memit, MemitFact, MemitResult, MemitFactResult,
+    TargetDelta, TargetDeltaOpts,
 };
 pub use graph_ffn::{GateIndex, IndexBuildCallbacks, SilentIndexCallbacks};
 #[allow(deprecated)]
