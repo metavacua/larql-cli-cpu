@@ -230,7 +230,8 @@ impl Session {
 
             // Run MEMIT solver
             out.push(format!("  Running MEMIT solver (N={n}, d={hidden_dim}, lambda={lambda:.1e})..."));
-            let result = larql_compute::memit::memit_solve(&keys, &targets, lambda);
+            let result = larql_vindex::memit_solve(&keys, &targets, lambda)
+                .map_err(|e| LqlError::Execution(format!("MEMIT solve: {e}")))?;
 
             let min_cos = result.reconstruction_cos.iter().cloned().fold(f32::INFINITY, f32::min);
             let mean_cos: f32 = result.reconstruction_cos.iter().sum::<f32>() / n as f32;

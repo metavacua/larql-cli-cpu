@@ -50,3 +50,7 @@ harness = false
 [[bench]]
 name = "vindex_scaling"
 harness = false
+
+[[bench]]
+name = "memit_solve"
+harness = false

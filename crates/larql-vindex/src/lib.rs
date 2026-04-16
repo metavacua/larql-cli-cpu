@@ -3,6 +3,21 @@
 //! Decompile, browse, edit, and recompile neural networks.
 //! This crate owns the complete vindex lifecycle:
 //! extract, load, query, mutate, patch, save, compile.
+//!
+//! ## Module map
+//!
+//! - `extract`:    build a vindex from `safetensors` / GGUF.
+//! - `format`:     on-disk layout, checksums, HF Hub publish/resolve.
+//! - `index`:      `VectorIndex`, gate KNN, walk, HNSW, MoE router, residency.
+//! - `patch`:      `PatchedVindex` overlay, `KnnStore`, refine pass.
+//! - `storage`:    `StorageEngine` lifecycle, MEMIT decomposition (`memit_solve`).
+//! - `clustering`: kmeans + offset/cluster labelling.
+//! - `describe`:   token-level edge labelling.
+//! - `vindexfile`: declarative build pipeline.
+//! - `mmap_util`:  `madvise` hints for residency control.
+//!
+//! All matrix operations route through `larql_compute` (BLAS on CPU,
+//! Metal GPU when `--features metal`).
 
 // BLAS provided by larql-compute dependency (no direct blas_src needed)
 
@@ -71,7 +86,10 @@ pub use patch::knn_store::{KnnStore, KnnEntry};
 pub use patch::refine::{refine_gates, RefineInput, RefineResult, RefinedGate};
 
 // Storage engine
-pub use storage::{StorageEngine, Epoch, CompactStatus, MemitStore, MemitCycle, MemitFact};
+pub use storage::{
+    memit_solve, CompactStatus, Epoch, MemitCycle, MemitFact, MemitSolveResult, MemitStore,
+    StorageEngine,
+};
 
 // Vindexfile
 pub use vindexfile::{Vindexfile, VindexfileDirective, VindexfileStage, parse_vindexfile, build_from_vindexfile};

@@ -41,3 +41,7 @@ memmap2 = "0.9"
 [[bench]]
 name = "matmul"
 harness = false
+
+[[bench]]
+name = "linalg"
+harness = false

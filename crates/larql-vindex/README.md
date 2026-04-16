@@ -175,6 +175,39 @@ larql-vindex/src/
 
 All matrix operations go through `larql-compute` (BLAS on CPU, Metal GPU planned for gate KNN).
 
+## MEMIT decomposition (`storage/memit_store.rs`)
+
+`memit_solve` is the vanilla closed-form MEMIT decomposition that
+populates `MemitStore` during `COMPACT MAJOR`. It wraps the generic
+`larql_compute::cpu::ops::linalg::ridge_decomposition_solve` with the
+MEMIT interpretation:
+
+```rust
+use larql_vindex::{memit_solve, MemitFact, MemitStore};
+
+let solve = memit_solve(&keys, &targets, lambda)?;
+//   solve.delta_w           — (d, d) weight update
+//   solve.decomposed[i]     — ΔW @ k_i   (one row per fact)
+//   solve.reconstruction_cos[i] — cos(ΔW k_i, t_i)
+//   solve.max_off_diagonal  — cross-template interference
+//   solve.frobenius_norm    — ‖ΔW‖_F
+
+let facts: Vec<MemitFact> = /* package decomposed pairs */;
+store.add_cycle(layer, facts, solve.frobenius_norm,
+                min_cos, solve.max_off_diagonal);
+```
+
+This is **vanilla** MEMIT — no covariance whitening. Cross-template
+bleed grows with N when keys share a dominant direction (the canonical-
+form template case from exp 8). For production weight edits with C⁻¹
+whitening + per-fact optimised target deltas (the validated v11 200/200
+pipeline), use `larql-inference::forward::memit`.
+
+| Run | Command |
+|-----|---------|
+| Demo | `cargo run --release -p larql-vindex --example demo_memit_solve` |
+| Bench | `cargo bench -p larql-vindex --bench memit_solve` |
+
 ## Compute Integration
 
 | Module | Operation | Backend |

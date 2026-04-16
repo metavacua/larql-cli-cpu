@@ -33,7 +33,6 @@ extern crate blas_src;
 
 pub mod backend;
 pub mod cpu;
-pub mod memit;
 pub mod pipeline;
 
 #[cfg(feature = "metal")]
@@ -52,6 +51,7 @@ pub use pipeline::{
 pub use backend::{ComputeBackend, MatMulOp, dot_proj_gpu, matmul_gpu};
 pub use cpu::CpuBackend;
 pub use cpu::ops::vector::{dot, norm, cosine};
+pub use cpu::ops::linalg::{cholesky, cholesky_solve, cholesky_inverse, ridge_decomposition_solve};
 
 #[cfg(feature = "metal")]
 pub use metal::MetalBackend;
