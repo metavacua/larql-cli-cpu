@@ -449,7 +449,13 @@ impl Session {
             collect_memit_facts_with_recording(patched, vindex_path, &recording_ops)?;
 
         let mut out = Vec::new();
-        if !memit_facts.is_empty() {
+        // MEMIT is opt-in via `LARQL_MEMIT_ENABLE=1`; see the matching
+        // block in the COMPILE INTO VINDEX path for the rationale.
+        let memit_enabled = std::env::var("LARQL_MEMIT_ENABLE")
+            .ok()
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if !memit_facts.is_empty() && memit_enabled {
             let tokenizer = larql_vindex::load_vindex_tokenizer(vindex_path)
                 .map_err(|e| LqlError::exec("failed to load tokenizer", e))?;
 
@@ -605,21 +611,30 @@ impl Session {
         // column-replace bake of gate/up/down overlays, matching the
         // pre-MEMIT behaviour used by unit tests that exercise the bake
         // path without shipping a real model.
-        let memit_disabled = std::env::var("LARQL_MEMIT_DISABLE")
+        // MEMIT is opt-in via `LARQL_MEMIT_ENABLE=1`. It is validated
+        // on v11 (200/200) but cross-hijacks natives on Gemma 3-4B at
+        // every layer tested: the hourglass plateau (L6-L28) makes
+        // template-sharing k_stars indistinguishable, so the closed-
+        // form solve cannot separate installs from natives. Pure
+        // compose column-replace is the default COMPILE path and is
+        // what produces the working Gemma installs.
+        let memit_enabled = std::env::var("LARQL_MEMIT_ENABLE")
             .ok()
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-        let memit_results = if !memit_facts.is_empty() && config.has_model_weights && !memit_disabled {
+        let memit_results = if !memit_facts.is_empty() && config.has_model_weights && memit_enabled {
             let mut cb = larql_vindex::SilentLoadCallbacks;
             let weights = larql_vindex::load_model_weights(path, &mut cb)
                 .map_err(|e| LqlError::exec("load weights for MEMIT", e))?;
             let tokenizer = larql_vindex::load_vindex_tokenizer(path)
                 .map_err(|e| LqlError::exec("load tokenizer for MEMIT", e))?;
-            // LARQL_MEMIT_TARGET_DELTA=1 switches MEMIT from the
-            // `target_alpha × embed(target)` shortcut to the
-            // per-fact gradient-optimised delta (Python reference
-            // Phase 3 + Phase 4). Slow (60 Adam steps/fact) but
-            // unlocks the scale ceiling.
+            // `LARQL_MEMIT_TARGET_DELTA=1` switches MEMIT from the
+            // `target_alpha × embed(target)` shortcut to the per-fact
+            // gradient-optimised delta (Python reference Phase 3 +
+            // Phase 4). Slow (60 Adam steps/fact) but unlocks scale.
+            // `LARQL_MEMIT_SPREAD=N` distributes each fact across N
+            // consecutive layers centred on its install layer.
+            // `LARQL_MEMIT_RIDGE=f` overrides the solve's ridge term.
             let use_target_delta = std::env::var("LARQL_MEMIT_TARGET_DELTA")
                 .ok()
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -632,17 +647,14 @@ impl Session {
                 .ok()
                 .and_then(|v| v.parse::<f64>().ok())
                 .unwrap_or(0.1);
-            let template_decoys =
-                build_template_decoys(patched, path, &recording_ops)?;
             let results = if use_target_delta {
-                larql_inference::forward::memit::run_memit_with_target_opt_multi_ex(
+                larql_inference::forward::memit::run_memit_with_target_opt_multi(
                     &weights,
                     &memit_facts,
                     ridge,
                     larql_inference::TargetDeltaOpts::default(),
                     &tokenizer,
                     spread,
-                    &template_decoys,
                 )
             } else {
                 larql_inference::run_memit(
@@ -767,15 +779,11 @@ impl Session {
         // This is the primary compile path: at N≤10 per layer it
         // produces working retrieval in the compiled vindex.
         //
-        // MEMIT ΔW_down is applied as an ADDITIONAL layer on top of
-        // this bake (see apply_memit_deltas_to_down_weights below).
-        // At current parameters (target_alpha=5, ridge=0.1) MEMIT's
-        // delta is tuned too conservatively to produce retrieval on
-        // its own — its role here is to add a distributed write-back
-        // signal that complements the column-replace for the
-        // safetensors export path. For N>>10 scale with MEMIT as
-        // primary, the delta strength needs per-model tuning
-        // (tracked as task #38 / #41).
+        // When MEMIT is enabled (LARQL_MEMIT_ENABLE=1) the ΔW_down is
+        // applied as an ADDITIONAL layer on top of this bake (see
+        // apply_memit_deltas_to_down_weights below). MEMIT is disabled
+        // by default because on Gemma it corrupts template-sharing
+        // natives; it remains opt-in for v11 where it is validated.
         if down_overrides.is_empty() {
             let src = path.join("down_weights.bin");
             let dst = output_dir.join("down_weights.bin");
@@ -1092,174 +1100,10 @@ impl Session {
 
 // ── COMPILE INTO MODEL: collect MEMIT facts from patch overlay ──
 
-/// Extract INSERT operations from the patch overlay and convert them
-/// into `MemitFact` descriptors for the MEMIT weight-edit solve.
-///
-/// Each INSERT carries entity, relation, target, and layer. We
-/// synthesise a canonical prompt ("The {relation} of {entity} is"),
-/// tokenise it (with BOS), and look up the target token ID — the
-/// same approach as the INSERT executor in mutation.rs.
-fn collect_memit_facts(
-    patched: &larql_vindex::PatchedVindex,
-    vindex_path: &std::path::Path,
-) -> Result<Vec<larql_inference::MemitFact>, crate::error::LqlError> {
-    collect_memit_facts_with_recording(patched, vindex_path, &[])
-}
-
 /// Collect MEMIT facts from BOTH applied patches on the PatchedVindex
 /// AND the in-memory `patch_recording` of the current session.
 /// Live INSERT ops go to `patch_recording` until SAVE PATCH; MEMIT
 /// needs to see them for COMPILE to bake the uncommitted edits.
-/// Common entities to substitute into the INSERT template at
-/// covariance-estimation time. Each forms a template-matched decoy
-/// prompt ("The {relation} of {common_entity} is"), ensuring MEMIT's
-/// ΔW_down lands in the null-space of the full template family. Without
-/// this, a single install hijacks every sibling prompt that shares the
-/// template (France/Germany native retrieval breaks when fictional
-/// capitals are installed).
-const MEMIT_TEMPLATE_DECOY_ENTITIES: &[&str] = &[
-    // Major countries — well-represented in Gemma's training
-    "France", "Germany", "Italy", "Spain", "Britain",
-    "Japan", "China", "India", "Russia", "Brazil",
-    "Egypt", "Greece", "Portugal", "Austria", "Poland",
-    "Sweden", "Norway", "Finland", "Canada", "Mexico",
-    "Argentina", "Chile", "Peru", "Turkey", "Iran",
-    "Australia", "Thailand", "Vietnam", "Indonesia", "Malaysia",
-    "Philippines", "Pakistan", "Bangladesh", "Nigeria", "Kenya",
-    "Ethiopia", "Ghana", "Morocco", "Algeria", "Tunisia",
-    "Colombia", "Venezuela", "Ecuador", "Bolivia", "Paraguay",
-    "Uruguay", "Cuba", "Jamaica", "Haiti", "Guatemala",
-    "Honduras", "Panama", "Denmark", "Belgium", "Netherlands",
-    "Switzerland", "Ireland", "Scotland", "Wales", "Iceland",
-    "Hungary", "Romania", "Bulgaria", "Serbia", "Croatia",
-    "Slovenia", "Slovakia", "Lithuania", "Latvia", "Estonia",
-    "Ukraine", "Belarus", "Georgia", "Armenia", "Azerbaijan",
-    "Kazakhstan", "Uzbekistan", "Mongolia", "Nepal", "Myanmar",
-    "Cambodia", "Laos", "Singapore", "Taiwan", "Korea",
-    "Iraq", "Syria", "Jordan", "Lebanon", "Israel",
-    "Libya", "Sudan", "Tanzania", "Uganda", "Rwanda",
-    "Mozambique", "Zimbabwe", "Zambia", "Angola", "Cameroon",
-    "Madagascar", "Senegal", "Mali", "Niger", "Chad",
-    // Major cities — different entity class, same template
-    "London", "Paris", "Berlin", "Tokyo", "Beijing",
-    "Moscow", "Rome", "Madrid", "Lisbon", "Vienna",
-    "Prague", "Warsaw", "Budapest", "Athens", "Istanbul",
-    "Cairo", "Lagos", "Nairobi", "Mumbai", "Delhi",
-    "Bangkok", "Jakarta", "Manila", "Seoul", "Sydney",
-    "Melbourne", "Toronto", "Vancouver", "Montreal", "Chicago",
-    "Boston", "Miami", "Houston", "Dallas", "Phoenix",
-    "Denver", "Seattle", "Portland", "Detroit", "Atlanta",
-    "Edinburgh", "Dublin", "Oslo", "Stockholm", "Helsinki",
-    "Copenhagen", "Amsterdam", "Brussels", "Zurich", "Geneva",
-    "Barcelona", "Milan", "Naples", "Munich", "Hamburg",
-    "Lyon", "Marseille", "Osaka", "Kyoto", "Shanghai",
-    "Guangzhou", "Shenzhen", "Taipei", "Hanoi", "Manila",
-    "Karachi", "Dhaka", "Lima", "Bogota", "Santiago",
-    // People — further diversifies template-family activations
-    "Einstein", "Newton", "Darwin", "Shakespeare", "Mozart",
-    "Beethoven", "Picasso", "Napoleon", "Caesar", "Aristotle",
-    "Plato", "Socrates", "Galileo", "Copernicus", "Tesla",
-    "Edison", "Curie", "Pasteur", "Fleming", "Turing",
-    "Euclid", "Pythagoras", "Archimedes", "Descartes", "Leibniz",
-    "Bach", "Handel", "Chopin", "Tchaikovsky", "Wagner",
-    "Tolstoy", "Dostoevsky", "Dickens", "Hemingway", "Twain",
-    "Homer", "Virgil", "Dante", "Cervantes", "Goethe",
-    "Rembrandt", "Michelangelo", "Leonardo", "Raphael", "Monet",
-    "Columbus", "Magellan", "Vespucci", "Drake", "Cook",
-    // Organisations / institutions
-    "Microsoft", "Google", "Apple", "Amazon", "Tesla",
-    "Toyota", "Samsung", "Nintendo", "Sony", "Honda",
-    "Boeing", "Airbus", "Siemens", "Volkswagen", "Mercedes",
-    "Harvard", "Oxford", "Cambridge", "Stanford", "MIT",
-    // Abstract / generic nouns
-    "water", "fire", "earth", "iron", "gold",
-    "silver", "copper", "carbon", "oxygen", "nitrogen",
-    "hydrogen", "helium", "mercury", "uranium", "silicon",
-    "diamond", "marble", "granite", "limestone", "sandstone",
-    "wheat", "rice", "corn", "cotton", "sugar",
-    "coffee", "chocolate", "vanilla", "cinnamon", "pepper",
-    "oak", "maple", "pine", "cedar", "bamboo",
-    "salmon", "eagle", "dolphin", "elephant", "tiger",
-    "wolf", "bear", "lion", "whale", "shark",
-    "python", "cobra", "falcon", "sparrow", "robin",
-];
-
-/// Build template-matched decoy prompts for the MEMIT covariance set.
-/// For each distinct (relation) in the collected facts, synthesises
-/// "The {relation} of {entity} is" for every common entity.
-fn build_template_decoys(
-    patched: &larql_vindex::PatchedVindex,
-    vindex_path: &std::path::Path,
-    recording_ops: &[larql_vindex::PatchOp],
-) -> Result<Vec<Vec<u32>>, crate::error::LqlError> {
-    let tokenizer = larql_vindex::load_vindex_tokenizer(vindex_path)
-        .map_err(|e| crate::error::LqlError::exec("load tokenizer for decoys", e))?;
-
-    let mut relations: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut fact_entities: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    let mut collect_op = |op: &larql_vindex::PatchOp| {
-        if let larql_vindex::PatchOp::Insert { relation, entity, .. } = op {
-            if let Some(r) = relation.as_deref() {
-                relations.insert(r.to_string());
-            }
-            fact_entities.insert(entity.clone());
-        }
-    };
-    for p in &patched.patches {
-        for op in &p.operations {
-            collect_op(op);
-        }
-    }
-    for op in recording_ops {
-        collect_op(op);
-    }
-
-    let mut out = Vec::new();
-    let mut push_prompt = |out: &mut Vec<Vec<u32>>, prompt: &str| {
-        if let Ok(enc) = tokenizer.encode(prompt, true) {
-            out.push(enc.get_ids().to_vec());
-        }
-    };
-
-    // Template-matched decoys: the installed-relation × common-entity grid.
-    for rel in &relations {
-        let rel_words = rel.replace(['-', '_'], " ");
-        for entity in MEMIT_TEMPLATE_DECOY_ENTITIES {
-            if fact_entities.contains(&entity.to_string()) {
-                continue;
-            }
-            let prompt = format!("The {rel_words} of {entity} is");
-            push_prompt(&mut out, &prompt);
-        }
-    }
-
-    // Vindex-native prompts: every (entity, relation) in the KnnStore
-    // already present on the vindex (capped to keep compile time
-    // bounded). Matches Python MEMIT's "first 2000 vindex prompts"
-    // covariance source — without these, C is rank-deficient and the
-    // ridge dominates, collapsing every template-family prompt onto
-    // the installed payload.
-    const MAX_VINDEX_COV_PROMPTS: usize = 2000;
-    let mut harvested = 0usize;
-    let knn_entries = patched.knn_store.entries();
-    'outer: for entries in knn_entries.values() {
-        for entry in entries {
-            if harvested >= MAX_VINDEX_COV_PROMPTS {
-                break 'outer;
-            }
-            if fact_entities.contains(&entry.entity) {
-                continue;
-            }
-            let rel_words = entry.relation.replace(['-', '_'], " ");
-            let prompt = format!("The {rel_words} of {} is", entry.entity);
-            push_prompt(&mut out, &prompt);
-            harvested += 1;
-        }
-    }
-
-    Ok(out)
-}
 
 fn collect_memit_facts_with_recording(
     patched: &larql_vindex::PatchedVindex,
@@ -1272,7 +1116,7 @@ fn collect_memit_facts_with_recording(
     let mut facts = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
-    let mut push_fact = |op: &larql_vindex::PatchOp,
+    let push_fact = |op: &larql_vindex::PatchOp,
                          facts: &mut Vec<larql_inference::MemitFact>,
                          seen: &mut std::collections::HashSet<_>|
      -> Result<(), crate::error::LqlError> {

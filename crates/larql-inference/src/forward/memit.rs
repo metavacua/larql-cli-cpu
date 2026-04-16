@@ -144,23 +144,6 @@ pub fn run_memit_with_target_opt_multi(
     tokenizer: &tokenizers::Tokenizer,
     spread: usize,
 ) -> Result<Vec<MemitResult>, String> {
-    run_memit_with_target_opt_multi_ex(weights, facts, ridge, td_opts, tokenizer, spread, &[])
-}
-
-/// As `run_memit_with_target_opt_multi` but accepts extra tokenized
-/// template-matched decoy prompts. These are added to the covariance
-/// set so ΔW_down is driven into the null-space of the template
-/// family (e.g. "The capital of X is" with many X), preventing the
-/// installed fact from hijacking unrelated siblings.
-pub fn run_memit_with_target_opt_multi_ex(
-    weights: &ModelWeights,
-    facts: &[MemitFact],
-    ridge: f64,
-    td_opts: crate::forward::target_delta::TargetDeltaOpts,
-    tokenizer: &tokenizers::Tokenizer,
-    spread: usize,
-    template_decoys: &[Vec<u32>],
-) -> Result<Vec<MemitResult>, String> {
     if facts.is_empty() {
         return Ok(Vec::new());
     }
@@ -204,13 +187,12 @@ pub fn run_memit_with_target_opt_multi_ex(
         }
     }
 
-    run_memit_inner_ex(
+    run_memit_inner(
         weights,
         &expanded_facts,
         ridge,
         RSource::OptimisedDeltas(&expanded_deltas),
         tokenizer,
-        template_decoys,
     )
 }
 
@@ -227,13 +209,12 @@ pub fn run_memit(
     target_alpha: f32,
     tokenizer: &tokenizers::Tokenizer,
 ) -> Result<Vec<MemitResult>, String> {
-    run_memit_inner_ex(
+    run_memit_inner(
         weights,
         facts,
         ridge,
         RSource::EmbedShortcut(target_alpha),
         tokenizer,
-        &[],
     )
 }
 
@@ -245,13 +226,12 @@ enum RSource<'a> {
     OptimisedDeltas(&'a [Array1<f32>]),
 }
 
-fn run_memit_inner_ex(
+fn run_memit_inner(
     weights: &ModelWeights,
     facts: &[MemitFact],
     ridge: f64,
     r_source: RSource<'_>,
     tokenizer: &tokenizers::Tokenizer,
-    template_decoys: &[Vec<u32>],
 ) -> Result<Vec<MemitResult>, String> {
     if facts.is_empty() {
         return Ok(Vec::new());
@@ -264,9 +244,7 @@ fn run_memit_inner_ex(
         by_layer.entry(fact.layer).or_default().push(fact);
     }
 
-    // Tokenise covariance prompts once — generic corpus sampling +
-    // any per-call template-matched decoys passed in.
-    let mut cov_tokens: Vec<Vec<u32>> = COVARIANCE_PROMPTS
+    let cov_tokens: Vec<Vec<u32>> = COVARIANCE_PROMPTS
         .iter()
         .filter_map(|p| {
             tokenizer
@@ -275,7 +253,6 @@ fn run_memit_inner_ex(
                 .map(|e| e.get_ids().to_vec())
         })
         .collect();
-    cov_tokens.extend_from_slice(template_decoys);
 
     let mut results = Vec::new();
 
@@ -342,15 +319,6 @@ fn memit_solve_layer(
     let ffn_dim = weights.intermediate_size;
 
     // ── Step 1: Estimate covariance C at this layer ──
-    //
-    // Template-matched decoys: for each installed fact's prompt, we
-    // include prompts that share its structural form but differ in
-    // entity — e.g. "The capital of X is" substituting X with the
-    // OTHER facts' entities. These force ΔW into the null-space of
-    // the full template family, not just generic text. Without this,
-    // a single ΔW hijacks every "The capital of X is" prompt with
-    // the same target (observed as France/Germany → installed-target
-    // instead of Paris/Berlin). Matches Python reference exp 14.
     let mut cov_tokens_full: Vec<Vec<u32>> = cov_tokens.to_vec();
     cov_tokens_full.extend(facts.iter().map(|f| f.prompt_tokens.clone()));
 

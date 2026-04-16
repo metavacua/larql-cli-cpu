@@ -71,7 +71,7 @@ pub use patch::knn_store::{KnnStore, KnnEntry};
 pub use patch::refine::{refine_gates, RefineInput, RefineResult, RefinedGate};
 
 // Storage engine
-pub use storage::{StorageEngine, Epoch, CompactStatus};
+pub use storage::{StorageEngine, Epoch, CompactStatus, MemitStore, MemitCycle, MemitFact};
 
 // Vindexfile
 pub use vindexfile::{Vindexfile, VindexfileDirective, VindexfileStage, parse_vindexfile, build_from_vindexfile};

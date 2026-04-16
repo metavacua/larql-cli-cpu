@@ -1,5 +1,6 @@
 use crate::patch::core::PatchedVindex;
 use super::epoch::Epoch;
+use super::memit_store::MemitStore;
 use super::status::CompactStatus;
 
 const MEMIT_MIN_HIDDEN_DIM: usize = 1024;
@@ -9,6 +10,7 @@ pub struct StorageEngine {
     epoch: Epoch,
     mutations_since_minor: usize,
     mutations_since_major: usize,
+    memit_store: MemitStore,
 }
 
 impl StorageEngine {
@@ -18,6 +20,7 @@ impl StorageEngine {
             epoch: Epoch::zero(),
             mutations_since_minor: 0,
             mutations_since_major: 0,
+            memit_store: MemitStore::new(),
         }
     }
 
@@ -43,6 +46,14 @@ impl StorageEngine {
         self.mutations_since_major += 1;
     }
 
+    pub fn memit_store(&self) -> &MemitStore {
+        &self.memit_store
+    }
+
+    pub fn memit_store_mut(&mut self) -> &mut MemitStore {
+        &mut self.memit_store
+    }
+
     pub fn supports_memit(&self) -> bool {
         self.patched.hidden_size() >= MEMIT_MIN_HIDDEN_DIM
     }
@@ -62,8 +73,8 @@ impl StorageEngine {
             l0_tombstones: 0, // tombstone tracking added in Phase 7
             l1_edges,
             l1_layers_used: l1_layers.len(),
-            l2_facts: 0,    // MEMIT store added in Phase 4
-            l2_cycles: 0,
+            l2_facts: self.memit_store.total_facts(),
+            l2_cycles: self.memit_store.num_cycles(),
             base_layers: self.patched.num_layers(),
             base_features_per_layer: if self.patched.num_layers() > 0 {
                 self.patched.num_features(0)

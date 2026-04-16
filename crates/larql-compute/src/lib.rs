@@ -33,6 +33,7 @@ extern crate blas_src;
 
 pub mod backend;
 pub mod cpu;
+pub mod memit;
 pub mod pipeline;
 
 #[cfg(feature = "metal")]

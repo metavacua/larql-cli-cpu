@@ -1,4 +1,4 @@
-//! Lifecycle statement parsers: EXTRACT, COMPILE, DIFF, USE
+//! Lifecycle statement parsers: EXTRACT, COMPILE, DIFF, USE, COMPACT
 
 use crate::ast::*;
 use crate::lexer::Keyword;
@@ -188,5 +188,58 @@ impl Parser {
 
         self.eat_semicolon();
         Ok(Statement::Use { target })
+    }
+
+    /// `COMPACT MINOR;`
+    /// `COMPACT MAJOR [FULL] [WITH LAMBDA = <f>];`
+    pub(crate) fn parse_compact(&mut self) -> Result<Statement, ParseError> {
+        self.expect_keyword(Keyword::Compact)?;
+        match self.peek() {
+            crate::lexer::Token::Ident(ref s) if s.eq_ignore_ascii_case("MINOR") => {
+                self.advance();
+                self.eat_semicolon();
+                Ok(Statement::CompactMinor)
+            }
+            crate::lexer::Token::Ident(ref s) if s.eq_ignore_ascii_case("MAJOR") => {
+                self.advance();
+                let full = match self.peek() {
+                    crate::lexer::Token::Keyword(Keyword::All) => {
+                        // COMPACT MAJOR FULL — we reuse ALL since FULL isn't a keyword yet
+                        self.advance();
+                        true
+                    }
+                    crate::lexer::Token::Ident(ref s) if s.eq_ignore_ascii_case("FULL") => {
+                        self.advance();
+                        true
+                    }
+                    _ => false,
+                };
+                let lambda = if self.check_keyword(Keyword::With) {
+                    self.advance();
+                    // WITH LAMBDA = <f> or WITH lambda = <f>
+                    match self.peek() {
+                        crate::lexer::Token::Ident(ref s) if s.eq_ignore_ascii_case("LAMBDA") => {
+                            self.advance();
+                            if !matches!(self.peek(), crate::lexer::Token::Eq) {
+                                return Err(ParseError("expected '=' after LAMBDA".into()));
+                            }
+                            self.advance();
+                            Some(self.expect_f32()?)
+                        }
+                        _ => {
+                            return Err(ParseError("expected LAMBDA after WITH in COMPACT MAJOR".into()));
+                        }
+                    }
+                } else {
+                    None
+                };
+                self.eat_semicolon();
+                Ok(Statement::CompactMajor { full, lambda })
+            }
+            _ => Err(ParseError(format!(
+                "expected MINOR or MAJOR after COMPACT, got {:?}",
+                self.peek(),
+            ))),
+        }
     }
 }

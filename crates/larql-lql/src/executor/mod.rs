@@ -3,6 +3,7 @@
 //! The base vindex is always readonly. All mutations go through a patch overlay.
 //! INSERT/DELETE/UPDATE auto-start an anonymous patch session if none is active.
 
+mod compact;
 mod helpers;
 mod introspection;
 mod lifecycle;
@@ -197,6 +198,8 @@ impl Session {
             }
             Statement::ShowModels => self.exec_show_models(),
             Statement::ShowCompactStatus => self.exec_show_compact_status(),
+            Statement::CompactMinor => self.exec_compact_minor(),
+            Statement::CompactMajor { full, lambda } => self.exec_compact_major(*full, *lambda),
             Statement::Extract { model, output, components, layers, extract_level } => {
                 self.exec_extract(model, output, components.as_deref(), layers.as_ref(), *extract_level)
             }

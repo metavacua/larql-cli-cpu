@@ -1085,6 +1085,38 @@ fn parse_show_compact_status_no_semicolon() {
     assert!(matches!(stmt, Statement::ShowCompactStatus));
 }
 
+// ── COMPACT ──
+
+#[test]
+fn parse_compact_minor() {
+    let stmt = parse("COMPACT MINOR;").unwrap();
+    assert!(matches!(stmt, Statement::CompactMinor));
+}
+
+#[test]
+fn parse_compact_major() {
+    let stmt = parse("COMPACT MAJOR;").unwrap();
+    assert!(matches!(stmt, Statement::CompactMajor { full: false, lambda: None }));
+}
+
+#[test]
+fn parse_compact_major_full() {
+    let stmt = parse("COMPACT MAJOR FULL;").unwrap();
+    assert!(matches!(stmt, Statement::CompactMajor { full: true, lambda: None }));
+}
+
+#[test]
+fn parse_compact_major_with_lambda() {
+    let stmt = parse("COMPACT MAJOR WITH LAMBDA = 0.001;").unwrap();
+    match stmt {
+        Statement::CompactMajor { full, lambda } => {
+            assert!(!full);
+            assert!((lambda.unwrap() - 0.001).abs() < 1e-6);
+        }
+        _ => panic!("expected CompactMajor"),
+    }
+}
+
 // ── STATS ──
 
 #[test]

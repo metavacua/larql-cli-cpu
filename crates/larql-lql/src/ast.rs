@@ -146,6 +146,11 @@ pub enum Statement {
         vindex: Option<String>,
     },
     ShowCompactStatus,
+    CompactMinor,
+    CompactMajor {
+        full: bool,
+        lambda: Option<f32>,
+    },
 
     // ── Patch ──
     BeginPatch {

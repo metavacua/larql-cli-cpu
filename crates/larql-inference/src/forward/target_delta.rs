@@ -56,7 +56,7 @@
 //! fact in pure Rust; `run_memit` calls it and feeds the optimised
 //! deltas into `rome_batch_update` as V*.
 
-use ndarray::{Array1, Array2, ArrayView1, ArrayView2, Axis};
+use ndarray::{Array1, ArrayView1, ArrayView2};
 
 use crate::model::ModelWeights;
 
@@ -117,7 +117,7 @@ pub struct TargetDelta {
 pub(crate) fn cross_entropy_and_grad(logits: ArrayView1<f32>, target_id: u32) -> (f32, Array1<f32>) {
     // Numerically stable log-softmax
     let max = logits.fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-    let shifted: Array1<f32> = logits.map(|&v| (v - max));
+    let shifted: Array1<f32> = logits.map(|&v| v - max);
     let exp_sum: f32 = shifted.iter().map(|v| v.exp()).sum();
     let log_sum = exp_sum.ln();
     let loss = -(shifted[target_id as usize] - log_sum);
@@ -203,6 +203,7 @@ pub(crate) fn rmsnorm_backward_pos(
 ///   silu'(z) = σ(z) · (1 + z · (1 - σ(z)))
 ///   d_g_pre = d_g * silu'(g_pre)
 ///   d_x = gate_w.T @ d_g_pre + up_w.T @ d_u
+#[allow(dead_code)] // reserved primitive for mid-layer target-delta; FD-tested
 pub(crate) fn gated_ffn_backward(
     x: ArrayView1<f32>,
     gate_w: ArrayView2<f32>,
