@@ -96,6 +96,14 @@ struct Cli {
     /// for the same layer before the rebalancer acts.
     #[arg(long, default_value = "2.0")]
     rebalance_threshold: f32,
+
+    /// Phase 4: number of replicas to maintain per shard range.
+    /// 1 = no replication (default). >1 enables auto-replication: when fewer
+    /// than N servers cover a range, the router pulls from the available
+    /// pool to bring the count back up; when more than N cover it, the
+    /// rebalancer drops the least-loaded one.
+    #[arg(long, default_value = "1")]
+    target_replicas: u32,
 }
 
 // ── Static shard map ───────────────────────────────────────────────────────────
@@ -552,6 +560,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
 
     if let (Some(grid_port), Some(state)) = (cli.grid_port, &grid_state) {
+        // Phase 4: install target_replicas before any servers register so
+        // the first under-/over-replication check sees the right target.
+        state.write().await.set_target_replicas(cli.target_replicas);
+        if cli.target_replicas > 1 {
+            info!(target_replicas = cli.target_replicas, "Replication: enabled");
+        }
+
         let svc = GridServiceServer::new(GridServiceImpl::new_with_key(
             state.clone(),
             cli.grid_key.clone(),

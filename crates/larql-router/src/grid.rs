@@ -26,6 +26,9 @@ pub struct ServerEntry {
     pub model_id: String,
     pub layer_start: u32, // inclusive
     pub layer_end: u32,   // inclusive
+    /// `vindex_hash` from `AnnounceMsg`. Used as the `shard_hash` when this
+    /// server is selected as a Mode B origin for a different replica.
+    pub vindex_hash: String,
     pub cpu_pct: f32,
     pub ram_used: u64,
     pub requests_in_flight: u32,
@@ -50,7 +53,6 @@ pub struct AvailableEntry {
 
 // ── Grid state ────────────────────────────────────────────────────────────────
 
-#[derive(Default)]
 pub struct GridState {
     servers: HashMap<String, ServerEntry>,
     // Pre-built: (model_id, layer) → server_ids; rebuilt only on topology change.
@@ -64,6 +66,25 @@ pub struct GridState {
     /// Used by the rebalancer to push UnassignMsg without holding a lock.
     /// Key = server_id.
     serving_senders: HashMap<String, mpsc::Sender<Result<RouterMessage, tonic::Status>>>,
+    /// Phase 4: number of replicas the router tries to maintain per
+    /// `(model_id, layer_start, layer_end)` shard range. Default 1 — every
+    /// range needs exactly one server. >1 enables auto-replication: when
+    /// fewer than N servers cover a range, the router pulls from the
+    /// available pool to bring the count back up.
+    target_replicas: u32,
+}
+
+impl Default for GridState {
+    fn default() -> Self {
+        Self {
+            servers: HashMap::new(),
+            route_table: HashMap::new(),
+            any_model_table: HashMap::new(),
+            available_servers: HashMap::new(),
+            serving_senders: HashMap::new(),
+            target_replicas: 1,
+        }
+    }
 }
 
 impl GridState {
@@ -219,6 +240,19 @@ impl GridState {
         self.servers.iter()
     }
 
+    /// Return IDs of serving servers whose `last_seen` is older than `timeout`.
+    /// Stream-close already triggers deregister via the gRPC handler; this
+    /// covers the case where a server keeps the stream open but stops sending
+    /// heartbeats (deadlock, GC pause, etc.).
+    pub fn stale_server_ids(&self, timeout: std::time::Duration) -> Vec<String> {
+        let now = Instant::now();
+        self.servers
+            .iter()
+            .filter(|(_, e)| now.saturating_duration_since(e.last_seen) > timeout)
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
     /// Returns true if there is at least one available server in the Mode B pool.
     pub fn has_available_servers(&self) -> bool {
         !self.available_servers.is_empty()
@@ -264,11 +298,65 @@ impl GridState {
         self.available_servers.remove(server_id);
     }
 
-    /// Find the first available server that has at least `min_ram_bytes` of
-    /// RAM, send it an `AssignMsg`, and move it out of the available pool.
+    /// Find any currently-serving replica that covers `[layer_start, layer_end]`
+    /// of `model_id` and return its (`listen_url`, `vindex_hash`).
     ///
-    /// Returns `true` if an assignment was sent.
+    /// Returns `None` when no live replica exists — a gap with no surviving
+    /// origin cannot be filled from within the grid; the deployment must supply
+    /// an external origin store.
+    pub fn find_origin_for(
+        &self,
+        model_id: &str,
+        layer_start: u32,
+        layer_end: u32,
+    ) -> Option<(String, String)> {
+        self.servers
+            .values()
+            .find(|e| {
+                e.model_id == model_id
+                    && e.layer_start <= layer_start
+                    && e.layer_end >= layer_end
+            })
+            .map(|e| (e.listen_url.clone(), e.vindex_hash.clone()))
+    }
+
+    /// Find the first available server that has at least `min_ram_bytes` of
+    /// RAM, resolve a serving origin, send it an `AssignMsg`, and move it out
+    /// of the available pool.
+    ///
+    /// Returns `true` if an assignment was sent. Returns `false` either when no
+    /// available server has enough RAM, or when no live replica is left to
+    /// serve as origin for the gap.
     pub fn try_assign_gap(
+        &mut self,
+        model_id: &str,
+        layer_start: u32,
+        layer_end: u32,
+        min_ram_bytes: u64,
+    ) -> bool {
+        let Some((origin_url, shard_hash)) =
+            self.find_origin_for(model_id, layer_start, layer_end)
+        else {
+            tracing::warn!(
+                model_id = %model_id,
+                layers = %format!("{layer_start}-{layer_end}"),
+                "Grid: cannot fill gap — no live replica to serve as origin"
+            );
+            return false;
+        };
+        self.try_assign_gap_with_origin(
+            model_id,
+            layer_start,
+            layer_end,
+            &origin_url,
+            &shard_hash,
+            min_ram_bytes,
+        )
+    }
+
+    /// Lower-level assign that takes an explicit origin. Used by tests and by
+    /// deployments that supply an external (non-grid) origin store.
+    pub fn try_assign_gap_with_origin(
         &mut self,
         model_id: &str,
         layer_start: u32,
@@ -303,6 +391,7 @@ impl GridState {
                 server_id = %server_id,
                 model_id = %model_id,
                 layers = %format!("{layer_start}-{layer_end}"),
+                origin_url = %origin_url,
                 "Grid: Mode B assignment sent"
             );
             true
@@ -310,6 +399,113 @@ impl GridState {
             tracing::warn!(server_id = %server_id, "Grid: Mode B assignment send failed (peer disconnected)");
             false
         }
+    }
+
+    /// Phase 4: configure how many replicas the router maintains per shard
+    /// range. Setter so the value can come from CLI in main.rs.
+    pub fn set_target_replicas(&mut self, n: u32) {
+        // 0 would mean "no servers"; clamp to ≥1.
+        self.target_replicas = n.max(1);
+    }
+
+    /// Current target_replicas value (read-only).
+    pub fn target_replicas(&self) -> u32 {
+        self.target_replicas
+    }
+
+    /// Phase 4: ranges that currently have more than `target_replicas`
+    /// distinct serving servers. Returns `(model_id, layer_start, layer_end,
+    /// surplus)` — surplus is the number of servers above the target.
+    pub fn over_replicated_ranges(&self) -> Vec<(String, u32, u32, u32)> {
+        let mut counts: HashMap<(String, u32, u32), u32> = HashMap::new();
+        for e in self.servers.values() {
+            *counts
+                .entry((e.model_id.clone(), e.layer_start, e.layer_end))
+                .or_default() += 1;
+        }
+        let mut out = Vec::new();
+        for ((model_id, start, end), count) in counts {
+            if count > self.target_replicas {
+                out.push((model_id, start, end, count - self.target_replicas));
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// Phase 4: among servers covering `(model_id, layer_start, layer_end)`,
+    /// return the one with the lowest `requests_in_flight`. Used by the
+    /// over-replication path to pick which replica to drop.
+    pub fn least_loaded_in_range(
+        &self,
+        model_id: &str,
+        layer_start: u32,
+        layer_end: u32,
+    ) -> Option<&ServerEntry> {
+        self.servers
+            .values()
+            .filter(|e| e.model_id == model_id && e.layer_start == layer_start && e.layer_end == layer_end)
+            .min_by_key(|e| e.requests_in_flight)
+    }
+
+    /// Phase 4: ranges that currently have fewer than `target_replicas`
+    /// distinct serving servers. Returns `(model_id, layer_start, layer_end,
+    /// deficit)` per unique shard range. Skips ranges that have zero
+    /// servers — those are handled by `coverage_gaps()` / `try_fill_all_gaps()`
+    /// because they need a different origin-resolution story (no live
+    /// replica → no origin).
+    pub fn under_replicated_ranges(&self) -> Vec<(String, u32, u32, u32)> {
+        // Group by (model_id, layer_start, layer_end) → count of servers.
+        let mut counts: HashMap<(String, u32, u32), u32> = HashMap::new();
+        for e in self.servers.values() {
+            *counts
+                .entry((e.model_id.clone(), e.layer_start, e.layer_end))
+                .or_default() += 1;
+        }
+        let mut out = Vec::new();
+        for ((model_id, start, end), count) in counts {
+            if count > 0 && count < self.target_replicas {
+                out.push((model_id, start, end, self.target_replicas - count));
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// Phase 4: walk under-replicated ranges and dispatch one `AssignMsg`
+    /// per range to bring counts closer to `target_replicas`. Returns the
+    /// number of assignments sent.
+    ///
+    /// At most one assignment per range per call — a newly-assigned replica
+    /// won't register as serving until `ReadyMsg` arrives, so issuing more
+    /// than one assignment per range here would over-replicate. Callers run
+    /// this periodically (rebalancer) or after Ready/Available events.
+    pub fn try_replicate_from_available(&mut self) -> usize {
+        let ranges = self.under_replicated_ranges();
+        let mut sent = 0;
+        for (model_id, start, end, _deficit) in ranges {
+            if self.try_assign_gap(&model_id, start, end, 0) {
+                sent += 1;
+            }
+        }
+        sent
+    }
+
+    /// Scan current coverage gaps and try to fill each one from the available
+    /// pool. Returns the number of assignments sent.
+    pub fn try_fill_all_gaps(&mut self) -> usize {
+        let gaps = self.coverage_gaps();
+        let mut sent = 0;
+        for (model_id, layer_start, layer_end) in gaps {
+            // RAM estimate: we don't have a true upper bound from the gap
+            // alone, so fall back to a permissive 0 (any available server is
+            // acceptable). Deployments that need RAM-aware placement should
+            // call try_assign_gap_with_origin directly with a real estimate.
+            if self.try_assign_gap(&model_id, layer_start, layer_end, 0) {
+                sent += 1;
+            }
+        }
+        sent
     }
 
     /// Return a list of (model_id, layer_start, layer_end) ranges that have no
@@ -523,7 +719,7 @@ impl GridService for GridServiceImpl {
                             layer_end,
                             ram_bytes,
                             listen_url,
-                            ..
+                            vindex_hash,
                         }) => {
                             let entry = ServerEntry {
                                 server_id: sid.clone(),
@@ -531,6 +727,7 @@ impl GridService for GridServiceImpl {
                                 model_id: model_id.clone(),
                                 layer_start,
                                 layer_end,
+                                vindex_hash,
                                 cpu_pct: 0.0,
                                 ram_used: ram_bytes,
                                 requests_in_flight: 0,
@@ -568,13 +765,33 @@ impl GridService for GridServiceImpl {
                                 reason = %d.reason,
                                 "Server dropping shard"
                             );
-                            state.write().await.deregister(&sid);
+                            // Drop the server and immediately try to fill any
+                            // freshly-exposed gap. After gap-fill, also check
+                            // whether the disappearance created under-
+                            // replication and pull spares for that too.
+                            let (filled, replicated) = {
+                                let mut guard = state.write().await;
+                                guard.deregister(&sid);
+                                let f = guard.try_fill_all_gaps();
+                                let r = guard.try_replicate_from_available();
+                                (f, r)
+                            };
+                            if filled > 0 || replicated > 0 {
+                                tracing::info!(
+                                    filled,
+                                    replicated,
+                                    "Grid: re-fill / re-replicate triggered by Dropping"
+                                );
+                            }
                             registered_model = None;
                         }
 
                         ServerPayload::Available(av) => {
                             // Mode B: server advertises capacity.
-                            // Register it, then check for coverage gaps to fill.
+                            // Register it, then try to use it for either a
+                            // coverage gap (zero replicas) or an
+                            // under-replicated range (replica count below
+                            // target_replicas).
                             state.write().await.register_available(
                                 sid.clone(),
                                 tx.clone(),
@@ -586,21 +803,36 @@ impl GridService for GridServiceImpl {
                             tracing::info!(
                                 server_id = %sid,
                                 ram_gb = av.ram_bytes / (1024 * 1024 * 1024),
-                                "Grid: Mode B server registered; checking gaps…"
+                                "Grid: Mode B server registered; checking gaps + replicas…"
                             );
-                            // Attempt to fill an existing coverage gap.
+
+                            // 1) Fill coverage gaps first (most urgent — gaps
+                            //    cause 503s; under-replicated ranges still
+                            //    serve traffic from the surviving replicas).
                             let gaps = state.read().await.coverage_gaps();
+                            let mut consumed = false;
                             for (model_id, layer_start, layer_end) in gaps {
                                 let assigned = state.write().await.try_assign_gap(
                                     &model_id,
                                     layer_start,
                                     layer_end,
-                                    "http://origin-placeholder:8090", // filled by config in GT5b
-                                    "0000000000000000",
                                     av.ram_bytes,
                                 );
                                 if assigned {
-                                    break; // one gap per available server
+                                    consumed = true;
+                                    break;
+                                }
+                            }
+                            // 2) If the spare wasn't used to fill a gap, try
+                            //    using it to satisfy under-replication.
+                            if !consumed {
+                                let replicated =
+                                    state.write().await.try_replicate_from_available();
+                                if replicated > 0 {
+                                    tracing::info!(
+                                        replicated,
+                                        "Grid: under-replicated range filled from new available server"
+                                    );
                                 }
                             }
                         }
@@ -608,12 +840,21 @@ impl GridService for GridServiceImpl {
                         ServerPayload::Ready(r) => {
                             // Mode B: server finished downloading + loading a shard.
                             // Register it as a serving shard and send Ack.
+                            //
+                            // vindex_hash is not present in ReadyMsg today (the
+                            // server only knows the hash advertised on the assign);
+                            // leave it empty for the freshly-loaded replica. This
+                            // means the new replica won't be chosen as a Mode B
+                            // origin for a further gap until its hash is known,
+                            // but that's fine — the surviving original replica
+                            // remains a valid origin.
                             let entry = ServerEntry {
                                 server_id: sid.clone(),
                                 listen_url: r.listen_url.clone(),
                                 model_id: r.model_id.clone(),
                                 layer_start: r.layer_start,
                                 layer_end: r.layer_end,
+                                vindex_hash: String::new(),
                                 cpu_pct: 0.0,
                                 ram_used: 0,
                                 requests_in_flight: 0,
@@ -653,9 +894,25 @@ impl GridService for GridServiceImpl {
                 }
             }
 
-            // Stream closed — clean up
+            // Stream closed — clean up. If a serving server vanished without
+            // a graceful DroppingMsg, gap re-fill + replication must still
+            // run because losing a replica may have introduced a gap or
+            // dropped the count below target_replicas.
             if registered_model.is_some() {
-                state.write().await.deregister(&sid);
+                let (filled, replicated) = {
+                    let mut guard = state.write().await;
+                    guard.deregister(&sid);
+                    let f = guard.try_fill_all_gaps();
+                    let r = guard.try_replicate_from_available();
+                    (f, r)
+                };
+                if filled > 0 || replicated > 0 {
+                    tracing::info!(
+                        filled,
+                        replicated,
+                        "Grid: re-fill / re-replicate triggered by disconnect"
+                    );
+                }
             }
             if is_available {
                 state.write().await.deregister_available(&sid);
@@ -693,6 +950,7 @@ mod tests {
             model_id: model_id.into(),
             layer_start,
             layer_end,
+            vindex_hash: format!("hash-{server_id}"),
             cpu_pct: 0.0,
             ram_used: 1024,
             requests_in_flight: 0,
@@ -873,6 +1131,227 @@ mod tests {
         let gaps = state.coverage_gaps();
         assert_eq!(gaps.len(), 1);
         assert_eq!(gaps[0], ("model-a".to_string(), 2, 2));
+    }
+
+    #[test]
+    fn all_shard_urls_deduplicates() {
+        let mut state = GridState::default();
+        // Two servers on the same listen_url (e.g. shared host); a third on a
+        // different one — must collapse to two unique entries.
+        let a = entry("a", "http://host:8080", "model-a", 0, 1);
+        let b = entry("b", "http://host:8080", "model-a", 2, 3);
+        let c = entry("c", "http://other:8081", "model-a", 4, 5);
+        state.register(a);
+        state.register(b);
+        state.register(c);
+
+        let mut urls = state.all_shard_urls();
+        urls.sort();
+        assert_eq!(urls, vec!["http://host:8080", "http://other:8081"]);
+    }
+
+    #[test]
+    fn grid_service_impl_constructors_install_state_and_key() {
+        let state = Arc::new(RwLock::new(GridState::default()));
+
+        let svc = GridServiceImpl::new(state.clone());
+        let id1 = svc.alloc_server_id();
+        let id2 = svc.alloc_server_id();
+        assert!(id1.starts_with("srv-"));
+        assert!(id2.starts_with("srv-"));
+        assert_ne!(id1, id2, "ids must increment monotonically");
+
+        // new_with_key wires the key field.
+        let _svc_keyed = GridServiceImpl::new_with_key(state, Some("secret".into()));
+        // Field is private; constructing it exercises the branch.
+    }
+
+    #[test]
+    fn stale_server_ids_returns_only_overdue_entries() {
+        let mut state = GridState::default();
+        let mut fresh = entry("fresh", "http://fresh", "model-a", 0, 1);
+        fresh.last_seen = Instant::now();
+        let mut stale = entry("stale", "http://stale", "model-a", 0, 1);
+        stale.last_seen = Instant::now()
+            .checked_sub(std::time::Duration::from_secs(60))
+            .unwrap_or_else(Instant::now);
+        state.register(fresh);
+        state.register(stale);
+
+        let ids = state.stale_server_ids(std::time::Duration::from_secs(25));
+        assert_eq!(ids, vec!["stale".to_string()]);
+
+        // With a huge timeout nothing is stale.
+        assert!(state
+            .stale_server_ids(std::time::Duration::from_secs(3600))
+            .is_empty());
+    }
+
+    #[test]
+    fn find_origin_for_returns_listen_url_and_hash_of_replica() {
+        let mut state = GridState::default();
+        let mut a = entry("a", "http://a:8080", "model-a", 0, 5);
+        a.vindex_hash = "deadbeef".into();
+        state.register(a);
+
+        let origin = state.find_origin_for("model-a", 0, 5);
+        assert_eq!(origin, Some(("http://a:8080".into(), "deadbeef".into())));
+
+        // Wrong model: no origin.
+        assert!(state.find_origin_for("other", 0, 5).is_none());
+        // Range outside coverage: no origin.
+        assert!(state.find_origin_for("model-a", 6, 9).is_none());
+    }
+
+    #[test]
+    fn try_assign_gap_resolves_origin_from_live_replica() {
+        let mut state = GridState::default();
+        // Two replicas of layers 0-5 — one will be the origin for a third
+        // available server that fills a fresh assignment.
+        let mut a = entry("a", "http://a:8080", "model-a", 0, 5);
+        a.vindex_hash = "abc".into();
+        state.register(a);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
+        state.register_available("spare".into(), tx, 16 * 1024 * 1024 * 1024, 0, "/".into());
+
+        // Pretend layers 6-10 became a gap and we need to fill it. There's no
+        // live replica for that range, so the assignment should be refused.
+        assert!(!state.try_assign_gap("model-a", 6, 10, 0));
+
+        // Now ask to fill an existing range — must find http://a:8080 as origin.
+        assert!(state.try_assign_gap("model-a", 0, 5, 0));
+        let sent = rx.try_recv().expect("AssignMsg should be queued");
+        let Ok(RouterMessage {
+            payload: Some(RouterPayload::Assign(assign)),
+        }) = sent
+        else {
+            panic!("expected Assign payload, got: {sent:?}");
+        };
+        assert_eq!(assign.origin_url, "http://a:8080");
+        assert_eq!(assign.shard_hash, "abc");
+        assert_eq!(assign.layer_start, 0);
+        assert_eq!(assign.layer_end, 5);
+    }
+
+    #[test]
+    fn set_target_replicas_clamps_to_at_least_one() {
+        let mut state = GridState::default();
+        assert_eq!(state.target_replicas(), 1);
+        state.set_target_replicas(0);
+        assert_eq!(state.target_replicas(), 1, "0 must clamp to 1");
+        state.set_target_replicas(3);
+        assert_eq!(state.target_replicas(), 3);
+    }
+
+    #[test]
+    fn under_replicated_ranges_reports_deficit_per_range() {
+        let mut state = GridState::default();
+        state.set_target_replicas(2);
+        // Range 0-4: only one server → deficit 1.
+        state.register(entry("a", "http://a", "model-x", 0, 4));
+        // Range 5-9: two servers → at target.
+        state.register(entry("b", "http://b", "model-x", 5, 9));
+        state.register(entry("c", "http://c", "model-x", 5, 9));
+
+        let ranges = state.under_replicated_ranges();
+        assert_eq!(ranges, vec![("model-x".to_string(), 0, 4, 1)]);
+    }
+
+    #[test]
+    fn over_replicated_ranges_reports_surplus() {
+        let mut state = GridState::default();
+        state.set_target_replicas(2);
+        // 3 replicas of 0-4 — surplus 1.
+        state.register(entry("a", "http://a", "model-x", 0, 4));
+        state.register(entry("b", "http://b", "model-x", 0, 4));
+        state.register(entry("c", "http://c", "model-x", 0, 4));
+        // 1 replica of 5-9 — under target, not over.
+        state.register(entry("d", "http://d", "model-x", 5, 9));
+
+        let over = state.over_replicated_ranges();
+        assert_eq!(over, vec![("model-x".to_string(), 0, 4, 1)]);
+    }
+
+    #[test]
+    fn least_loaded_in_range_picks_lowest_inflight() {
+        let mut state = GridState::default();
+        let mut a = entry("a", "http://a", "model-x", 0, 4);
+        a.requests_in_flight = 5;
+        let mut b = entry("b", "http://b", "model-x", 0, 4);
+        b.requests_in_flight = 1;
+        let mut c = entry("c", "http://c", "model-x", 0, 4);
+        c.requests_in_flight = 9;
+        state.register(a);
+        state.register(b);
+        state.register(c);
+
+        let pick = state.least_loaded_in_range("model-x", 0, 4).unwrap();
+        assert_eq!(pick.server_id, "b");
+
+        // Wrong range yields None.
+        assert!(state.least_loaded_in_range("model-x", 10, 14).is_none());
+    }
+
+    #[test]
+    fn under_replicated_ranges_ignores_zero_coverage() {
+        let mut state = GridState::default();
+        state.set_target_replicas(2);
+        // No server for layers 0-4 — that's a *gap*, handled separately.
+        // Provide some other coverage to keep the test realistic.
+        state.register(entry("a", "http://a", "model-y", 10, 14));
+        // model-y[10-14] has 1/2 → under-replicated.
+        let ranges = state.under_replicated_ranges();
+        assert_eq!(ranges, vec![("model-y".to_string(), 10, 14, 1)]);
+    }
+
+    #[test]
+    fn try_replicate_from_available_dispatches_one_per_range() {
+        let mut state = GridState::default();
+        state.set_target_replicas(2);
+        // One server covering 0-4 — under-replicated by 1.
+        let mut a = entry("a", "http://a", "model-x", 0, 4);
+        a.vindex_hash = "ha".into();
+        state.register(a);
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
+        state.register_available("spare".into(), tx, 1, 0, "/".into());
+
+        let sent = state.try_replicate_from_available();
+        assert_eq!(sent, 1);
+        let msg = rx
+            .try_recv()
+            .expect("AssignMsg should have been delivered")
+            .expect("ok payload");
+        let Some(RouterPayload::Assign(a)) = msg.payload else {
+            panic!("expected Assign payload");
+        };
+        assert_eq!(a.model_id, "model-x");
+        assert_eq!(a.layer_start, 0);
+        assert_eq!(a.layer_end, 4);
+        assert_eq!(a.origin_url, "http://a");
+        assert_eq!(a.shard_hash, "ha");
+
+        // No more spares → second call assigns nothing.
+        let again = state.try_replicate_from_available();
+        assert_eq!(again, 0);
+    }
+
+    #[test]
+    fn try_fill_all_gaps_scans_coverage_and_fills() {
+        let mut state = GridState::default();
+        // Two shards with a gap at layer 2.
+        let mut a = entry("a", "http://a:8080", "model-a", 0, 1);
+        a.vindex_hash = "ha".into();
+        let mut b = entry("b", "http://b:8080", "model-a", 3, 4);
+        b.vindex_hash = "hb".into();
+        state.register(a);
+        state.register(b);
+        // No live replica covers layer 2 alone, so coverage_gaps reports it
+        // but find_origin_for returns None — try_fill_all_gaps should send 0.
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        state.register_available("spare".into(), tx, 1, 0, "/".into());
+        assert_eq!(state.try_fill_all_gaps(), 0);
     }
 
     #[test]

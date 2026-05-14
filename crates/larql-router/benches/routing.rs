@@ -26,6 +26,7 @@ fn make_entry(id: usize, layer_start: u32, layer_end: u32) -> ServerEntry {
         model_id: "bench-model".into(),
         layer_start,
         layer_end,
+        vindex_hash: format!("hash-{id}"),
         cpu_pct: 0.0,
         ram_used: 4 * 1024 * 1024 * 1024,
         requests_in_flight: id as u32 % 10,
