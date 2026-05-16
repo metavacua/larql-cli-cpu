@@ -7,7 +7,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{mpsc, RwLock};
+use parking_lot::RwLock;
+use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 
@@ -115,7 +116,7 @@ async fn announce_then_heartbeat_then_dropping() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     {
-        let g = state.read().await;
+        let g = state.read();
         let s = g.status_response();
         assert_eq!(s.servers.len(), 1);
         assert_eq!(s.servers[0].cpu_pct, 12.5);
@@ -138,7 +139,7 @@ async fn announce_then_heartbeat_then_dropping() {
     .unwrap();
     tokio::time::sleep(Duration::from_millis(150)).await;
     {
-        let g = state.read().await;
+        let g = state.read();
         assert_eq!(g.status_response().servers.len(), 0);
     }
 }
@@ -186,7 +187,7 @@ async fn available_followed_by_ready_registers_as_serving() {
     .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     {
-        let g = state.read().await;
+        let g = state.read();
         assert!(g.has_available_servers());
     }
 
@@ -205,7 +206,7 @@ async fn available_followed_by_ready_registers_as_serving() {
     .unwrap();
     tokio::time::sleep(Duration::from_millis(150)).await;
     {
-        let g = state.read().await;
+        let g = state.read();
         let urls: Vec<String> = g
             .status_response()
             .servers
@@ -297,12 +298,12 @@ async fn unassign_via_serving_sender_reaches_client() {
 
     // Drive UnassignMsg via the serving_sender the router holds.
     let server_id = {
-        let g = state.read().await;
+        let g = state.read();
         let id = g.servers().next().map(|(id, _)| id.clone()).unwrap();
         id
     };
     {
-        let g = state.read().await;
+        let g = state.read();
         let sender = g.serving_sender(&server_id).unwrap();
         sender
             .send(Ok(RouterMessage {
@@ -332,7 +333,7 @@ async fn unassign_via_serving_sender_reaches_client() {
 async fn available_with_under_replication_triggers_replicate() {
     let (addr, state) = spawn_router(None).await;
     {
-        let mut g = state.write().await;
+        let mut g = state.write();
         g.set_target_replicas(2);
     }
 
@@ -393,7 +394,7 @@ async fn available_with_under_replication_triggers_replicate() {
 async fn serving_disconnect_triggers_post_stream_replicate() {
     let (addr, state) = spawn_router(None).await;
     {
-        let mut g = state.write().await;
+        let mut g = state.write();
         g.set_target_replicas(2);
     }
 
@@ -489,7 +490,7 @@ async fn payload_none_is_silently_skipped() {
         .expect("stream must yield")
         .expect("ok payload");
     assert!(matches!(ack.payload, Some(RouterPayload::Ack(_))));
-    assert_eq!(state.read().await.status_response().servers.len(), 1);
+    assert_eq!(state.read().status_response().servers.len(), 1);
 }
 
 /// Exercises the `Dropping → filled/replicated > 0` success-log path
@@ -501,7 +502,7 @@ async fn payload_none_is_silently_skipped() {
 async fn dropping_under_replicated_shard_triggers_replicate_log() {
     let (addr, state) = spawn_router(None).await;
     {
-        let mut g = state.write().await;
+        let mut g = state.write();
         g.set_target_replicas(2);
     }
 

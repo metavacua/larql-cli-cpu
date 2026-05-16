@@ -23,7 +23,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use tokio::sync::{mpsc, RwLock};
+use parking_lot::RwLock;
+use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 use tonic::{Request, Response, Status, Streaming};
@@ -152,7 +153,7 @@ impl GridService for GridServiceImpl {
                                 expert_start,
                                 expert_end,
                             };
-                            state.write().await.register_with_sender(entry, tx.clone());
+                            state.write().register_with_sender(entry, tx.clone());
                             if let Some(m) = &metrics {
                                 m.grid_registers_total.inc();
                             }
@@ -169,7 +170,7 @@ impl GridService for GridServiceImpl {
                         }
 
                         ServerPayload::Heartbeat(hb) => {
-                            state.write().await.update_heartbeat(
+                            state.write().update_heartbeat(
                                 &sid,
                                 hb.cpu_pct,
                                 hb.ram_used,
@@ -192,7 +193,7 @@ impl GridService for GridServiceImpl {
                             // whether the disappearance created under-
                             // replication and pull spares for that too.
                             let (filled, replicated) = {
-                                let mut guard = state.write().await;
+                                let mut guard = state.write();
                                 guard.deregister(&sid);
                                 let f = guard.try_fill_all_gaps();
                                 let r = guard.try_replicate_from_available();
@@ -224,7 +225,7 @@ impl GridService for GridServiceImpl {
                             // coverage gap (zero replicas) or an
                             // under-replicated range (replica count below
                             // target_replicas).
-                            state.write().await.register_available(
+                            state.write().register_available(
                                 sid.clone(),
                                 tx.clone(),
                                 av.ram_bytes,
@@ -241,13 +242,13 @@ impl GridService for GridServiceImpl {
                             // 1) Fill coverage gaps first (most urgent — gaps
                             //    cause 503s; under-replicated ranges still
                             //    serve traffic from the surviving replicas).
-                            let gaps = state.read().await.coverage_gaps();
+                            let gaps = state.read().coverage_gaps();
                             let mut consumed = false;
                             for (model_id, layer_start, layer_end) in gaps {
                                 // ADR-0018: coverage gaps are dense layer-range
                                 // holes; the gap-fill path passes 0/0 for the
                                 // expert range (no expert-level holes here).
-                                let assigned = state.write().await.try_assign_gap(
+                                let assigned = state.write().try_assign_gap(
                                     &model_id,
                                     layer_start,
                                     layer_end,
@@ -263,7 +264,7 @@ impl GridService for GridServiceImpl {
                             // 2) If the spare wasn't used to fill a gap, try
                             //    using it to satisfy under-replication.
                             if !consumed {
-                                let replicated = state.write().await.try_replicate_from_available();
+                                let replicated = state.write().try_replicate_from_available();
                                 if replicated > 0 {
                                     tracing::info!(
                                         replicated,
@@ -306,7 +307,7 @@ impl GridService for GridServiceImpl {
                                 expert_start: r.expert_start,
                                 expert_end: r.expert_end,
                             };
-                            state.write().await.register_with_sender(entry, tx.clone());
+                            state.write().register_with_sender(entry, tx.clone());
                             if let Some(m) = &metrics {
                                 m.grid_registers_total.inc();
                             }
@@ -348,7 +349,7 @@ impl GridService for GridServiceImpl {
             // dropped the count below target_replicas.
             if registered_model.is_some() {
                 let (filled, replicated) = {
-                    let mut guard = state.write().await;
+                    let mut guard = state.write();
                     guard.deregister(&sid);
                     let f = guard.try_fill_all_gaps();
                     let r = guard.try_replicate_from_available();
@@ -373,7 +374,7 @@ impl GridService for GridServiceImpl {
                 }
             }
             if is_available {
-                state.write().await.deregister_available(&sid);
+                state.write().deregister_available(&sid);
             }
             tracing::info!(server_id = %sid, "Connection closed");
         });
@@ -386,7 +387,7 @@ impl GridService for GridServiceImpl {
         &self,
         _request: Request<StatusRequest>,
     ) -> Result<Response<StatusResponse>, Status> {
-        let resp = self.state.read().await.status_response();
+        let resp = self.state.read().status_response();
         Ok(Response::new(resp))
     }
 
@@ -406,7 +407,7 @@ impl GridService for GridServiceImpl {
 
         // Find the server + the layer range it currently covers.
         let (sender, layers) = {
-            let guard = self.state.read().await;
+            let guard = self.state.read();
             let entry = guard
                 .servers()
                 .find(|(id, _)| **id == req.server_id)
@@ -456,7 +457,7 @@ impl GridService for GridServiceImpl {
         request: Request<AssignRangeRequest>,
     ) -> Result<Response<AdminAck>, Status> {
         let req = request.into_inner();
-        let mut guard = self.state.write().await;
+        let mut guard = self.state.write();
 
         // Resolve the origin: explicit > live replica.
         let (origin_url, shard_hash) = if !req.explicit_origin_url.is_empty() {

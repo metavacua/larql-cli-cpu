@@ -143,9 +143,23 @@ pub fn rs_extend_from_checkpoint_q4k(
     let walk_ffn = WalkFfn::from_config(weights, index, WalkFfnConfig::dense(num_layers))
         .with_backend(backend);
 
+    // Per-stage timing. Enabled by `LARQL_INSTRUMENT_UNLIMITED=1`.
+    // Walks the same layers MarkovResidual's q4k path instruments — kept
+    // shape-compatible so output comparisons line up.
+    let instrument = std::env::var("LARQL_INSTRUMENT_UNLIMITED").is_ok();
+    let mut t_embed = 0.0f64;
+    let mut t_attention = 0.0f64;
+    let mut t_ffn = 0.0f64;
+    let mut t_attn_helper_misses = 0usize;
+    let mut t_ffn_helper_misses = 0usize;
+
     for (i, &token_id) in token_ids.iter().enumerate() {
         let abs_position = abs_start + i;
+        let t_embed_start = if instrument { Some(std::time::Instant::now()) } else { None };
         let mut h = embed_tokens_pub(weights, &[token_id]);
+        if let Some(start) = t_embed_start {
+            t_embed += start.elapsed().as_secs_f64() * 1000.0;
+        }
 
         for (layer, kv_slot) in kv_cache.iter_mut().enumerate() {
             let kv_entry: Option<&SharedKV> = if kv_slot.0.shape()[0] > 0 {
@@ -156,7 +170,8 @@ pub fn rs_extend_from_checkpoint_q4k(
 
             // Try production native-quantised attention helper first;
             // fall back to f32 path. Same pattern as MarkovResidual.
-            let (h_post_attn, new_kv) = larql_inference::vindex::attention_decode_step_native(
+            let t_attn_start = if instrument { Some(std::time::Instant::now()) } else { None };
+            let attn_native = larql_inference::vindex::attention_decode_step_native(
                 weights,
                 index,
                 backend,
@@ -164,38 +179,62 @@ pub fn rs_extend_from_checkpoint_q4k(
                 layer,
                 kv_entry,
                 abs_position,
-            )
-            .or_else(|| {
-                run_attention_block_decode_step_backend(
-                    weights,
-                    &h,
-                    layer,
-                    kv_entry,
-                    abs_position,
-                    Some(backend),
-                )
-            })?;
+            );
+            if attn_native.is_none() && instrument {
+                t_attn_helper_misses += 1;
+            }
+            let (h_post_attn, new_kv) = attn_native
+                .or_else(|| {
+                    run_attention_block_decode_step_backend(
+                        weights,
+                        &h,
+                        layer,
+                        kv_entry,
+                        abs_position,
+                        Some(backend),
+                    )
+                })?;
+            if let Some(start) = t_attn_start {
+                t_attention += start.elapsed().as_secs_f64() * 1000.0;
+            }
 
             // Native-quantised FFN; falls back to WalkFfn (which falls
             // further to dense f32 if no sparse features). The native
             // path is ~100× faster on Gemma 3 4B Q4K — see
             // `bench/baselines/cpu/async-dispatch-2026-05-16.md`.
-            let h_out = larql_inference::vindex::ffn_decode_step_native(
+            let t_ffn_start = if instrument { Some(std::time::Instant::now()) } else { None };
+            let ffn_native = larql_inference::vindex::ffn_decode_step_native(
                 weights,
                 index,
                 backend,
                 &h_post_attn,
                 layer,
-            )
-            .unwrap_or_else(|| {
+            );
+            if ffn_native.is_none() && instrument {
+                t_ffn_helper_misses += 1;
+            }
+            let h_out = ffn_native.unwrap_or_else(|| {
                 let (h, _) = run_ffn(weights, &h_post_attn, layer, &walk_ffn, false);
                 h
             });
+            if let Some(start) = t_ffn_start {
+                t_ffn += start.elapsed().as_secs_f64() * 1000.0;
+            }
             h = h_out;
             *kv_slot = new_kv;
         }
 
         last_hidden = Some(h);
+    }
+
+    if instrument {
+        let total = t_embed + t_attention + t_ffn;
+        eprintln!(
+            "[unlimited-context/extend_q4k] tokens={} layers={num_layers} \
+             embed={t_embed:.2}ms attention={t_attention:.2}ms ffn={t_ffn:.2}ms \
+             total={total:.2}ms (attn_helper miss/ffn_helper miss={t_attn_helper_misses}/{t_ffn_helper_misses})",
+            token_ids.len()
+        );
     }
 
     let new_checkpoint: Vec<SharedKV> = kv_cache

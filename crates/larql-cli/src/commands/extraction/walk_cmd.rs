@@ -577,7 +577,7 @@ fn run_predict_q4k(
             }
             return Ok(());
         }
-        larql_inference::vindex::predict_q4k_metal(
+        larql_inference::vindex::predict_kquant_metal(
             weights,
             tokenizer,
             &token_ids,
@@ -611,7 +611,7 @@ fn run_predict_q4k(
 /// The existing `run_predict_remote` path expects attention tensors to live
 /// inside `ModelWeights.tensors`, which is true only after the per-layer
 /// Q4K dequant. So instead of routing through `run_predict_remote` we call
-/// `predict_q4k_with_ffn` directly with a `RemoteWalkBackend` — that path
+/// `predict_kquant_with_ffn` directly with a `RemoteWalkBackend` — that path
 /// dequantises only Q/K/V/O per layer and skips the FFN dequant entirely.
 fn run_predict_q4k_remote(
     weights: &mut ModelWeights,
@@ -657,7 +657,7 @@ fn run_predict_q4k_remote(
     );
 
     let start = Instant::now();
-    let result = larql_inference::vindex::predict_q4k_with_ffn(
+    let result = larql_inference::vindex::predict_kquant_with_ffn(
         weights,
         tokenizer,
         &token_ids,

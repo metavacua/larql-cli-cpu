@@ -167,12 +167,7 @@ impl GridState {
     /// Returns an empty `Vec` when no replica owns the layer, or every
     /// owner is over the saturation ceiling. Bounded by the actual
     /// candidate count — never returns more than the topology allows.
-    pub fn route_with_rank(
-        &self,
-        model_id: Option<&str>,
-        layer: u32,
-        max: usize,
-    ) -> Vec<String> {
+    pub fn route_with_rank(&self, model_id: Option<&str>, layer: u32, max: usize) -> Vec<String> {
         if max == 0 {
             return Vec::new();
         }
@@ -491,5 +486,79 @@ mod tests {
             state.route_expert(Some("m"), 5, 99).as_deref(),
             Some("http://dense"),
         );
+    }
+
+    // ── ADR-0021: route_with_rank / route_expert_with_rank ───────────────────
+
+    #[test]
+    fn route_with_rank_returns_empty_when_no_owner() {
+        let state = GridState::default();
+        assert!(state.route_with_rank(Some("model-a"), 0, 2).is_empty());
+    }
+
+    #[test]
+    fn route_with_rank_returns_single_replica_when_only_one_owner() {
+        let mut state = GridState::default();
+        state.register(entry("a", "http://a", "m", 0, 4));
+        let ranked = state.route_with_rank(Some("m"), 2, 2);
+        assert_eq!(ranked, vec!["http://a".to_string()]);
+    }
+
+    #[test]
+    fn route_with_rank_orders_by_in_flight_when_no_latency_data() {
+        let mut state = GridState::default();
+        state.register(entry("a", "http://a", "m", 0, 4));
+        state.register(entry("b", "http://b", "m", 0, 4));
+        // Make b less loaded than a.
+        state.update_heartbeat("a", 0.0, 0, 10, Vec::new(), 0.0);
+        state.update_heartbeat("b", 0.0, 0, 1, Vec::new(), 0.0);
+
+        let ranked = state.route_with_rank(Some("m"), 2, 2);
+        assert_eq!(ranked[0], "http://b", "best replica must be first");
+        assert_eq!(ranked[1], "http://a", "second-best must follow");
+    }
+
+    #[test]
+    fn route_with_rank_respects_max_bound() {
+        let mut state = GridState::default();
+        for (i, url) in [("a", "http://a"), ("b", "http://b"), ("c", "http://c")] {
+            state.register(entry(i, url, "m", 0, 4));
+        }
+        assert_eq!(state.route_with_rank(Some("m"), 2, 1).len(), 1);
+        assert_eq!(state.route_with_rank(Some("m"), 2, 2).len(), 2);
+        assert_eq!(state.route_with_rank(Some("m"), 2, 99).len(), 3);
+        assert!(state.route_with_rank(Some("m"), 2, 0).is_empty());
+    }
+
+    #[test]
+    fn route_with_rank_drops_saturated_replicas() {
+        let mut state = GridState::default();
+        state.register(entry("a", "http://a", "m", 0, 4));
+        state.register(entry("b", "http://b", "m", 0, 4));
+        state.update_heartbeat("a", 0.0, 0, 100, Vec::new(), 0.0);
+        state.update_heartbeat("b", 0.0, 0, 5, Vec::new(), 0.0);
+        state.set_saturation_ceiling(Some(50));
+
+        let ranked = state.route_with_rank(Some("m"), 2, 2);
+        // a is over the ceiling, so it's filtered out.
+        assert_eq!(ranked, vec!["http://b".to_string()]);
+    }
+
+    #[test]
+    fn route_expert_with_rank_filters_to_owning_experts() {
+        use super::super::testing::entry_with_experts;
+        let mut state = GridState::default();
+        state.register(entry_with_experts("e1", "http://e1", "m", 5, 5, 0, 3));
+        state.register(entry_with_experts("e2", "http://e2", "m", 5, 5, 0, 3));
+        state.register(entry_with_experts("e3", "http://e3", "m", 5, 5, 4, 7));
+
+        let ranked_expert_0 = state.route_expert_with_rank(Some("m"), 5, 0, 4);
+        // Only e1 and e2 own expert 0.
+        assert_eq!(ranked_expert_0.len(), 2);
+        assert!(ranked_expert_0
+            .iter()
+            .all(|u| u == "http://e1" || u == "http://e2"));
+        let ranked_expert_5 = state.route_expert_with_rank(Some("m"), 5, 5, 4);
+        assert_eq!(ranked_expert_5, vec!["http://e3".to_string()]);
     }
 }

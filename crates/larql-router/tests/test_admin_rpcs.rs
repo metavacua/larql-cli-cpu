@@ -7,7 +7,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{mpsc, RwLock};
+use parking_lot::RwLock;
+use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 
@@ -134,7 +135,7 @@ async fn drain_server_known_id_dispatches_unassign() {
     let server_id = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            let g = state.read().await;
+            let g = state.read();
             let found = g.servers().next().map(|(id, _)| id.clone());
             if let Some(id) = found {
                 return id;
@@ -290,7 +291,7 @@ async fn admin_drain_returns_ack() {
     let server_id = tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             tokio::time::sleep(Duration::from_millis(50)).await;
-            let g = state.read().await;
+            let g = state.read();
             let found = g.servers().next().map(|(id, _)| id.clone());
             if let Some(id) = found {
                 return id;

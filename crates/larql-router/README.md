@@ -179,6 +179,7 @@ reconnect, TLS 1.3, and BBRv2 congestion control. Real HTTP/3
 | `--hot-shard-demote-ratio <FRAC>` | ADR-0014 hysteresis: an elevated shard demotes only when its rate falls below `ratio × --hot-shard-rps`. `1.0` disables hysteresis. Values outside `(0.0, 1.0]` clamp to the default. | 0.8 |
 | `--rtt-probe-interval-secs <N>` | Active-probe RTT cadence. When `>0`, the router periodically `GET`s `{listen_url}/v1/health` on every serving server and uses the recorded round-trip as a tie-breaker after GT3 per-layer latency in `route()`. | 0 (disabled) |
 | `--saturation-ceiling <N>` | ADR-0020 backpressure tier. Replicas whose `requests_in_flight ≥ N` are filtered out of `route()` before the GT3/RTT/in-flight comparator runs. When every owning replica is saturated, the router 503s with `Retry-After: 0.5` and bumps `larql_router_route_saturation_total` instead of forwarding to the least-bad replica. | — (disabled) |
+| `--hedge-after-ms <M>` | ADR-0021 hedged dispatch. On a multi-shard fan-out, if a sub-request's primary replica hasn't responded within `M` ms, dispatch the same sub-request to a secondary replica and take whoever wins. Halves p99 tail latency in topologies with `--target-replicas ≥ 2` at the cost of ~2× shard load on the tail. `larql_router_route_hedge_fires_total` counts fires; `larql_router_route_hedge_wins_total` counts secondaries that beat the primary. Single-shard `proxy_raw` requests are not hedged. | — (disabled) |
 | `--log-level <LEVEL>` | Logging level. | info |
 
 Run `larql-router --help` for the full set, including the QUIC
@@ -311,21 +312,30 @@ Grid routing + rebalancing are covered by focused unit + integration tests:
   `route_expert()`, dispatcher 503 vs 400 disambiguation via
   `has_owners_for`, `Retry-After: 0.5` header, and counter increment
   (`walk_ffn_returns_503_with_retry_after_when_replicas_saturated`)
+- ADR-0021 hedged dispatch — `route_with_rank` /
+  `route_expert_with_rank` accessors, `hedged_post_json` helper,
+  `--hedge-after-ms` opt-in, dense + MoE fan-out wiring,
+  `route_hedge_fires_total` / `route_hedge_wins_total` counters.
+  Three integration tests:
+  `walk_ffn_hedge_fires_when_primary_is_slow` (asserts both counters
+  +1 and secondary actually served the sub-request),
+  `walk_ffn_hedge_does_not_fire_on_fast_primary` (counters stay 0,
+  secondary untouched), `walk_ffn_no_hedge_when_only_one_replica`
+  (single-owner topology — hedge configured but never fires).
 - Long-running chaos test (`tests/test_grid_chaos.rs`) — 5,000
   randomised register/deregister/heartbeat/route ticks per variant
   (one with `target_replicas=1`, one with `=2`); asserts ledger
   consistency, coverage floor, and no `route()` panic on every tick
 
 ```bash
-cargo test -p larql-router                    # 163 lib + 47 integration = 210 tests
+cargo test -p larql-router                    # 169 lib + 50 integration = 219 tests
                                                # (incl. MoE expert-routing, hot-shard hysteresis,
-                                               #  ADR-0020 saturation backpressure, grid chaos,
-                                               #  dense regression)
-cargo test -p larql-router --features http3    # 211 tests (+1 h3 fan-out integration)
+                                               #  ADR-0020 saturation backpressure, ADR-0021
+                                               #  hedged dispatch, grid chaos, dense regression)
+cargo test -p larql-router --features http3    # 220 tests (+1 h3 fan-out integration)
 cargo test -p larql-router-protocol --features quic
                                                # 18 tests (15 unit + 3 QUIC integration)
-make larql-router-coverage-summary             # 93.21% total, 19/20 files ≥90%
-                                               # (grid/service.rs at 88% — debt baseline)
+make larql-router-coverage-summary             # see Coverage section for current numbers
 make larql-router-protocol-coverage-summary    # 91.36% total, 1/1 files ≥90%
 ```
 

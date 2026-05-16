@@ -18,7 +18,7 @@ use super::tensors::{insert_q4k_layer_tensors, remove_layer_tensors};
 /// `forward::trace_forward_full_hooked`: it keeps the mmap/dequant layer-scope
 /// behavior of `predict_kquant_hidden` while exposing pre-layer, post-attention,
 /// optional attention-weight/FFN-activation, and post-layer hook points.
-pub fn predict_q4k_hidden_hooked(
+pub fn predict_kquant_hidden_hooked(
     weights: &mut ModelWeights,
     token_ids: &[u32],
     index: &VectorIndex,
@@ -27,7 +27,7 @@ pub fn predict_q4k_hidden_hooked(
     hook: &mut dyn LayerHook,
 ) -> Result<Array2<f32>, String> {
     if weights.arch.is_hybrid_moe() {
-        return Err("predict_q4k_hidden_hooked currently supports dense FFN vindexes only".into());
+        return Err("predict_kquant_hidden_hooked currently supports dense FFN vindexes only".into());
     }
 
     let mut h = embed_tokens_pub(weights, token_ids);

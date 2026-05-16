@@ -24,7 +24,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use clap::Parser;
-use tokio::sync::RwLock;
+use parking_lot::RwLock;
 use tonic::transport::Server as GrpcServer;
 use tracing::{info, warn};
 
@@ -471,7 +471,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if let (Some(grid_port), Some(state)) = (cli.grid_port, &grid_state) {
         // Phase 4: install target_replicas before any servers register so
         // the first under-/over-replication check sees the right target.
-        state.write().await.set_target_replicas(cli.target_replicas);
+        state.write().set_target_replicas(cli.target_replicas);
         if cli.target_replicas > 1 {
             info!(
                 target_replicas = cli.target_replicas,
@@ -479,10 +479,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             );
         }
         // ADR-0020 — install the saturation ceiling. None = disabled.
-        state
-            .write()
-            .await
-            .set_saturation_ceiling(cli.saturation_ceiling);
+        state.write().set_saturation_ceiling(cli.saturation_ceiling);
         if let Some(ceiling) = cli.saturation_ceiling {
             info!(
                 ceiling,
@@ -555,7 +552,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // first rebalancer tick fires. The rebalancer tick (if enabled)
     // keeps refreshing these every interval.
     if let Some(g) = grid_state.as_ref() {
-        metrics.refresh_gauges(&*g.read().await);
+        metrics.refresh_gauges(&*g.read());
     }
 
     // ADR-0019 — build the H3Client when `--http3-shards` is on.

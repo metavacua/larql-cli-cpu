@@ -796,7 +796,7 @@ mod experts {
                     let toks = if let Some(ops) = mask_op_names {
                         let mut mask = OpNameMask::new(ops.to_vec(), &self.tokenizer);
                         mask.set_seed_text(OP_CALL_PREFIX);
-                        larql_inference::vindex::generate_q4k_cpu_constrained(
+                        larql_inference::vindex::generate_kquant_cpu_constrained(
                             &mut self.weights,
                             &self.tokenizer,
                             &token_ids,

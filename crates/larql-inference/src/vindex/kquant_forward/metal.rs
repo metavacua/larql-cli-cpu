@@ -9,7 +9,7 @@ const MIN_KV_CACHE_SEQ: usize = 64;
 
 /// End-to-end predict on a Q4_K vindex driven by a Metal (or any Q4-capable)
 /// `ComputeBackend`.
-pub fn predict_q4k_metal(
+pub fn predict_kquant_metal(
     weights: &ModelWeights,
     tokenizer: &Tokenizer,
     token_ids: &[u32],

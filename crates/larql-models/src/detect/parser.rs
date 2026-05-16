@@ -115,9 +115,12 @@ pub(super) fn parse_model_config(config: &serde_json::Value) -> ModelConfig {
     // num_key_value_heads — they're architecture-class defaults from
     // transformers. See the `DEFAULT_*` constants for the values used.
     let default_head_dim: usize = if is_gemma { DEFAULT_HEAD_DIM_GEMMA } else { 0 };
-    let num_q_heads =
-        super::config_io::read_aliased_u64(config, text_config, CONFIG_KEY_NUM_ATTENTION_HEADS_ALIASES)
-            .unwrap_or(DEFAULT_NUM_ATTENTION_HEADS) as usize;
+    let num_q_heads = super::config_io::read_aliased_u64(
+        config,
+        text_config,
+        CONFIG_KEY_NUM_ATTENTION_HEADS_ALIASES,
+    )
+    .unwrap_or(DEFAULT_NUM_ATTENTION_HEADS) as usize;
     // head_dim: explicit config value, Gemma class default, or compute
     // from hidden/heads (the conventional MHA invariant).
     let head_dim = text_config["head_dim"]

@@ -398,12 +398,12 @@ async fn stats_returns_503_when_no_shard_reachable() {
 #[tokio::test]
 async fn walk_ffn_routes_via_grid_when_grid_state_is_set() {
     use larql_router::grid::{GridState, ServerEntry};
+    use parking_lot::RwLock;
     use std::collections::HashMap;
-    use tokio::sync::RwLock;
 
     let (addr, calls) = spawn_fake_shard().await;
     let grid = Arc::new(RwLock::new(GridState::default()));
-    grid.write().await.register(ServerEntry {
+    grid.write().register(ServerEntry {
         server_id: "grid-srv".into(),
         listen_url: format!("http://{addr}"),
         model_id: "m".into(),
@@ -473,7 +473,7 @@ async fn walk_ffn_routes_via_grid_when_grid_state_is_set() {
 #[tokio::test]
 async fn walk_ffn_grid_layer_missing_falls_back_to_static_shards() {
     use larql_router::grid::GridState;
-    use tokio::sync::RwLock;
+    use parking_lot::RwLock;
 
     let (addr, _calls) = spawn_fake_shard().await;
     let grid = Arc::new(RwLock::new(GridState::default()));
@@ -647,9 +647,9 @@ async fn moe_request_without_grid_returns_503() {
 #[tokio::test]
 async fn moe_request_with_no_owner_returns_503() {
     use larql_router::grid::{GridState, ServerEntry};
-    let grid = Arc::new(tokio::sync::RwLock::new(GridState::default()));
+    let grid = Arc::new(parking_lot::RwLock::new(GridState::default()));
     {
-        let mut g = grid.write().await;
+        let mut g = grid.write();
         g.register(ServerEntry {
             server_id: "moe-a".into(),
             listen_url: "http://moe-a".into(),
@@ -713,9 +713,9 @@ async fn moe_request_fans_out_to_owning_shards_and_merges() {
     let (addr_lo, _calls_lo) = spawn_fake_shard().await;
     let (addr_hi, _calls_hi) = spawn_fake_shard().await;
 
-    let grid = Arc::new(tokio::sync::RwLock::new(GridState::default()));
+    let grid = Arc::new(parking_lot::RwLock::new(GridState::default()));
     {
-        let mut g = grid.write().await;
+        let mut g = grid.write();
         g.register(ServerEntry {
             server_id: "moe-lo".into(),
             listen_url: format!("http://{addr_lo}"),
@@ -882,9 +882,9 @@ async fn moe_fanout_dispatches_through_h3_client_when_configured() {
     // ── Grid: one MoE shard owning experts 0-7 of layer 0, listen URL
     //    pointing at the h3 listener. The router's dispatch path will
     //    parse `host:port` out of this and call H3Client::post_json.
-    let grid = Arc::new(tokio::sync::RwLock::new(GridState::default()));
+    let grid = Arc::new(parking_lot::RwLock::new(GridState::default()));
     {
-        let mut g = grid.write().await;
+        let mut g = grid.write();
         g.register(ServerEntry {
             server_id: "moe-h3".into(),
             listen_url: format!("http://127.0.0.1:{}", h3_addr.port()),
@@ -961,12 +961,12 @@ async fn moe_fanout_dispatches_through_h3_client_when_configured() {
 async fn walk_ffn_returns_503_with_retry_after_when_replicas_saturated() {
     use larql_router::grid::{GridState, ServerEntry};
     use larql_router::metrics::{encode_metrics_text, RouterMetrics};
+    use parking_lot::RwLock;
     use std::collections::HashMap;
-    use tokio::sync::RwLock;
 
     let grid = Arc::new(RwLock::new(GridState::default()));
     // One owner, requests_in_flight already at the ceiling.
-    grid.write().await.register(ServerEntry {
+    grid.write().register(ServerEntry {
         server_id: "saturated".into(),
         listen_url: "http://unreachable:9".into(),
         model_id: "m".into(),
@@ -983,7 +983,7 @@ async fn walk_ffn_returns_503_with_retry_after_when_replicas_saturated() {
         expert_start: 0,
         expert_end: 0,
     });
-    grid.write().await.set_saturation_ceiling(Some(8));
+    grid.write().set_saturation_ceiling(Some(8));
 
     let metrics = RouterMetrics::new();
     let client = reqwest::Client::builder()
@@ -1033,5 +1033,312 @@ async fn walk_ffn_returns_503_with_retry_after_when_replicas_saturated() {
         text.lines()
             .any(|l| l.starts_with("larql_router_route_saturation_total ") && l.ends_with(" 1")),
         "route_saturation_total must increment exactly once; got:\n{text}"
+    );
+}
+
+// ── ADR-0021 hedged dispatch ───────────────────────────────────────────────
+
+/// Like `spawn_fake_shard`, but the `/v1/walk-ffn` handler waits
+/// `delay` before responding. Used to construct a deliberately-slow
+/// primary that the hedge should beat.
+async fn spawn_slow_shard(delay: Duration) -> (SocketAddr, ShardCalls) {
+    let calls = ShardCalls::default();
+    let app_calls = calls.clone();
+    let app = axum::Router::new()
+        .route(
+            "/v1/walk-ffn",
+            post(
+                move |st: State<ShardCalls>, body: axum::extract::Json<Value>| async move {
+                    tokio::time::sleep(delay).await;
+                    fake_walk_ffn(st, body).await
+                },
+            ),
+        )
+        .with_state(app_calls);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    (addr, calls)
+}
+
+/// Build a 2-replica grid where layer 0 has a slow primary + fast
+/// secondary, layer 1 has a single fast owner. Multi-layer requests
+/// force the fan-out path; the slow primary triggers the hedge.
+async fn build_hedge_topology(
+    slow_delay: Duration,
+) -> (
+    SocketAddr,
+    ShardCalls,
+    SocketAddr,
+    ShardCalls,
+    SocketAddr,
+    ShardCalls,
+    Arc<parking_lot::RwLock<larql_router::grid::GridState>>,
+) {
+    use larql_router::grid::{GridState, ServerEntry};
+    use std::collections::HashMap;
+
+    let (slow_addr, slow_calls) = spawn_slow_shard(slow_delay).await;
+    let (fast_addr, fast_calls) = spawn_fake_shard().await;
+    let (b_addr, b_calls) = spawn_fake_shard().await;
+
+    let grid = Arc::new(parking_lot::RwLock::new(GridState::default()));
+    // Layer 0 owned by slow_a (primary, lower in_flight = priority) +
+    // fast_a (secondary). Heartbeats set in_flight so the comparator
+    // picks slow_a first deterministically.
+    grid.write().register(ServerEntry {
+        server_id: "slow-a".into(),
+        listen_url: format!("http://{slow_addr}"),
+        model_id: "m".into(),
+        layer_start: 0,
+        layer_end: 0,
+        vindex_hash: "h".into(),
+        cpu_pct: 0.0,
+        ram_used: 0,
+        requests_in_flight: 0,
+        last_seen: std::time::Instant::now(),
+        layer_latencies: HashMap::new(),
+        req_per_sec: 0.0,
+        rtt_ms: None,
+        expert_start: 0,
+        expert_end: 0,
+    });
+    grid.write().register(ServerEntry {
+        server_id: "fast-a".into(),
+        listen_url: format!("http://{fast_addr}"),
+        model_id: "m".into(),
+        layer_start: 0,
+        layer_end: 0,
+        vindex_hash: "h".into(),
+        cpu_pct: 0.0,
+        ram_used: 0,
+        requests_in_flight: 5,
+        last_seen: std::time::Instant::now(),
+        layer_latencies: HashMap::new(),
+        req_per_sec: 0.0,
+        rtt_ms: None,
+        expert_start: 0,
+        expert_end: 0,
+    });
+    // Layer 1 owned by a single fast shard.
+    grid.write().register(ServerEntry {
+        server_id: "b".into(),
+        listen_url: format!("http://{b_addr}"),
+        model_id: "m".into(),
+        layer_start: 1,
+        layer_end: 1,
+        vindex_hash: "h".into(),
+        cpu_pct: 0.0,
+        ram_used: 0,
+        requests_in_flight: 0,
+        last_seen: std::time::Instant::now(),
+        layer_latencies: HashMap::new(),
+        req_per_sec: 0.0,
+        rtt_ms: None,
+        expert_start: 0,
+        expert_end: 0,
+    });
+    (
+        slow_addr, slow_calls, fast_addr, fast_calls, b_addr, b_calls, grid,
+    )
+}
+
+#[tokio::test]
+async fn walk_ffn_hedge_fires_when_primary_is_slow() {
+    use larql_router::metrics::{encode_metrics_text, RouterMetrics};
+
+    // Primary delays 500ms; hedge fires after 30ms; secondary responds
+    // ~immediately. The hedge must fire (counter +1) AND win (counter +1).
+    let (_slow_addr, _slow_calls, _fast_addr, fast_calls, _b_addr, _b_calls, grid) =
+        build_hedge_topology(Duration::from_millis(500)).await;
+
+    let metrics = RouterMetrics::new();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let state = Arc::new(AppState {
+        static_shards: parse_shards("99-100=http://unused:1").unwrap(),
+        grid: Some(grid),
+        client,
+        metrics: Some(metrics.clone()),
+        #[cfg(feature = "http3")]
+        h3_client: None,
+        hedge_after: Some(Duration::from_millis(30)),
+    });
+    let app = build_router(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/walk-ffn")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"model_id":"m","layers":[0,1]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let text = encode_metrics_text(&metrics).unwrap();
+    let line = |needle: &str| {
+        text.lines()
+            .find(|l| l.starts_with(needle))
+            .map(String::from)
+    };
+    let fires = line("larql_router_route_hedge_fires_total ").unwrap();
+    let wins = line("larql_router_route_hedge_wins_total ").unwrap();
+    assert!(
+        fires.ends_with(" 1"),
+        "hedge_fires_total expected 1, got line: {fires}"
+    );
+    assert!(
+        wins.ends_with(" 1"),
+        "hedge_wins_total expected 1, got line: {wins}"
+    );
+
+    // The fast secondary received the layer-0 sub-request.
+    let fast_seen = fast_calls.inner.lock().await.clone();
+    assert!(
+        !fast_seen.is_empty(),
+        "secondary (fast_a) must have served the hedged sub-request"
+    );
+}
+
+#[tokio::test]
+async fn walk_ffn_hedge_does_not_fire_on_fast_primary() {
+    use larql_router::metrics::{encode_metrics_text, RouterMetrics};
+
+    // Primary delay 0 — no hedge should fire. hedge_after stays set,
+    // so any spurious firing would surface as a non-zero counter.
+    let (_slow_addr, _slow_calls, _fast_addr, fast_calls, _b_addr, _b_calls, grid) =
+        build_hedge_topology(Duration::from_millis(0)).await;
+
+    let metrics = RouterMetrics::new();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let state = Arc::new(AppState {
+        static_shards: parse_shards("99-100=http://unused:1").unwrap(),
+        grid: Some(grid),
+        client,
+        metrics: Some(metrics.clone()),
+        #[cfg(feature = "http3")]
+        h3_client: None,
+        hedge_after: Some(Duration::from_millis(500)),
+    });
+    let app = build_router(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/walk-ffn")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"model_id":"m","layers":[0,1]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let text = encode_metrics_text(&metrics).unwrap();
+    let line = |needle: &str| {
+        text.lines()
+            .find(|l| l.starts_with(needle))
+            .map(String::from)
+    };
+    let fires = line("larql_router_route_hedge_fires_total ").unwrap();
+    let wins = line("larql_router_route_hedge_wins_total ").unwrap();
+    assert!(
+        fires.ends_with(" 0"),
+        "hedge_fires_total expected 0 when primary is fast, got: {fires}"
+    );
+    assert!(
+        wins.ends_with(" 0"),
+        "hedge_wins_total expected 0, got: {wins}"
+    );
+    // Secondary should NOT have received anything.
+    let fast_seen = fast_calls.inner.lock().await.clone();
+    assert!(
+        fast_seen.is_empty(),
+        "secondary should not be touched when primary wins, but saw {fast_seen:?}"
+    );
+}
+
+#[tokio::test]
+async fn walk_ffn_no_hedge_when_only_one_replica() {
+    use larql_router::grid::{GridState, ServerEntry};
+    use larql_router::metrics::{encode_metrics_text, RouterMetrics};
+    use std::collections::HashMap;
+
+    // Topology has no secondary for any layer; even with hedging
+    // configured, the hedge path is skipped because route_with_rank
+    // returns only one URL.
+    let (a_addr, _a_calls) = spawn_fake_shard().await;
+    let (b_addr, _b_calls) = spawn_fake_shard().await;
+    let grid = Arc::new(parking_lot::RwLock::new(GridState::default()));
+    for (id, addr, ls, le) in [("a", a_addr, 0u32, 0u32), ("b", b_addr, 1u32, 1u32)] {
+        grid.write().register(ServerEntry {
+            server_id: id.into(),
+            listen_url: format!("http://{addr}"),
+            model_id: "m".into(),
+            layer_start: ls,
+            layer_end: le,
+            vindex_hash: "h".into(),
+            cpu_pct: 0.0,
+            ram_used: 0,
+            requests_in_flight: 0,
+            last_seen: std::time::Instant::now(),
+            layer_latencies: HashMap::new(),
+            req_per_sec: 0.0,
+            rtt_ms: None,
+            expert_start: 0,
+            expert_end: 0,
+        });
+    }
+
+    let metrics = RouterMetrics::new();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let state = Arc::new(AppState {
+        static_shards: parse_shards("99-100=http://unused:1").unwrap(),
+        grid: Some(grid),
+        client,
+        metrics: Some(metrics.clone()),
+        #[cfg(feature = "http3")]
+        h3_client: None,
+        hedge_after: Some(Duration::from_millis(20)),
+    });
+    let app = build_router(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/walk-ffn")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"model_id":"m","layers":[0,1]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let text = encode_metrics_text(&metrics).unwrap();
+    let fires_line = text
+        .lines()
+        .find(|l| l.starts_with("larql_router_route_hedge_fires_total "))
+        .unwrap();
+    assert!(
+        fires_line.ends_with(" 0"),
+        "no secondary exists — hedge must never fire; got: {fires_line}"
     );
 }

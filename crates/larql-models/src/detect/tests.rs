@@ -1205,6 +1205,83 @@ fn test_detect_gemma4_26b_a4b() {
 }
 
 #[test]
+fn test_detect_gemma4_dense_returns_none_for_moe_getters() {
+    // Non-MoE Gemma 4 must return None / non-MoE-specific values from
+    // every MoE-only getter — covers the `else` arms in
+    // architectures/gemma4.rs (lines 270-393 None branches).
+    let config = serde_json::json!({
+        "model_type": "gemma4",
+        "text_config": {
+            "model_type": "gemma4_text",
+            "hidden_size": 2560,
+            "intermediate_size": 10240,
+            "num_hidden_layers": 30,
+            "num_attention_heads": 8,
+            "num_key_value_heads": 4,
+            "head_dim": 256,
+        }
+    });
+    let arch = detect_from_json(&config);
+    assert_eq!(arch.family(), "gemma4");
+    assert!(!arch.is_hybrid_moe());
+    assert_eq!(arch.moe_router_type(), "top_k_softmax");
+    assert!(arch.moe_router_key(0).is_none());
+    assert!(arch.moe_router_scale_key(0).is_none());
+    assert!(arch.moe_router_per_expert_scale_key(0).is_none());
+    assert!(!arch.moe_router_norm_parameter_free());
+    assert!(arch.moe_router_input_scalar().is_none());
+    assert!(arch.packed_experts_gate_up_key(0).is_none());
+    assert!(arch.packed_experts_down_key(0).is_none());
+    assert!(arch.moe_pre_experts_norm_key(0).is_none());
+    assert!(arch.moe_post_experts_norm_key(0).is_none());
+    assert!(arch.moe_post_outer_norm_key(0).is_none());
+    assert!(!arch.moe_has_combined_output_norm());
+    // Dense Gemma 4 uses the un-suffixed post_feedforward_layernorm key.
+    assert_eq!(
+        arch.post_feedforward_layernorm_key(0),
+        Some("layers.0.post_feedforward_layernorm.weight".to_string())
+    );
+    // `moe_post_ffn1_norm_key` aliases `post_feedforward_layernorm_key`.
+    assert_eq!(
+        arch.moe_post_ffn1_norm_key(0),
+        arch.post_feedforward_layernorm_key(0)
+    );
+}
+
+#[test]
+fn test_detect_gemma4_moe_uses_gemma4_top_k_softmax_router_type() {
+    // The MoE-only `moe_router_type` returns "gemma4_top_k_softmax" when
+    // `enable_moe_block` is true — covers the if-branch in gemma4.rs L265.
+    let config = serde_json::json!({
+        "model_type": "gemma4",
+        "text_config": {
+            "model_type": "gemma4_text",
+            "hidden_size": 2816,
+            "intermediate_size": 9216,
+            "num_hidden_layers": 30,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 8,
+            "head_dim": 256,
+            "enable_moe_block": true,
+            "num_experts": 128,
+            "top_k_experts": 8,
+            "moe_intermediate_size": 704,
+        }
+    });
+    let arch = detect_from_json(&config);
+    assert_eq!(arch.moe_router_type(), "gemma4_top_k_softmax");
+    assert!(arch.moe_router_norm_parameter_free());
+    // input_scalar = hidden_size^-0.5
+    let scalar = arch.moe_router_input_scalar().unwrap();
+    assert!((scalar - (2816.0f32).powf(-0.5)).abs() < 1e-6);
+    // moe_post_outer_norm_key for hybrid MoE points at the un-suffixed key.
+    assert_eq!(
+        arch.moe_post_outer_norm_key(0),
+        Some("layers.0.post_feedforward_layernorm.weight".to_string())
+    );
+}
+
+#[test]
 fn test_empty_config_has_zero_topology_not_a_silent_default() {
     // `detect_from_json` is infallible to keep in-memory test ergonomics
     // simple, but it must NOT invent topology values. A guess-default

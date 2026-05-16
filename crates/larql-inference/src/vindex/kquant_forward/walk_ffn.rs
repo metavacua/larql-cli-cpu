@@ -8,7 +8,7 @@ use super::dequant::dequantize_matrix;
 
 /// Run one layer's FFN forward on a Q4_K vindex, dequantising gate/up/down
 /// for just this layer and applying the architecture's activation gate.
-pub fn q4k_ffn_forward_layer(
+pub fn kquant_ffn_forward_layer(
     arch: &dyn larql_models::ModelArchitecture,
     index: &VectorIndex,
     layer: usize,
@@ -78,8 +78,8 @@ pub fn q4k_ffn_forward_layer(
 /// `h_q8k.qs.len()` must equal `hidden` (= `x.ncols()`), which is a
 /// multiple of 256 (Q8_K block size).
 ///
-/// Returns the FFN delta only — same semantics as `q4k_ffn_forward_layer`.
-pub fn q4k_ffn_forward_layer_q8k(
+/// Returns the FFN delta only — same semantics as `kquant_ffn_forward_layer`.
+pub fn kquant_ffn_forward_layer_q8k(
     arch: &dyn larql_models::ModelArchitecture,
     index: &VectorIndex,
     layer: usize,

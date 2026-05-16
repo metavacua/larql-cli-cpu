@@ -21,7 +21,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use tokio::sync::RwLock;
+use parking_lot::RwLock;
 
 use crate::grid::GridState;
 use crate::metrics::RouterMetrics;
@@ -32,7 +32,7 @@ pub(super) async fn check_hot_shards(
     demote_ratio: f32,
     metrics: Option<&RouterMetrics>,
 ) {
-    let mut guard = state.write().await;
+    let mut guard = state.write();
 
     // Slices currently exceeding the *elevation* threshold.
     let hot: HashSet<(String, u32, u32, u32, u32)> =
@@ -104,7 +104,7 @@ mod tests {
 
         let state = Arc::new(RwLock::new(GridState::default()));
         {
-            let mut g = state.write().await;
+            let mut g = state.write();
             let mut a = entry("a", "http://a", "m", 0, 4);
             a.req_per_sec = 50.0;
             g.register(a);
@@ -113,7 +113,7 @@ mod tests {
         check_hot_shards(&state, 20.0, 0.8, Some(&m)).await;
         // Cool the replica + re-run → demote counter bumps to 1.
         {
-            let mut g = state.write().await;
+            let mut g = state.write();
             g.update_heartbeat("a", 0.0, 0, 0, vec![], 0.0);
         }
         check_hot_shards(&state, 20.0, 0.8, Some(&m)).await;
@@ -131,7 +131,7 @@ mod tests {
     async fn check_hot_shards_hysteresis_holds_in_middle_band() {
         let state = Arc::new(RwLock::new(GridState::default()));
         {
-            let mut g = state.write().await;
+            let mut g = state.write();
             let mut a = entry("a", "http://a", "m", 0, 4);
             a.req_per_sec = 25.0; // > threshold (20) → elevates
             g.register(a);
@@ -139,19 +139,19 @@ mod tests {
         // First tick: above 20, elevates.
         check_hot_shards(&state, 20.0, 0.8, None).await;
         {
-            let g = state.read().await;
+            let g = state.read();
             assert_eq!(g.elevated_ranges_snapshot().len(), 1, "must elevate");
         }
         // Drop rate to 18 — *above* demote threshold (20 × 0.8 = 16)
         // but below elevation threshold. Without hysteresis this
         // would demote. With hysteresis it stays elevated.
         {
-            let mut g = state.write().await;
+            let mut g = state.write();
             g.update_heartbeat("a", 0.0, 0, 0, vec![], 18.0);
         }
         check_hot_shards(&state, 20.0, 0.8, None).await;
         {
-            let g = state.read().await;
+            let g = state.read();
             assert_eq!(
                 g.elevated_ranges_snapshot().len(),
                 1,
@@ -160,12 +160,12 @@ mod tests {
         }
         // Drop below demote threshold (16) → now demotes.
         {
-            let mut g = state.write().await;
+            let mut g = state.write();
             g.update_heartbeat("a", 0.0, 0, 0, vec![], 10.0);
         }
         check_hot_shards(&state, 20.0, 0.8, None).await;
         {
-            let g = state.read().await;
+            let g = state.read();
             assert!(
                 g.elevated_ranges_snapshot().is_empty(),
                 "rate below demote threshold must demote"
@@ -180,18 +180,18 @@ mod tests {
     async fn check_hot_shards_ratio_one_disables_hysteresis() {
         let state = Arc::new(RwLock::new(GridState::default()));
         {
-            let mut g = state.write().await;
+            let mut g = state.write();
             let mut a = entry("a", "http://a", "m", 0, 4);
             a.req_per_sec = 50.0;
             g.register(a);
         }
         check_hot_shards(&state, 20.0, 1.0, None).await; // elevate
         {
-            let mut g = state.write().await;
+            let mut g = state.write();
             g.update_heartbeat("a", 0.0, 0, 0, vec![], 19.999); // just below
         }
         check_hot_shards(&state, 20.0, 1.0, None).await; // demotes
-        let g = state.read().await;
+        let g = state.read();
         assert!(g.elevated_ranges_snapshot().is_empty());
     }
 
@@ -199,13 +199,13 @@ mod tests {
     async fn check_hot_shards_marks_newly_hot_ranges() {
         let state = Arc::new(RwLock::new(GridState::default()));
         {
-            let mut g = state.write().await;
+            let mut g = state.write();
             let mut a = entry("a", "http://a", "m", 0, 4);
             a.req_per_sec = 50.0;
             g.register(a);
         }
         check_hot_shards(&state, 20.0, 0.8, None).await;
-        let g = state.read().await;
+        let g = state.read();
         assert_eq!(
             g.elevated_ranges_snapshot(),
             vec![("m".to_string(), 0, 4, 0, 0)],
@@ -217,7 +217,7 @@ mod tests {
     async fn check_hot_shards_demotes_cooled_ranges() {
         let state = Arc::new(RwLock::new(GridState::default()));
         {
-            let mut g = state.write().await;
+            let mut g = state.write();
             // Pre-elevated range with a cool replica.
             let mut a = entry("a", "http://a", "m", 0, 4);
             a.req_per_sec = 1.0;
@@ -225,7 +225,7 @@ mod tests {
             assert!(g.mark_elevated("m", 0, 4, 0, 0));
         }
         check_hot_shards(&state, 20.0, 0.8, None).await;
-        let g = state.read().await;
+        let g = state.read();
         assert!(
             g.elevated_ranges_snapshot().is_empty(),
             "cooled range must be demoted"
@@ -239,7 +239,7 @@ mod tests {
         // idempotence.
         let state = Arc::new(RwLock::new(GridState::default()));
         {
-            let mut g = state.write().await;
+            let mut g = state.write();
             let mut hot = entry("hot", "http://hot", "m", 0, 4);
             hot.req_per_sec = 50.0;
             g.register(hot);
@@ -249,7 +249,7 @@ mod tests {
         }
         check_hot_shards(&state, 20.0, 0.8, None).await;
         check_hot_shards(&state, 20.0, 0.8, None).await;
-        let g = state.read().await;
+        let g = state.read();
         assert_eq!(
             g.elevated_ranges_snapshot(),
             vec![("m".to_string(), 0, 4, 0, 0)],
@@ -266,7 +266,7 @@ mod tests {
         let (spare_tx, mut spare_rx) = mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
         let (busy_tx, _busy_rx) = mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
         {
-            let mut g = state.write().await;
+            let mut g = state.write();
             // target_replicas == 1 default — hot bump takes effective to 2.
             let mut a = entry("a", "http://a", "m", 0, 4);
             a.req_per_sec = 100.0;
@@ -292,7 +292,7 @@ mod tests {
         // tick drops the surplus.
         let (extra_tx, mut extra_rx) = mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
         {
-            let mut g = state.write().await;
+            let mut g = state.write();
             let mut extra = entry("extra", "http://extra", "m", 0, 4);
             extra.req_per_sec = 0.5;
             g.register_with_sender(extra, extra_tx);
@@ -317,7 +317,7 @@ mod tests {
                 assert_eq!(u.reason, "over_replicated");
             }
         }
-        let g = state.read().await;
+        let g = state.read();
         assert!(
             g.elevated_ranges_snapshot().is_empty(),
             "range must be demoted after cooling"

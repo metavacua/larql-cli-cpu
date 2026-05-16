@@ -16,12 +16,17 @@ ADR-0018 (MoE expert routing — `route_expert` / `route_all_experts`,
 per-(layer, expert-range) replication, JSON `experts` / `layer_experts`
 HTTP shapes),
 ADR-0019 (HTTP/3 shard transport, opt-in via `--http3-shards` and
-`--http3-port`), and
+`--http3-port`),
 ADR-0020 (saturation-tier backpressure in `route()` —
 `--saturation-ceiling N`, 503 with `Retry-After: 0.5`, distinguished
 from 400 via `has_owners_for`, `larql_router_route_saturation_total`
-counter). Static `--shards` (ADR-0003) remains as a fallback and coexists
-with the grid.
+counter), and
+ADR-0021 (hedged dispatch — opt-in via `--hedge-after-ms M`,
+`route_with_rank` / `route_expert_with_rank` accessors, races a
+secondary replica against a slow primary when M ms elapses;
+`route_hedge_fires_total` / `route_hedge_wins_total` counters).
+Static `--shards` (ADR-0003) remains as a fallback and coexists with
+the grid.
 
 The codebase is architecture-agnostic: routing logic reads layer ranges,
 `model_id`, and server state from the grid protocol — no model-family
@@ -753,15 +758,25 @@ benches, connection pool tuning, real HTTP/3 shard transport with
 per-stream independence (ADR-0019, 2026-05-16 — `--http3-shards` /
 `--http3-port` opt-in, `H3Client::post_json` + `serve_axum` in
 larql-router-protocol, used by the MoE expert fan-out path when
-`h3_client: Some(_)`).
+`h3_client: Some(_)`), hedged dispatch (ADR-0021, 2026-05-16 —
+opt-in via `--hedge-after-ms M`; the multi-shard fan-out picks a
+secondary replica per sub-request and dispatches it M ms after the
+primary if the primary hasn't responded; halves p99 tail latency in
+topologies with `--target-replicas ≥ 2`).
 
 **P1 — biggest near-term win:**
 
-- **Speculative next-layer prefetch.** While layer N's response is
-  being received, send the layer N+1 request to its owning shard.
-  Halves wire latency on serial walks. Requires careful handling on
-  the response side (don't apply N+1 until N is applied to the
-  residual) but the dispatch can pipeline freely.
+- **(Pre-ADR-0021 "speculative next-layer prefetch" — falsified.)**
+  An audit during the 2026-05-16 session found that the inference
+  side sends one batched `/v1/walk-ffn` per token with the full
+  layer list against a single input residual; the router fans every
+  sub-request out in parallel against that input. There is no
+  layer-N → layer-N+1 dependency at the router boundary, so
+  "prefetch layer N+1 while N is in flight" doesn't apply here.
+  Cross-token speculation, if it lands, is a client-side
+  (`larql-inference`) concern. The legitimate router-layer
+  interpretation is hedged dispatch — that shipped as ADR-0021
+  (see Shipped above).
 
 **P2:**
 

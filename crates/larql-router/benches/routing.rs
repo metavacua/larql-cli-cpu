@@ -14,7 +14,7 @@ use std::time::Instant;
 use std::sync::Arc;
 
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
-use tokio::sync::RwLock;
+use parking_lot::RwLock;
 
 use larql_router::grid::{GridState, ServerEntry};
 use larql_router_protocol::LayerLatency;
@@ -452,7 +452,7 @@ fn bench_route_concurrent(c: &mut Criterion) {
                                 // if `route()` ever cached recent results.
                                 for i in 0..ROUTES_PER_WORKER {
                                     let layer = ((w * ROUTES_PER_WORKER + i) % 30) as u32;
-                                    let _ = grid.read().await.route(Some("bench-model"), layer);
+                                    let _ = grid.read().route(Some("bench-model"), layer);
                                 }
                             }));
                         }

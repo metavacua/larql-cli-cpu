@@ -65,7 +65,7 @@ pub fn generate_kquant_cpu(
 
 /// Like [`generate_kquant_cpu`] but dispatches MoE expert matmuls to remote shard
 /// servers via [`crate::ffn::RemoteMoeBackend`].
-pub fn generate_q4k_cpu_remote(
+pub fn generate_kquant_cpu_remote(
     weights: &mut ModelWeights,
     tokenizer: &Tokenizer,
     prompt_ids: &[u32],
@@ -100,7 +100,7 @@ pub fn generate_q4k_cpu_remote(
 }
 
 /// Constrained variant of [`generate_kquant_cpu`]. Greedy under the mask.
-pub fn generate_q4k_cpu_constrained<M>(
+pub fn generate_kquant_cpu_constrained<M>(
     weights: &mut ModelWeights,
     tokenizer: &Tokenizer,
     prompt_ids: &[u32],
@@ -111,7 +111,7 @@ pub fn generate_q4k_cpu_constrained<M>(
 where
     M: FnMut(&[u32], &mut Vec<f32>),
 {
-    generate_q4k_cpu_constrained_streaming_sampled(
+    generate_kquant_cpu_constrained_streaming_sampled(
         weights,
         tokenizer,
         prompt_ids,
@@ -123,14 +123,14 @@ where
     )
 }
 
-/// Streaming-callback variant of [`generate_q4k_cpu_constrained`].
+/// Streaming-callback variant of [`generate_kquant_cpu_constrained`].
 /// Fires `on_token(id, text, prob)` after each masked argmax pick. Used
 /// by the OpenAI server's SSE path so JSON / structured-output streams
 /// can flush chunks as the constrained decoder produces them.
 ///
 /// Greedy under the mask. For sampling under mask, see
-/// [`generate_q4k_cpu_constrained_streaming_sampled`].
-pub fn generate_q4k_cpu_constrained_streaming<M, F>(
+/// [`generate_kquant_cpu_constrained_streaming_sampled`].
+pub fn generate_kquant_cpu_constrained_streaming<M, F>(
     weights: &mut ModelWeights,
     tokenizer: &Tokenizer,
     prompt_ids: &[u32],
@@ -143,7 +143,7 @@ where
     M: FnMut(&[u32], &mut Vec<f32>),
     F: FnMut(u32, &str, f64),
 {
-    generate_q4k_cpu_constrained_streaming_sampled(
+    generate_kquant_cpu_constrained_streaming_sampled(
         weights,
         tokenizer,
         prompt_ids,
@@ -162,7 +162,7 @@ where
 ///
 /// Pass `SamplingConfig::greedy()` for the existing argmax behaviour.
 #[allow(clippy::too_many_arguments)]
-pub fn generate_q4k_cpu_constrained_streaming_sampled<M, F>(
+pub fn generate_kquant_cpu_constrained_streaming_sampled<M, F>(
     weights: &mut ModelWeights,
     tokenizer: &Tokenizer,
     prompt_ids: &[u32],
@@ -176,7 +176,7 @@ where
     M: FnMut(&[u32], &mut Vec<f32>),
     F: FnMut(u32, &str, f64),
 {
-    generate_q4k_cpu_constrained_streaming_sampled_with_eos(
+    generate_kquant_cpu_constrained_streaming_sampled_with_eos(
         weights,
         tokenizer,
         prompt_ids,
@@ -194,7 +194,7 @@ where
 /// built-in stop set while higher-level generation APIs can honor
 /// caller-supplied EOS IDs and stop strings.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn generate_q4k_cpu_constrained_streaming_sampled_with_eos<M, F>(
+pub(crate) fn generate_kquant_cpu_constrained_streaming_sampled_with_eos<M, F>(
     weights: &mut ModelWeights,
     tokenizer: &Tokenizer,
     prompt_ids: &[u32],

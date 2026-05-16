@@ -20,19 +20,19 @@ mod walk_ffn;
 
 pub use cached::{
     attention_decode_step_native, ffn_decode_step_native, metal_fused_decode_step,
-    metal_fused_prefill, predict_q4k_decode_step, predict_q4k_decode_step_direct,
-    predict_q4k_prefill, supports_cached_decode, supports_direct_matvec_decode, CachedTimings,
+    metal_fused_prefill, predict_kquant_decode_step, predict_kquant_decode_step_direct,
+    predict_kquant_prefill, supports_cached_decode, supports_direct_matvec_decode, CachedTimings,
     CpuKvCache,
 };
 
-pub(crate) use generation::generate_q4k_cpu_constrained_streaming_sampled_with_eos;
+pub(crate) use generation::generate_kquant_cpu_constrained_streaming_sampled_with_eos;
 pub use generation::{
-    generate_kquant_cpu, generate_q4k_cpu_constrained, generate_q4k_cpu_constrained_streaming,
-    generate_q4k_cpu_constrained_streaming_sampled, generate_q4k_cpu_remote, is_end_of_turn,
+    generate_kquant_cpu, generate_kquant_cpu_constrained, generate_kquant_cpu_constrained_streaming,
+    generate_kquant_cpu_constrained_streaming_sampled, generate_kquant_cpu_remote, is_end_of_turn,
     predict_kquant,
 };
 pub use hidden::predict_kquant_hidden;
-pub use hooks::predict_q4k_hidden_hooked;
+pub use hooks::predict_kquant_hidden_hooked;
 pub use interventions::{
     predict_kquant_hidden_with_mapped_head_residual_delta, predict_kquant_hidden_with_mapped_pre_o_head,
     predict_kquant_hidden_with_original_head_residual_delta,
@@ -41,9 +41,9 @@ pub use interventions::{
     predict_kquant_hidden_with_zeroed_pre_o_heads,
 };
 pub use metal::{
-    predict_q4k_metal, predict_kquant_metal_capture_pre_wo, predict_kquant_metal_hidden,
+    predict_kquant_metal, predict_kquant_metal_capture_pre_wo, predict_kquant_metal_hidden,
     predict_kquant_metal_with_replaced_head_residual_delta,
 };
-pub use remote_ffn::{predict_kquant_hidden_with_ffn, predict_q4k_with_ffn};
+pub use remote_ffn::{predict_kquant_hidden_with_ffn, predict_kquant_with_ffn};
 pub use tensors::{insert_q4k_layer_tensors, remove_layer_tensors};
-pub use walk_ffn::{q4k_ffn_forward_layer, q4k_ffn_forward_layer_q8k};
+pub use walk_ffn::{kquant_ffn_forward_layer, kquant_ffn_forward_layer_q8k};

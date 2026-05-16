@@ -35,6 +35,14 @@ futures-core = "0.3"
 # surface, not an opt-in transport.
 prometheus = { version = "0.13", default-features = false }
 
+# ADR-0021 follow-up — parking_lot::RwLock<GridState> replaced
+# tokio::sync::RwLock for the routing snapshot. The concurrent-route
+# bench surfaced lock-contention plateau past ~4 concurrent readers on
+# tokio's async-aware RwLock; parking_lot's synchronous primitive is
+# the right tool because every grid critical section is short and sync
+# (no await held while locked).
+parking_lot = "0.12"
+
 # rustls is only used when the `quic` feature is on. Pulled in here so the
 # `spawn_quic_listener` helper can call `rustls::crypto::ring::default_provider()`
 # without re-declaring the dep upstream every time.

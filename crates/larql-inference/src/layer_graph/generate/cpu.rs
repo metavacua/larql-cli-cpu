@@ -26,8 +26,8 @@ pub(super) fn backend_supports_fused_q4_pipeline(backend: &dyn ComputeBackend) -
 
 /// CPU Q4K generate path. For dense single-stream architectures (no
 /// hybrid MoE, no cross-layer KV sharing) this uses the KV-cached
-/// driver in [`crate::vindex::predict_q4k_prefill`] +
-/// [`crate::vindex::predict_q4k_decode_step`]: full prompt once at
+/// driver in [`crate::vindex::predict_kquant_prefill`] +
+/// [`crate::vindex::predict_kquant_decode_step`]: full prompt once at
 /// prefill, then 1-row attention + 1-row FFN per generated token.
 /// Falls back to the original O(N²) per-step `predict_kquant_hidden`
 /// loop for hybrid MoE (Gemma 4 26B A4B) and Gemma 4 E2B
@@ -75,7 +75,7 @@ fn generate_via_cpu_q4k_cached(
     // ── Prefill ────────────────────────────────────────────────────
     let prefill_start = std::time::Instant::now();
     let (h_prompt, mut cache, _prefill_timings) =
-        crate::vindex::predict_q4k_prefill(weights, token_ids, index);
+        crate::vindex::predict_kquant_prefill(weights, token_ids, index);
     // Don't fold prefill dequant into per-step averages — bench numbers
     // already account for the prompt pass via `prefill_ms`. Mixing them
     // here would mis-attribute the one-shot prefill cost to decode.
@@ -146,7 +146,7 @@ fn generate_via_cpu_q4k_cached(
         let abs_position = prompt_len + (step - 1);
         let t0 = std::time::Instant::now();
         let h_new = if direct_matvec {
-            match crate::vindex::predict_q4k_decode_step_direct(
+            match crate::vindex::predict_kquant_decode_step_direct(
                 weights,
                 next_id,
                 index,
@@ -158,7 +158,7 @@ fn generate_via_cpu_q4k_cached(
                 None => break,
             }
         } else {
-            match crate::vindex::predict_q4k_decode_step(
+            match crate::vindex::predict_kquant_decode_step(
                 weights,
                 next_id,
                 index,
@@ -390,7 +390,7 @@ where
     }
 
     let prefill_start = std::time::Instant::now();
-    let out = crate::vindex::generate_q4k_cpu_constrained_streaming_sampled_with_eos(
+    let out = crate::vindex::generate_kquant_cpu_constrained_streaming_sampled_with_eos(
         weights, tokenizer, token_ids, max_tokens, index, mask_fn, on_token, sampling, eos,
     );
     let total_ms = prefill_start.elapsed().as_secs_f64() * 1000.0;
@@ -672,7 +672,7 @@ mod constrained_streaming_tests {
 
     /// Cover the body of `generate_constrained_via_cpu_q4k_streaming_sampled`
     /// (only the `max_tokens=0` short-circuit was previously hit).
-    /// The constrained loop calls into `vindex::generate_q4k_cpu_constrained_streaming_sampled_with_eos`
+    /// The constrained loop calls into `vindex::generate_kquant_cpu_constrained_streaming_sampled_with_eos`
     /// which produces token strings — we exercise the wrapper's
     /// prefill/decode-ms accounting and the empty-output handling.
     #[test]

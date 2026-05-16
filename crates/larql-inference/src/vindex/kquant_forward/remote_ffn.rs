@@ -13,7 +13,7 @@ use super::dequant::dequantize_matrix;
 
 /// End-to-end predict on a Q4_K vindex with the FFN served by an external
 /// [`crate::ffn::FfnBackend`].
-pub fn predict_q4k_with_ffn(
+pub fn predict_kquant_with_ffn(
     weights: &mut ModelWeights,
     tokenizer: &Tokenizer,
     token_ids: &[u32],

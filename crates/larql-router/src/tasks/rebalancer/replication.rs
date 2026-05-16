@@ -12,7 +12,7 @@
 
 use std::sync::Arc;
 
-use tokio::sync::RwLock;
+use parking_lot::RwLock;
 
 use larql_router_protocol::{RouterMessage, RouterPayload, UnassignMsg};
 
@@ -32,7 +32,7 @@ pub(super) async fn check_under_replication(
     state: &Arc<RwLock<GridState>>,
     metrics: Option<&RouterMetrics>,
 ) {
-    let assigned = state.write().await.try_replicate_from_available();
+    let assigned = state.write().try_replicate_from_available();
     if assigned > 0 {
         tracing::info!(
             assigned,
@@ -57,7 +57,7 @@ pub(super) async fn check_over_replication(
     // Snapshot slices + chosen victims while holding only a read lock.
     // Tuple shape: (server_id, model_id, layer_start, layer_end, expert_start, expert_end).
     let plan: Vec<(String, String, u32, u32, u32, u32)> = {
-        let g = state.read().await;
+        let g = state.read();
         if g.target_replicas() == 0 {
             return;
         }
@@ -74,7 +74,7 @@ pub(super) async fn check_over_replication(
     }
     for (server_id, model_id, ls, le, _es, _ee) in plan {
         let tx = {
-            let g = state.read().await;
+            let g = state.read();
             g.serving_sender(&server_id)
         };
         let Some(tx) = tx else {
@@ -126,7 +126,7 @@ mod tests {
         let state = Arc::new(RwLock::new(GridState::default()));
         let (spare_tx, _spare_rx) = mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
         {
-            let mut g = state.write().await;
+            let mut g = state.write();
             g.set_target_replicas(2);
             g.register(entry("a", "http://a", "m", 0, 4));
             g.register_available("spare".into(), spare_tx, 1, 0, "/".into());
@@ -149,7 +149,7 @@ mod tests {
         let (idle_tx, _idle_rx) = mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
         let (busy_tx, _busy_rx) = mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
         {
-            let mut g = state.write().await;
+            let mut g = state.write();
             g.set_target_replicas(1);
             let mut idle = entry("idle", "http://idle", "m", 0, 4);
             idle.requests_in_flight = 0;
@@ -169,7 +169,7 @@ mod tests {
         let state = Arc::new(RwLock::new(GridState::default()));
         let (spare_tx, mut spare_rx) = mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
         {
-            let mut g = state.write().await;
+            let mut g = state.write();
             g.set_target_replicas(2);
             g.register(entry("a", "http://a", "m", 0, 4));
             g.register_available("spare".into(), spare_tx, 1, 0, "/".into());
@@ -189,7 +189,7 @@ mod tests {
         // with a spare in the pool.
         let (tx, mut rx) = mpsc::channel(4);
         {
-            let mut g = state.write().await;
+            let mut g = state.write();
             g.register(entry("a", "http://a", "m", 0, 4));
             g.register_available("spare".into(), tx, 1, 0, "/".into());
         }
@@ -207,7 +207,7 @@ mod tests {
         let (tx_busy, _rx_busy) = mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
 
         {
-            let mut g = state.write().await;
+            let mut g = state.write();
             g.set_target_replicas(2);
             // 3 replicas of model-x 0-4 — surplus 1. idle is least-loaded.
             let busy_1 = ServerEntry {
@@ -266,7 +266,7 @@ mod tests {
         let state = Arc::new(RwLock::new(GridState::default()));
         let (busy_tx, _busy_rx) = mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
         {
-            let mut g = state.write().await;
+            let mut g = state.write();
             g.set_target_replicas(2);
             // Three replicas, but the least-loaded one has no serving_sender
             // (registered via plain `register`). Test exercises the
@@ -285,7 +285,7 @@ mod tests {
         // The "no sender" branch is taken; nothing observable on busy_tx
         // because the rebalancer picks `idle` as least-loaded and skips it.
         // Assert through state: no server was removed.
-        let g = state.read().await;
+        let g = state.read();
         assert_eq!(g.status_response().servers.len(), 3);
     }
 }

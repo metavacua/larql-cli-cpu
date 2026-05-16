@@ -88,7 +88,7 @@ pub fn supports_cached_decode(weights: &ModelWeights) -> bool {
 /// each layer's post-RoPE K and final V into the returned cache.
 /// Returns the `[seq_len, hidden]` hidden state and the populated
 /// cache. Caller takes the last row for lm_head.
-pub fn predict_q4k_prefill(
+pub fn predict_kquant_prefill(
     weights: &mut ModelWeights,
     token_ids: &[u32],
     index: &VectorIndex,
@@ -140,7 +140,7 @@ pub fn predict_q4k_prefill(
 /// `abs_position` is the absolute RoPE position of the new token —
 /// `prompt_len + steps_already_decoded`. The caller maintains this
 /// counter (typical: `prompt_len + step_index` starting at 0).
-pub fn predict_q4k_decode_step(
+pub fn predict_kquant_decode_step(
     weights: &mut ModelWeights,
     token_id: u32,
     index: &VectorIndex,
@@ -204,7 +204,7 @@ impl CachedTimings {
 
 // ── Phase 2: dequant-free decode step ───────────────────────────────────
 //
-// `predict_q4k_decode_step` (above) still pays the per-step Q4_K/Q6_K →
+// `predict_kquant_decode_step` (above) still pays the per-step Q4_K/Q6_K →
 // f32 dequant cost via `insert_q4k_layer_tensors`. Profiling showed
 // dequant is ~93% of CPU forward time even with the KV cache wired —
 // gemm and attention are a small slice. This module routes Q/K/V/O and
@@ -338,9 +338,9 @@ fn vec_to_2d_row(v: Vec<f32>) -> Array2<f32> {
 /// Returns `None` if the backend doesn't have Q4 support
 /// (`!backend.has_q4()`), the vindex lacks Q4K/Q4_0 interleaved FFN
 /// bytes, or the architecture isn't compatible with the fused pipeline.
-/// CPU callers get `None` — they use [`predict_q4k_prefill`] instead.
+/// CPU callers get `None` — they use [`predict_kquant_prefill`] instead.
 ///
-/// Public counterpart to [`predict_q4k_prefill`] for the Metal side.
+/// Public counterpart to [`predict_kquant_prefill`] for the Metal side.
 /// Previously lived inline in `larql-kv/engines/unlimited_context/engine.rs`;
 /// promoted here so [`crate::kv_dispatch::metal::MetalBackend::coarse_prefill`]
 /// can use it without an `larql-inference → larql-kv` dep cycle.
@@ -421,7 +421,7 @@ pub fn metal_fused_prefill(
 ///
 /// Returns `None` for CPU backends (no fused `decode_token` impl) and
 /// for vindex shapes the fused pipeline can't handle. Public counterpart
-/// to [`predict_q4k_decode_step_direct`] for the Metal side.
+/// to [`predict_kquant_decode_step_direct`] for the Metal side.
 pub fn metal_fused_decode_step(
     weights: &ModelWeights,
     index: &VectorIndex,
@@ -483,7 +483,7 @@ pub fn metal_fused_decode_step(
 /// trait's cached-K/V shape.
 ///
 /// `h_new` must be a single-row residual (1 × hidden). Multi-row
-/// prefill is handled by `predict_q4k_prefill` (separate shape; the
+/// prefill is handled by `predict_kquant_prefill` (separate shape; the
 /// `q4k_` in that name is pre-existing debt — see ROADMAP U8/U9 for
 /// the broader quant-agnostic rename of the kquant_forward module).
 ///
@@ -493,7 +493,7 @@ pub fn attention_decode_step_native(
     weights: &ModelWeights,
     index: &VectorIndex,
     // Kept on the helper signature for parity with the outer
-    // `predict_q4k_decode_step_direct` API and any future asm dispatch
+    // `predict_kquant_decode_step_direct` API and any future asm dispatch
     // that wants runtime feature detection.
     _backend: &dyn ComputeBackend,
     h_new: &Array2<f32>,
@@ -810,12 +810,12 @@ fn run_ffn_decode_step_q4k_direct(
 }
 
 /// Dequant-free decode step. Same shape contract as
-/// [`predict_q4k_decode_step`] but routes every projection through
+/// [`predict_kquant_decode_step`] but routes every projection through
 /// `backend.quant_matvec` instead of the per-layer
 /// `insert_q4k_layer_tensors` → dense f32 staging dance. Returns `None`
 /// if any layer has a format the direct-matvec path doesn't handle
-/// (caller falls back to [`predict_q4k_decode_step`]).
-pub fn predict_q4k_decode_step_direct(
+/// (caller falls back to [`predict_kquant_decode_step`]).
+pub fn predict_kquant_decode_step_direct(
     weights: &mut ModelWeights,
     token_id: u32,
     index: &VectorIndex,
@@ -947,13 +947,13 @@ mod tests {
         assert!(out.is_none(), "non-256-multiple cols must be rejected");
     }
 
-    // ── predict_q4k_prefill / predict_q4k_decode_step ────────────────────
+    // ── predict_kquant_prefill / predict_kquant_decode_step ────────────────────
 
     #[test]
-    fn predict_q4k_prefill_returns_hidden_with_expected_shape() {
+    fn predict_kquant_prefill_returns_hidden_with_expected_shape() {
         let mut fx = Q4KTestFixtures::build();
         let token_ids = vec![1u32, 2, 3];
-        let (h, cache, _timings) = predict_q4k_prefill(&mut fx.weights, &token_ids, &fx.index);
+        let (h, cache, _timings) = predict_kquant_prefill(&mut fx.weights, &token_ids, &fx.index);
         assert_eq!(
             h.shape()[0],
             token_ids.len(),
@@ -974,10 +974,10 @@ mod tests {
     }
 
     #[test]
-    fn predict_q4k_decode_step_appends_kv_and_returns_one_row() {
+    fn predict_kquant_decode_step_appends_kv_and_returns_one_row() {
         let mut fx = Q4KTestFixtures::build();
         let token_ids = vec![1u32, 2, 3];
-        let (_, mut cache, _) = predict_q4k_prefill(&mut fx.weights, &token_ids, &fx.index);
+        let (_, mut cache, _) = predict_kquant_prefill(&mut fx.weights, &token_ids, &fx.index);
 
         let pre_lens: Vec<usize> = cache
             .iter()
@@ -985,7 +985,7 @@ mod tests {
             .collect();
 
         let (h_new, _step_timings) =
-            predict_q4k_decode_step(&mut fx.weights, 4, &fx.index, &mut cache, token_ids.len())
+            predict_kquant_decode_step(&mut fx.weights, 4, &fx.index, &mut cache, token_ids.len())
                 .expect("decode step must succeed on a populated cache");
 
         assert_eq!(h_new.shape(), &[1, fx.weights.hidden_size]);
@@ -1001,24 +1001,24 @@ mod tests {
     }
 
     #[test]
-    fn predict_q4k_decode_step_rejects_mismatched_cache_length() {
+    fn predict_kquant_decode_step_rejects_mismatched_cache_length() {
         let mut fx = Q4KTestFixtures::build();
         // Cache length doesn't match num_layers — function must return None.
         let mut bad_cache: CpuKvCache = vec![None; fx.weights.num_layers + 1];
-        let result = predict_q4k_decode_step(&mut fx.weights, 1, &fx.index, &mut bad_cache, 0);
+        let result = predict_kquant_decode_step(&mut fx.weights, 1, &fx.index, &mut bad_cache, 0);
         assert!(result.is_none());
     }
 
-    // ── predict_q4k_decode_step_direct (Q4K × Q8K sdot path) ────────────
+    // ── predict_kquant_decode_step_direct (Q4K × Q8K sdot path) ────────────
 
     #[test]
-    fn predict_q4k_decode_step_direct_returns_finite_hidden() {
+    fn predict_kquant_decode_step_direct_returns_finite_hidden() {
         let mut fx = Q4KTestFixtures::build();
         let token_ids = vec![1u32, 2, 3];
-        let (_, mut cache, _) = predict_q4k_prefill(&mut fx.weights, &token_ids, &fx.index);
+        let (_, mut cache, _) = predict_kquant_prefill(&mut fx.weights, &token_ids, &fx.index);
 
         let backend = CpuBackend;
-        let h_new = predict_q4k_decode_step_direct(
+        let h_new = predict_kquant_decode_step_direct(
             &mut fx.weights,
             4,
             &fx.index,
@@ -1033,11 +1033,11 @@ mod tests {
     }
 
     #[test]
-    fn predict_q4k_decode_step_direct_rejects_mismatched_cache_length() {
+    fn predict_kquant_decode_step_direct_rejects_mismatched_cache_length() {
         let mut fx = Q4KTestFixtures::build();
         let mut bad_cache: CpuKvCache = vec![None; fx.weights.num_layers - 1];
         let backend = CpuBackend;
-        let result = predict_q4k_decode_step_direct(
+        let result = predict_kquant_decode_step_direct(
             &mut fx.weights,
             1,
             &fx.index,
@@ -1188,14 +1188,14 @@ mod branch_tests {
     /// Direct decode step on a SiLU-activation arch — exercises the
     /// non-GeluTanh branch in `run_ffn_decode_step_q4k_direct`.
     #[test]
-    fn predict_q4k_decode_step_direct_silu_activation_path() {
+    fn predict_kquant_decode_step_direct_silu_activation_path() {
         let mut weights = make_llama_q4k_weights();
         let index = make_test_q4k_vindex(&weights);
         let _tok = make_test_tokenizer(weights.vocab_size);
         let token_ids = vec![1u32, 2];
-        let (_, mut cache, _) = predict_q4k_prefill(&mut weights, &token_ids, &index);
+        let (_, mut cache, _) = predict_kquant_prefill(&mut weights, &token_ids, &index);
         let backend = CpuBackend;
-        let h_new = predict_q4k_decode_step_direct(
+        let h_new = predict_kquant_decode_step_direct(
             &mut weights,
             3,
             &index,
@@ -1207,16 +1207,16 @@ mod branch_tests {
         assert!(h_new.iter().all(|v| v.is_finite()));
     }
 
-    /// `predict_q4k_decode_step` (dequant path) on the same SiLU
+    /// `predict_kquant_decode_step` (dequant path) on the same SiLU
     /// fixture — exercises `run_ffn`'s SiLU branch.
     #[test]
-    fn predict_q4k_decode_step_silu_activation_path() {
+    fn predict_kquant_decode_step_silu_activation_path() {
         let mut weights = make_llama_q4k_weights();
         let index = make_test_q4k_vindex(&weights);
         let token_ids = vec![1u32, 2];
-        let (_, mut cache, _) = predict_q4k_prefill(&mut weights, &token_ids, &index);
+        let (_, mut cache, _) = predict_kquant_prefill(&mut weights, &token_ids, &index);
         let (h_new, _) =
-            predict_q4k_decode_step(&mut weights, 3, &index, &mut cache, token_ids.len())
+            predict_kquant_decode_step(&mut weights, 3, &index, &mut cache, token_ids.len())
                 .expect("SiLU dequant decode step must succeed");
         assert!(h_new.iter().all(|v| v.is_finite()));
     }

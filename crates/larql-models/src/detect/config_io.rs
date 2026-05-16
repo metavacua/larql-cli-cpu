@@ -29,23 +29,24 @@ pub(super) const CONFIG_KEY_TEXT_CONFIG: &str = "text_config";
 pub(super) const CONFIG_KEY_HIDDEN_SIZE_ALIASES: &[&str] = &["hidden_size", "n_embd"];
 
 /// Aliases for `num_hidden_layers`. GPT-2 family uses `n_layer`.
-pub(super) const CONFIG_KEY_NUM_HIDDEN_LAYERS_ALIASES: &[&str] =
-    &["num_hidden_layers", "n_layer"];
+pub(super) const CONFIG_KEY_NUM_HIDDEN_LAYERS_ALIASES: &[&str] = &["num_hidden_layers", "n_layer"];
 
 /// Aliases for `intermediate_size`. GPT-2 sometimes sets `n_inner`; when it
 /// doesn't, the parser fills in `4 * hidden_size` for `gpt2` model_type
 /// (HF's model-side fallback in `GPT2Config.n_inner`).
-pub(super) const CONFIG_KEY_INTERMEDIATE_SIZE_ALIASES: &[&str] =
-    &["intermediate_size", "n_inner"];
+pub(super) const CONFIG_KEY_INTERMEDIATE_SIZE_ALIASES: &[&str] = &["intermediate_size", "n_inner"];
 
 /// Aliases for `num_attention_heads`. GPT-2 family uses `n_head`.
 pub(super) const CONFIG_KEY_NUM_ATTENTION_HEADS_ALIASES: &[&str] =
     &["num_attention_heads", "n_head"];
 
-// Canonical (first-of-alias-list) names kept for backwards compatibility
-// with single-name lookups elsewhere in the codebase.
+// Canonical (first-of-alias-list) names. Only consumed from the test
+// module today; production code reads through the alias lists above.
+#[cfg(test)]
 pub(super) const CONFIG_KEY_HIDDEN_SIZE: &str = CONFIG_KEY_HIDDEN_SIZE_ALIASES[0];
+#[cfg(test)]
 pub(super) const CONFIG_KEY_NUM_HIDDEN_LAYERS: &str = CONFIG_KEY_NUM_HIDDEN_LAYERS_ALIASES[0];
+#[cfg(test)]
 pub(super) const CONFIG_KEY_INTERMEDIATE_SIZE: &str = CONFIG_KEY_INTERMEDIATE_SIZE_ALIASES[0];
 
 /// Fields whose absence makes the config unsuitable for inferring topology.

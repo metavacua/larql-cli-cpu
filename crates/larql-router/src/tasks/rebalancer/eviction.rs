@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::RwLock;
+use parking_lot::RwLock;
 
 use crate::grid::GridState;
 use crate::metrics::RouterMetrics;
@@ -17,11 +17,11 @@ pub(super) async fn evict_stale_heartbeats(
     timeout: Duration,
     metrics: Option<&RouterMetrics>,
 ) {
-    let stale = state.read().await.stale_server_ids(timeout);
+    let stale = state.read().stale_server_ids(timeout);
     if stale.is_empty() {
         return;
     }
-    let mut guard = state.write().await;
+    let mut guard = state.write();
     for sid in &stale {
         tracing::warn!(
             server_id = %sid,
@@ -64,7 +64,7 @@ mod tests {
 
         let state = Arc::new(RwLock::new(GridState::default()));
         {
-            let mut g = state.write().await;
+            let mut g = state.write();
             let stale = ServerEntry {
                 server_id: "stale".into(),
                 listen_url: "http://stale".into(),
@@ -96,11 +96,11 @@ mod tests {
     async fn evict_stale_noop_when_all_fresh() {
         let state = Arc::new(RwLock::new(GridState::default()));
         {
-            let mut g = state.write().await;
+            let mut g = state.write();
             g.register(entry("fresh", "http://fresh", "m", 0, 4));
         }
         evict_stale_heartbeats(&state, Duration::from_secs(25), None).await;
-        let g = state.read().await;
+        let g = state.read();
         assert_eq!(g.status_response().servers.len(), 1);
     }
 
@@ -108,7 +108,7 @@ mod tests {
     async fn evict_stale_removes_overdue_servers() {
         let state = Arc::new(RwLock::new(GridState::default()));
         {
-            let mut g = state.write().await;
+            let mut g = state.write();
             // Stale server: last_seen 60s ago.
             let stale = ServerEntry {
                 server_id: "stale".into(),
@@ -134,7 +134,7 @@ mod tests {
 
         evict_stale_heartbeats(&state, Duration::from_secs(25), None).await;
 
-        let g = state.read().await;
+        let g = state.read();
         assert_eq!(
             g.status_response().servers.len(),
             0,

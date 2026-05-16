@@ -42,3 +42,21 @@ pub(crate) fn entry(
         expert_end: 0,
     }
 }
+
+/// ADR-0018 / ADR-0021 — like [`entry`] but with an expert range.
+/// Useful for MoE-shaped tests of `route_expert` /
+/// `route_expert_with_rank`.
+pub(crate) fn entry_with_experts(
+    server_id: &str,
+    listen_url: &str,
+    model_id: &str,
+    layer_start: u32,
+    layer_end: u32,
+    expert_start: u32,
+    expert_end: u32,
+) -> ServerEntry {
+    let mut e = entry(server_id, listen_url, model_id, layer_start, layer_end);
+    e.expert_start = expert_start;
+    e.expert_end = expert_end;
+    e
+}

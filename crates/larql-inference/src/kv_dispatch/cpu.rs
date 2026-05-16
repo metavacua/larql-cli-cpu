@@ -376,7 +376,7 @@ impl KvDispatch for CpuBackend {
             return None;
         }
         let (h_full, cache, _timings) =
-            crate::vindex::predict_q4k_prefill(weights, token_ids, index);
+            crate::vindex::predict_kquant_prefill(weights, token_ids, index);
         let last = h_full.shape()[0] - 1;
         let h = h_full.slice(ndarray::s![last..=last, ..]).to_owned();
         let handle = KvHandle::new(CpuQ4kCacheHandle { cache });
@@ -395,7 +395,7 @@ impl KvDispatch for CpuBackend {
         let inner = cpu_q4k_cache_mut(handle);
         // Prefer direct-matvec (no per-layer dequant) when supported.
         if crate::vindex::supports_direct_matvec_decode(weights, index) {
-            crate::vindex::predict_q4k_decode_step_direct(
+            crate::vindex::predict_kquant_decode_step_direct(
                 weights,
                 token_id,
                 index,
@@ -404,7 +404,7 @@ impl KvDispatch for CpuBackend {
                 abs_position,
             )
         } else {
-            crate::vindex::predict_q4k_decode_step(
+            crate::vindex::predict_kquant_decode_step(
                 weights,
                 token_id,
                 index,

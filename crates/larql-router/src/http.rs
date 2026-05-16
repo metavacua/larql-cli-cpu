@@ -12,8 +12,8 @@ use axum::http::{header, StatusCode};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use parking_lot::RwLock;
 use serde_json::Value;
-use tokio::sync::RwLock;
 
 use crate::dispatch::{
     build_subrequest_body, group_layers_by_url, hedged_post_json, merge_shard_responses,
@@ -64,7 +64,7 @@ impl AppState {
         layers: &[usize],
     ) -> Result<HashMap<usize, String>, usize> {
         if let Some(grid) = &self.grid {
-            let guard = grid.read().await;
+            let guard = grid.read();
             let mut out = HashMap::with_capacity(layers.len());
             let mut static_needed: Vec<usize> = Vec::new();
             for &layer in layers {
@@ -356,7 +356,7 @@ async fn handle_walk_ffn_inner(
             // (503). Saturation increments a counter so operators
             // can see the load-shedding signal.
             let saturated = match &state.grid {
-                Some(grid) => grid.read().await.has_owners_for(mid, missing as u32),
+                Some(grid) => grid.read().has_owners_for(mid, missing as u32),
                 None => false,
             };
             if saturated {
@@ -413,7 +413,7 @@ async fn handle_walk_ffn_inner(
     let secondary_by_primary: HashMap<String, Option<String>> = if hedge_after.is_some() {
         let mut out = HashMap::with_capacity(by_url.len());
         if let Some(grid) = &state.grid {
-            let guard = grid.read().await;
+            let guard = grid.read();
             for (primary, shard_layers) in &by_url {
                 // Any layer in the group resolves the same replica set
                 // (groups share a primary URL → same owning shard range).
@@ -437,9 +437,7 @@ async fn handle_walk_ffn_inner(
         let sub_body = build_subrequest_body(&body_value, shard_layers);
         let client = state.client.clone();
         let primary = url.clone();
-        let secondary = secondary_by_primary
-            .get(url)
-            .and_then(|s| s.clone());
+        let secondary = secondary_by_primary.get(url).and_then(|s| s.clone());
         handles.push(tokio::spawn(async move {
             let (result, outcome) = hedged_post_json(
                 &client,
@@ -454,12 +452,11 @@ async fn handle_walk_ffn_inner(
         }));
     }
 
-    let joined: Vec<(Result<Value, String>, HedgeOutcome)> =
-        futures::future::join_all(handles)
-            .await
-            .into_iter()
-            .map(|jh| jh.unwrap_or_else(|e| (Err(e.to_string()), HedgeOutcome::default())))
-            .collect();
+    let joined: Vec<(Result<Value, String>, HedgeOutcome)> = futures::future::join_all(handles)
+        .await
+        .into_iter()
+        .map(|jh| jh.unwrap_or_else(|e| (Err(e.to_string()), HedgeOutcome::default())))
+        .collect();
 
     // Surface hedge outcomes to metrics before the early-return on
     // shard-error so even a failed hedge still increments the counter.
@@ -528,7 +525,7 @@ async fn handle_moe_dispatch(
         .collect();
 
     let layer_expert_urls = {
-        let guard = grid.read().await;
+        let guard = grid.read();
         guard
             .route_all_experts(model_id, &flat)
             .map_err(|(layer, expert)| {
@@ -550,6 +547,32 @@ async fn handle_moe_dispatch(
             .or_default()
             .push(*expert);
     }
+
+    // ADR-0021 — derive a secondary URL per primary group when hedging
+    // is enabled. Hedge only fires on the reqwest path; the h3 fan-out
+    // already gets per-stream independence (ADR-0019), and a hedged h3
+    // helper isn't in scope for this ADR.
+    let hedge_after = state.hedge_after;
+    let secondary_by_primary: HashMap<String, Option<String>> = if hedge_after.is_some() {
+        let mut out = HashMap::with_capacity(by_url.len());
+        let guard = grid.read();
+        for (primary, layer_to_experts) in &by_url {
+            // Any (layer, expert) in this group is owned by `primary`;
+            // they share an owning replica set, so the first pair's
+            // secondary is the secondary for the whole group.
+            let (probe_layer, probe_expert) = layer_to_experts
+                .iter()
+                .next()
+                .and_then(|(l, exs)| exs.first().map(|e| (*l as u32, *e)))
+                .unwrap_or((0, 0));
+            let ranked = guard.route_expert_with_rank(model_id, probe_layer, probe_expert, 2);
+            let secondary = ranked.into_iter().find(|u| u != primary);
+            out.insert(primary.clone(), secondary);
+        }
+        out
+    } else {
+        HashMap::new()
+    };
 
     let mut handles = Vec::new();
     for (url, layer_to_experts) in by_url {
@@ -574,34 +597,58 @@ async fn handle_moe_dispatch(
         // to the same shard stop blocking each other on TCP HoL.
         #[cfg(feature = "http3")]
         if let Some(h3) = state.h3_client.clone() {
-            handles.push(tokio::spawn(dispatch_via_h3(h3, url.clone(), sub_body)));
+            let h3_handle: tokio::task::JoinHandle<(Result<Value, String>, HedgeOutcome)> =
+                tokio::spawn(async move {
+                    let r = dispatch_via_h3(h3, url.clone(), sub_body).await;
+                    (r, HedgeOutcome::default())
+                });
+            handles.push(h3_handle);
             continue;
         }
 
         let client = state.client.clone();
-        let target = format!("{url}/v1/walk-ffn");
+        let secondary = secondary_by_primary.get(&url).and_then(|s| s.clone());
+        let primary = url.clone();
         handles.push(tokio::spawn(async move {
-            client
-                .post(&target)
-                .json(&sub_body)
-                .send()
-                .await
-                .map_err(|e| e.to_string())?
-                .json::<Value>()
-                .await
-                .map_err(|e| e.to_string())
+            hedged_post_json(
+                &client,
+                &primary,
+                secondary.as_deref(),
+                hedge_after,
+                "/v1/walk-ffn",
+                &sub_body,
+            )
+            .await
         }));
     }
 
     let mut responses = Vec::with_capacity(handles.len());
     for h in handles {
         match h.await {
-            Ok(Ok(v)) => responses.push(v),
-            Ok(Err(e)) => {
+            Ok((Ok(v), outcome)) => {
+                if let Some(m) = &state.metrics {
+                    if outcome.fired {
+                        m.route_hedge_fires_total.inc();
+                    }
+                    if outcome.won {
+                        m.route_hedge_wins_total.inc();
+                    }
+                }
+                responses.push(v)
+            }
+            Ok((Err(e), outcome)) => {
+                if let Some(m) = &state.metrics {
+                    if outcome.fired {
+                        m.route_hedge_fires_total.inc();
+                    }
+                    if outcome.won {
+                        m.route_hedge_wins_total.inc();
+                    }
+                }
                 return Err((
                     StatusCode::BAD_GATEWAY,
                     format!("MoE sub-request to shard failed: {e}"),
-                ))
+                ));
             }
             Err(e) => {
                 return Err((
@@ -712,7 +759,7 @@ pub async fn handle_health() -> Json<Value> {
 /// `/v1/stats`) work transparently through the router.
 pub async fn handle_stats(State(state): State<Arc<AppState>>) -> Response {
     let grid_urls = if let Some(grid) = &state.grid {
-        grid.read().await.all_shard_urls()
+        grid.read().all_shard_urls()
     } else {
         Vec::new()
     };

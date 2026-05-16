@@ -26,7 +26,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::RwLock;
+use parking_lot::RwLock;
 use tracing::debug;
 
 use crate::grid::GridState;
@@ -105,7 +105,7 @@ async fn probe_round(
 ) {
     // Snapshot under a read lock so the probes run lock-free.
     let targets: Vec<(String, String)> = {
-        let g = state.read().await;
+        let g = state.read();
         g.servers()
             .map(|(id, e)| (id.clone(), e.listen_url.clone()))
             .collect()
@@ -119,7 +119,7 @@ async fn probe_round(
     let results: Vec<(String, Option<f32>)> = futures::future::join_all(probes).await;
 
     // Write phase: single write lock, batch updates.
-    let mut g = state.write().await;
+    let mut g = state.write();
     for (server_id, rtt) in results {
         g.update_rtt_ms(&server_id, rtt);
     }
@@ -269,7 +269,7 @@ mod tests {
         let addr = spawn_health_server(axum::http::StatusCode::OK).await;
         let state = Arc::new(RwLock::new(GridState::default()));
         {
-            let mut g = state.write().await;
+            let mut g = state.write();
             g.register(make_entry("srv", &format!("http://{addr}")));
         }
         let client = reqwest::Client::builder()
@@ -277,7 +277,7 @@ mod tests {
             .build()
             .unwrap();
         probe_round(&state, &client, None).await;
-        let g = state.read().await;
+        let g = state.read();
         let (_, entry) = g.servers().find(|(id, _)| **id == "srv").unwrap();
         let rtt = entry.rtt_ms.expect("probe_round must write rtt_ms");
         assert!((0.0..1000.0).contains(&rtt), "got {rtt} ms");

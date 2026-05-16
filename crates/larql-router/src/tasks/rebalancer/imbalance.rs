@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::sync::RwLock;
+use parking_lot::RwLock;
 use tracing::{debug, info};
 
 use larql_router_protocol::{RouterMessage, RouterPayload, UnassignMsg};
@@ -51,7 +51,7 @@ pub(super) async fn check_imbalance(
     // Collect per-layer latency data across all servers.
     // Group by (model_id, layer) → Vec<(server_id, avg_ms)>.
     let snapshot = {
-        let guard = state.read().await;
+        let guard = state.read();
         let mut by_layer: HashMap<(String, u32), Vec<(String, f32)>> = HashMap::new();
         for (sid, entry) in guard.servers() {
             for (&layer, &(avg_ms, _p99)) in &entry.layer_latencies {
@@ -134,7 +134,7 @@ async fn send_unassign(
     model_id: &str,
     layer: u32,
 ) {
-    let guard = state.read().await;
+    let guard = state.read();
     if let Some(tx) = guard.serving_sender(server_id) {
         let msg = RouterMessage {
             payload: Some(RouterPayload::Unassign(UnassignMsg {
@@ -181,7 +181,7 @@ mod tests {
         let cfg = RebalancerConfig::default();
         let mut tracker = ImbalanceTracker::default();
         {
-            let mut g = state.write().await;
+            let mut g = state.write();
             let mut a = entry("a", "http://a", "m", 0, 0);
             a.layer_latencies.insert(0, (5.0, 10.0));
             let mut b = entry("b", "http://b", "m", 0, 0);
@@ -202,7 +202,7 @@ mod tests {
         let (fast_tx, _fast_rx) = mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
         let (spare_tx, _spare_rx) = mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
         {
-            let mut g = state.write().await;
+            let mut g = state.write();
             // Two replicas with a 10× latency gap on layer 0.
             let mut slow = entry("slow", "http://slow", "m", 0, 0);
             slow.layer_latencies.insert(0, (50.0, 100.0));
@@ -242,7 +242,7 @@ mod tests {
         let state = Arc::new(RwLock::new(GridState::default()));
         let (spare_tx, _spare_rx) = mpsc::channel::<Result<RouterMessage, tonic::Status>>(4);
         {
-            let mut g = state.write().await;
+            let mut g = state.write();
             let mut a = entry("a", "http://a", "m", 0, 0);
             a.layer_latencies.insert(0, (5.0, 10.0));
             let mut b = entry("b", "http://b", "m", 0, 0);

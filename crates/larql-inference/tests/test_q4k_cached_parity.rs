@@ -24,8 +24,8 @@ use std::path::PathBuf;
 
 use larql_compute::CpuBackend;
 use larql_inference::vindex::{
-    predict_q4k_decode_step, predict_q4k_decode_step_direct, predict_kquant_hidden,
-    predict_q4k_prefill, supports_cached_decode, supports_direct_matvec_decode,
+    predict_kquant_decode_step, predict_kquant_decode_step_direct, predict_kquant_hidden,
+    predict_kquant_prefill, supports_cached_decode, supports_direct_matvec_decode,
 };
 use larql_vindex::{
     load_model_weights_q4k, load_vindex_tokenizer, SilentLoadCallbacks, VectorIndex,
@@ -101,13 +101,13 @@ fn cached_decode_matches_uncached_tokens() {
     const STEPS: usize = 6;
 
     // ── Path A: cached prefill + decode_step ──────────────────────
-    let (h_prompt, mut cache, _) = predict_q4k_prefill(&mut weights_a, &prompt_ids, &q4_index);
+    let (h_prompt, mut cache, _) = predict_kquant_prefill(&mut weights_a, &prompt_ids, &q4_index);
     let mut next_id = argmax_token(&weights_a, &tokenizer, &h_prompt);
     let mut cached_ids = vec![next_id];
     for step in 1..STEPS {
         let abs_position = prompt_ids.len() + (step - 1);
         let (h_new, _) =
-            predict_q4k_decode_step(&mut weights_a, next_id, &q4_index, &mut cache, abs_position)
+            predict_kquant_decode_step(&mut weights_a, next_id, &q4_index, &mut cache, abs_position)
                 .expect("cached decode step");
         next_id = argmax_token(&weights_a, &tokenizer, &h_new);
         cached_ids.push(next_id);
@@ -167,12 +167,12 @@ fn direct_matvec_decode_matches_dequant_path() {
     let backend = CpuBackend;
 
     // ── Path A: cached prefill + direct-matvec decode ─────────────
-    let (h_prompt_a, mut cache_a, _) = predict_q4k_prefill(&mut weights_a, &prompt_ids, &q4_index);
+    let (h_prompt_a, mut cache_a, _) = predict_kquant_prefill(&mut weights_a, &prompt_ids, &q4_index);
     let mut next_id = argmax_token(&weights_a, &tokenizer, &h_prompt_a);
     let mut direct_ids = vec![next_id];
     for step in 1..STEPS {
         let abs_position = prompt_ids.len() + (step - 1);
-        let h_new = predict_q4k_decode_step_direct(
+        let h_new = predict_kquant_decode_step_direct(
             &mut weights_a,
             next_id,
             &q4_index,
@@ -186,12 +186,12 @@ fn direct_matvec_decode_matches_dequant_path() {
     }
 
     // ── Path B: cached prefill + dequant decode ───────────────────
-    let (h_prompt_b, mut cache_b, _) = predict_q4k_prefill(&mut weights_b, &prompt_ids, &q4_index);
+    let (h_prompt_b, mut cache_b, _) = predict_kquant_prefill(&mut weights_b, &prompt_ids, &q4_index);
     let mut next_id = argmax_token(&weights_b, &tokenizer, &h_prompt_b);
     let mut dequant_ids = vec![next_id];
     for step in 1..STEPS {
         let abs_position = prompt_ids.len() + (step - 1);
-        let (h_new, _) = predict_q4k_decode_step(
+        let (h_new, _) = predict_kquant_decode_step(
             &mut weights_b,
             next_id,
             &q4_index,
