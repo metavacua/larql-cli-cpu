@@ -288,17 +288,23 @@ pub fn try_read_buffer_f32(buf: &metal::Buffer, len: usize) -> Option<Vec<f32>> 
 mod tests {
     use super::*;
 
-    fn dev() -> Option<Device> {
-        Device::system_default()
+    // `dev()` previously returned `Option<Device>` so each test could
+    // early-return on non-Metal hosts.  Since this module is already
+    // `#[cfg(all(feature = "metal", target_os = "macos"))]`-gated by
+    // `lib.rs`, no test runner that compiles these tests is missing a
+    // Metal device — the early-return branch was permanently dead
+    // (uncovered region count: 10).  Panic on a missing device instead;
+    // we only reach this path on a misconfigured runner where failure
+    // is the right outcome.
+    fn dev() -> Device {
+        Device::system_default().expect("Metal device available on test host")
     }
 
     /// `get_f32` caches by (pointer, len). The same slice handed in
     /// twice must return the same Buffer (one allocation, two clones).
     #[test]
     fn get_f32_caches_by_slice_identity() {
-        let Some(d) = dev() else {
-            return;
-        };
+        let d = dev();
         let cache = BufferCache::new(&d);
         let data = vec![1.0f32, 2.0, 3.0, 4.0];
         assert_eq!(cache.len(), 0);
@@ -313,9 +319,7 @@ mod tests {
     /// happen to be byte-identical (cache key is pointer+len, not value).
     #[test]
     fn get_f32_distinct_slices_get_distinct_buffers() {
-        let Some(d) = dev() else {
-            return;
-        };
+        let d = dev();
         let cache = BufferCache::new(&d);
         let a = vec![1.0f32; 16];
         let b = vec![1.0f32; 16];
@@ -328,9 +332,7 @@ mod tests {
     /// allocations, so the cache returns a single shared stub buffer.
     #[test]
     fn get_f32_empty_slice_returns_shared_stub() {
-        let Some(d) = dev() else {
-            return;
-        };
+        let d = dev();
         let cache = BufferCache::new(&d);
         let empty: Vec<f32> = vec![];
         let b1 = cache.get_f32(&empty);
@@ -344,9 +346,7 @@ mod tests {
     /// stub (cache keys are different — `(0,0)` vs `(1,0)`).
     #[test]
     fn empty_f32_and_empty_bytes_have_separate_stubs() {
-        let Some(d) = dev() else {
-            return;
-        };
+        let d = dev();
         let cache = BufferCache::new(&d);
         let _ = cache.get_f32(&[][..]);
         let _ = cache.get_bytes(&[][..]);
@@ -360,9 +360,7 @@ mod tests {
     /// `transient_from_*` does NOT cache. Ten calls = ten allocations.
     #[test]
     fn transient_buffers_are_not_cached() {
-        let Some(d) = dev() else {
-            return;
-        };
+        let d = dev();
         let cache = BufferCache::new(&d);
         let data = vec![0.0f32; 64];
         let _b1 = cache.transient_from_f32(&data);
@@ -374,9 +372,7 @@ mod tests {
     /// size (Metal may round up but never under).
     #[test]
     fn output_buffer_is_at_least_requested_size() {
-        let Some(d) = dev() else {
-            return;
-        };
+        let d = dev();
         let cache = BufferCache::new(&d);
         let buf = cache.output(1024);
         assert!(buf.length() >= 1024);
@@ -391,9 +387,7 @@ mod tests {
     /// "buffer-finished → CPU read" contract.
     #[test]
     fn read_buffer_f32_round_trip() {
-        let Some(d) = dev() else {
-            return;
-        };
+        let d = dev();
         let cache = BufferCache::new(&d);
         let src: Vec<f32> = (0..16).map(|i| i as f32 * 0.5).collect();
         let buf = cache.transient_from_f32(&src);
@@ -405,9 +399,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "buffer is undersized")]
     fn read_buffer_f32_panics_when_buffer_undersized() {
-        let Some(d) = dev() else {
-            panic!("buffer is undersized"); // simulate the failure on non-Metal hosts
-        };
+        let d = dev();
         let cache = BufferCache::new(&d);
         let buf = cache.output(4); // 1 f32
         let _ = read_buffer_f32(&buf, 100); // ask for 100 → must panic
@@ -417,9 +409,7 @@ mod tests {
     /// instead of panicking — the bench-safe path.
     #[test]
     fn try_read_buffer_f32_none_when_buffer_undersized() {
-        let Some(d) = dev() else {
-            return;
-        };
+        let d = dev();
         let cache = BufferCache::new(&d);
         let buf = cache.output(4); // 1 f32
         assert!(try_read_buffer_f32(&buf, 100).is_none());
@@ -430,12 +420,122 @@ mod tests {
     /// data, only avoid the panic.
     #[test]
     fn try_read_buffer_f32_round_trips_on_healthy_buffer() {
-        let Some(d) = dev() else {
-            return;
-        };
+        let d = dev();
         let cache = BufferCache::new(&d);
         let src: Vec<f32> = (0..8).map(|i| i as f32 * 1.5).collect();
         let buf = cache.transient_from_f32(&src);
         assert_eq!(try_read_buffer_f32(&buf, src.len()), Some(src));
+    }
+
+    /// `get_bytes` empty slice returns the cached `(1,0)` stub on the
+    /// second call rather than allocating a new 4-byte buffer.
+    #[test]
+    fn get_bytes_empty_slice_reuses_cached_stub() {
+        let d = dev();
+        let cache = BufferCache::new(&d);
+        let b1 = cache.get_bytes(&[][..]);
+        let b2 = cache.get_bytes(&[][..]);
+        assert_eq!(cache.len(), 1, "empty-bytes stub is reused, not realloc'd");
+        assert_eq!(b1.gpu_address(), b2.gpu_address());
+    }
+
+    /// `transient_from_bytes` with empty input returns a fresh minimal
+    /// (4-byte) buffer each call — uncached, no stub reuse.
+    #[test]
+    fn transient_from_bytes_empty_returns_uncached_minimal_buffer() {
+        let d = dev();
+        let cache = BufferCache::new(&d);
+        let b1 = cache.transient_from_bytes(&[][..]);
+        let b2 = cache.transient_from_bytes(&[][..]);
+        assert_eq!(b1.length(), 4);
+        assert_eq!(b2.length(), 4);
+        assert_eq!(
+            cache.len(),
+            0,
+            "transient_from_bytes never touches the cache"
+        );
+        // Distinct allocations (uncached path).
+        assert_ne!(b1.gpu_address(), b2.gpu_address());
+    }
+
+    /// `transient_from_bytes` non-empty path copies the data into a
+    /// fresh shared-storage buffer and does not cache.
+    #[test]
+    fn transient_from_bytes_nonempty_copies_data() {
+        let d = dev();
+        let cache = BufferCache::new(&d);
+        let src: Vec<u8> = (0..64u8).collect();
+        let buf = cache.transient_from_bytes(&src);
+        assert!(buf.length() as usize >= src.len());
+        assert_eq!(cache.len(), 0, "transient calls do not cache");
+    }
+
+    /// `transient_from_i8` copies an `i8` slice into a fresh buffer
+    /// the same way `transient_from_bytes` does for `u8`.  Coverage
+    /// pin for the i8 helper specifically — used by the Q8 quantised
+    /// input path.
+    #[test]
+    fn transient_from_i8_copies_data() {
+        let d = dev();
+        let cache = BufferCache::new(&d);
+        let src: Vec<i8> = (-16..16).collect();
+        let buf = cache.transient_from_i8(&src);
+        assert!(buf.length() as usize >= src.len());
+    }
+
+    /// `output()` after `recycle()` returns the recycled buffer (pool
+    /// hit path), not a fresh allocation.  Verified by gpu_address
+    /// equality.
+    #[test]
+    fn output_pool_returns_recycled_buffer_on_size_match() {
+        let d = dev();
+        let cache = BufferCache::new(&d);
+        let first = cache.output(2048);
+        let first_addr = first.gpu_address();
+        cache.recycle(first);
+
+        let second = cache.output(2048);
+        assert_eq!(
+            second.gpu_address(),
+            first_addr,
+            "second output() of the same size should reuse the recycled buffer"
+        );
+    }
+
+    /// `is_empty()` is the trait-friendly form of `len() == 0`.  Add
+    /// an explicit cover so the helper doesn't drift out of sync with
+    /// `len()`.
+    #[test]
+    fn is_empty_tracks_len_zero() {
+        let d = dev();
+        let cache = BufferCache::new(&d);
+        assert!(cache.is_empty());
+        let _ = cache.get_f32(&[1.0f32, 2.0, 3.0]);
+        assert!(!cache.is_empty());
+        assert_eq!(cache.len(), 1);
+    }
+
+    /// `ScratchGuard::track` collects buffers; the drop impl recycles
+    /// them into the underlying cache's scratch pool.  Verifies the
+    /// RAII contract by checking the second `output(size)` returns
+    /// the tracked buffer (pool-hit path).
+    #[test]
+    fn scratch_guard_recycles_tracked_buffers_on_drop() {
+        let d = dev();
+        let cache = BufferCache::new(&d);
+        let first_addr = {
+            let mut guard = ScratchGuard::new(&cache);
+            let buf = cache.output(512);
+            let addr = buf.gpu_address();
+            guard.track(&buf);
+            addr
+            // guard drops here, recycling buf
+        };
+        let reused = cache.output(512);
+        assert_eq!(
+            reused.gpu_address(),
+            first_addr,
+            "ScratchGuard drop must recycle into the scratch pool"
+        );
     }
 }

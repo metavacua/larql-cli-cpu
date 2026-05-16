@@ -106,9 +106,10 @@ pub struct PatchedVindex {
     pub knn_store: super::knn_store::KnnStore,
     /// Lazy per-layer cache of `overrides_gate` flattened into a
     /// contiguous matrix. Built on first `gate_knn` query at each
-    /// layer; cleared by every mutator that touches
-    /// `overrides_gate`. `Arc` so cached entries can be read without
-    /// holding the outer `RwLock` for the whole matvec.
+    /// layer; per-layer invalidation by every mutator that touches
+    /// `overrides_gate` so a single-layer patch stream leaves
+    /// unrelated layers' caches hot. `Arc` lets cached entries be
+    /// read without holding the outer `RwLock` for the whole matvec.
     gate_cache: RwLock<HashMap<usize, Arc<LayerGateCache>>>,
 }
 
@@ -126,14 +127,29 @@ impl PatchedVindex {
         }
     }
 
-    /// Drop the lazy `overrides_gate` matrix cache. Called by every
-    /// mutator that touches `overrides_gate` so subsequent
-    /// `gate_knn` queries rebuild against the fresh override state.
-    /// Takes `&mut self` to be explicit about who's invalidating;
-    /// the `RwLock` is internal and never poisoned in practice.
+    /// Drop every layer's cached `overrides_gate` matrix. Used by
+    /// `rebuild_overrides`, which clears the entire override state at
+    /// once and re-applies the patch list from scratch. Per-mutation
+    /// sites prefer [`invalidate_gate_cache_layer`] so a busy
+    /// patch-stream doesn't keep evicting unrelated layers.
+    ///
+    /// `&mut self` is explicit about who's invalidating; the `RwLock`
+    /// is internal and never poisoned in practice.
     pub(crate) fn invalidate_gate_cache(&mut self) {
         if let Ok(mut g) = self.gate_cache.write() {
             g.clear();
+        }
+    }
+
+    /// Drop the cached `overrides_gate` matrix for one layer. Called
+    /// by `insert_feature` / `delete_feature` / `set_gate_override`
+    /// (which all know their target layer) and by `apply_patch` (once
+    /// per touched layer, deduplicated). Leaves caches for other
+    /// layers intact — important for high-frequency patch streams
+    /// that touch a single layer repeatedly.
+    pub(crate) fn invalidate_gate_cache_layer(&mut self, layer: usize) {
+        if let Ok(mut g) = self.gate_cache.write() {
+            g.remove(&layer);
         }
     }
 
@@ -209,7 +225,7 @@ impl PatchedVindex {
         self.overrides_meta.insert(key, Some(meta));
         self.overrides_gate.insert(key, gate_vec);
         self.deleted.remove(&key);
-        self.invalidate_gate_cache();
+        self.invalidate_gate_cache_layer(layer);
     }
 
     /// Delete a feature via the overlay.
@@ -218,7 +234,7 @@ impl PatchedVindex {
         self.overrides_meta.insert(key, None);
         self.deleted.insert(key);
         self.overrides_gate.remove(&key);
-        self.invalidate_gate_cache();
+        self.invalidate_gate_cache_layer(layer);
     }
 
     /// Update feature metadata via the overlay.
@@ -310,9 +326,9 @@ impl PatchedVindex {
     /// only refine slots that were already touched by a patch).
     pub fn set_gate_override(&mut self, layer: usize, feature: usize, vector: Vec<f32>) {
         let key = (layer, feature);
-        if self.overrides_gate.contains_key(&key) {
-            self.overrides_gate.insert(key, vector);
-            self.invalidate_gate_cache();
+        if let Some(slot) = self.overrides_gate.get_mut(&key) {
+            *slot = vector;
+            self.invalidate_gate_cache_layer(layer);
         }
     }
 
@@ -428,11 +444,7 @@ impl PatchedVindex {
                     hits.reserve(cache.feature_ids.len());
                     for (i, &feat) in cache.feature_ids.iter().enumerate() {
                         let row = &cache.gate_matrix[i * cache.d..(i + 1) * cache.d];
-                        let score: f32 = row
-                            .iter()
-                            .zip(residual.iter())
-                            .map(|(a, b)| a * b)
-                            .sum();
+                        let score: f32 = row.iter().zip(residual.iter()).map(|(a, b)| a * b).sum();
                         hits.push((feat, score));
                     }
                 } else {
@@ -444,11 +456,7 @@ impl PatchedVindex {
                         hits.iter().enumerate().map(|(i, (f, _))| (*f, i)).collect();
                     for (i, &feat) in cache.feature_ids.iter().enumerate() {
                         let row = &cache.gate_matrix[i * cache.d..(i + 1) * cache.d];
-                        let score: f32 = row
-                            .iter()
-                            .zip(residual.iter())
-                            .map(|(a, b)| a * b)
-                            .sum();
+                        let score: f32 = row.iter().zip(residual.iter()).map(|(a, b)| a * b).sum();
                         match idx.get(&feat) {
                             Some(&hit_idx) => hits[hit_idx].1 = score,
                             None => {
@@ -834,5 +842,118 @@ mod gate_override_tests {
 
         assert_eq!(p.overrides_gate_at(0, 0).unwrap(), &[0.5, 0.5, 0.0, 0.0]);
         assert_eq!(p.overrides_gate_at(0, 1).unwrap(), original_b.as_slice());
+    }
+
+    // ── Coverage for the 2026-05-16 cache + accessor paths ─────────────
+
+    /// Second `gate_knn` query at the same layer should hit the
+    /// `layer_gate_cache` fast path (read-lock branch).
+    #[test]
+    fn gate_knn_second_query_uses_cache_fast_path() {
+        let mut p = make_empty_base();
+        p.insert_feature(0, 1, vec![1.0, 0.0, 0.0, 0.0], make_meta("a"));
+        let q = Array1::from_vec(vec![1.0_f32, 0.0, 0.0, 0.0]);
+        // First call: builds the cache under a write lock.
+        let _ = p.gate_knn(0, &q, 1);
+        // Second call: should reach the `g.get(&layer)` branch and
+        // skip the rebuild. Result equivalence is the load-bearing
+        // assertion; the perf benefit is measured in
+        // `larql-server/benches/shard_query.rs`.
+        let second = p.gate_knn(0, &q, 1);
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].0, 1);
+    }
+
+    /// After mutating layer 1, layer 0's cached entry must survive
+    /// (per-layer invalidation, 2026-05-16).
+    #[test]
+    fn cross_layer_mutation_preserves_other_layer_cache() {
+        let mut p = make_empty_base();
+        p.insert_feature(0, 0, vec![1.0, 0.0, 0.0, 0.0], make_meta("l0"));
+        let q = Array1::from_vec(vec![1.0_f32, 0.0, 0.0, 0.0]);
+        // Warm layer 0's cache.
+        let _ = p.gate_knn(0, &q, 1);
+        // Mutate layer 1 — should NOT invalidate layer 0's cache.
+        p.insert_feature(1, 0, vec![0.0, 1.0, 0.0, 0.0], make_meta("l1"));
+        // Re-query layer 0 — still hits the cached path with the
+        // same result.
+        let hits = p.gate_knn(0, &q, 1);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].0, 0);
+    }
+
+    /// `update_feature_meta` overwrites only meta, leaves gate alone.
+    #[test]
+    fn update_feature_meta_replaces_meta_only() {
+        let mut p = make_empty_base();
+        p.insert_feature(0, 0, vec![1.0, 0.0, 0.0, 0.0], make_meta("a"));
+        p.update_feature_meta(0, 0, make_meta("b"));
+        assert_eq!(p.feature_meta(0, 0).unwrap().top_token, "b");
+        // Gate vector untouched.
+        assert_eq!(p.overrides_gate_at(0, 0), Some(&[1.0, 0.0, 0.0, 0.0][..]));
+    }
+
+    /// `is_overridden` reports `true` for inserted slots, `false`
+    /// otherwise. Trivial accessor — pin behavior so a regression in
+    /// the storage map shape gets caught.
+    #[test]
+    fn is_overridden_tracks_inserted_slots() {
+        let mut p = make_empty_base();
+        assert!(!p.is_overridden(0, 0));
+        p.insert_feature(0, 0, vec![1.0, 0.0, 0.0, 0.0], make_meta("a"));
+        assert!(p.is_overridden(0, 0));
+        assert!(!p.is_overridden(0, 1));
+        assert!(!p.is_overridden(1, 0));
+    }
+
+    /// `base()` / `base_mut()` round-trip the underlying VectorIndex.
+    #[test]
+    fn base_and_base_mut_expose_the_inner_index() {
+        let mut p = make_empty_base();
+        assert_eq!(p.base().num_layers, 2);
+        assert_eq!(p.base().hidden_size, 4);
+        // `base_mut` is used by callers that need to set down/up
+        // vectors directly — verify it round-trips.
+        let _: &mut VectorIndex = p.base_mut();
+    }
+
+    /// `find_free_feature` picks the first overlay-and-base-free
+    /// slot.
+    #[test]
+    fn find_free_feature_picks_first_overlay_free_slot() {
+        // Empty base + empty overlay → slot 0 is free.
+        let p = make_empty_base();
+        assert_eq!(p.find_free_feature(0), Some(0));
+
+        // Overlay claims slot 0 → next free is slot 1.
+        let mut p = make_empty_base();
+        p.insert_feature(0, 0, vec![1.0, 0.0, 0.0, 0.0], make_meta("a"));
+        assert_eq!(p.find_free_feature(0), Some(1));
+
+        // Overlay claims 0 and 1, base claims 2 (via metadata) →
+        // first preference fails (no slot is *both* base-free AND
+        // overlay-free); fallback returns the weakest base-claimed
+        // slot that the overlay hasn't taken, but there are no
+        // overlay-free base-claimed slots here, so the result is
+        // `None`.
+        let mut p2 = make_empty_base();
+        // Inject base metadata at slot 2 so `feature_meta` returns
+        // Some — simulates a populated base slot.
+        p2.base_mut().metadata.down_meta[0] = Some(vec![None, None, Some(make_meta("base"))]);
+        p2.insert_feature(0, 0, vec![1.0, 0.0, 0.0, 0.0], make_meta("a"));
+        p2.insert_feature(0, 1, vec![0.0, 1.0, 0.0, 0.0], make_meta("b"));
+        // Slot 2 has base metadata but no overlay claim → returned
+        // by the fallback (weakest-c_score) loop.
+        assert_eq!(p2.find_free_feature(0), Some(2));
+    }
+
+    /// `find_free_feature` returns `None` on a layer with zero features.
+    #[test]
+    fn find_free_feature_returns_none_when_layer_empty() {
+        // Use an index where layer 0 has zero features to hit the
+        // `n == 0` early return.
+        let index = VectorIndex::empty(2, 4);
+        let p = PatchedVindex::new(index);
+        assert!(p.find_free_feature(0).is_none());
     }
 }

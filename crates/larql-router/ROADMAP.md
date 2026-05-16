@@ -105,25 +105,40 @@ opt-in and not in the default-build path.
 
 ## Coverage
 
-`make larql-router-coverage-summary`:
-
-```
-Coverage policy passed: total 91.48% lines,
-                        7 files checked, 7 files at 90.0% default, 0 debt baselines.
+```bash
+make larql-router-coverage-summary
+make larql-router-protocol-coverage-summary
 ```
 
-Per-file:
+Both crates pass policy (2026-05-16):
+
+| Crate | Total | Files at 90% default | Debt baselines |
+|---|---|---|---|
+| `larql-router` | 91.42% | 7 of 7 | 0 |
+| `larql-router-protocol` | 91.36% | 1 of 1 | 0 |
+
+Router per-file:
 
 | File | Lines |
 |---|---|
-| `shards.rs` | 100.00% |
 | `dispatch.rs` | 100.00% |
+| `shards.rs` | 100.00% |
 | `admin.rs` | 99.64% |
-| `cli_helpers.rs` | 98.59% |
-| `http.rs` | 96.01% |
-| `grid.rs` | 94.91% |
-| `rebalancer.rs` | 93.54% |
+| `cli_helpers.rs` | 98.53% |
+| `http.rs` | 96.03% |
+| `grid.rs` | 94.86% |
+| `rebalancer.rs` | 93.02% |
 | `main.rs` | (excluded — binary entry point) |
+
+Router-protocol: `src/transport/quic.rs` at 91.36% (the only
+instrumented source — proto re-exports filtered out by
+`cargo-llvm-cov` since they live in `target/`).
+
+Vindex coverage (for grid-relevant context — gate_knn lives there):
+
+| Crate | Total | Path used by gate_knn |
+|---|---|---|
+| `larql-vindex` | 90.86% | `patch/overlay.rs` 88.61% (debt baseline 82%) |
 
 ---
 

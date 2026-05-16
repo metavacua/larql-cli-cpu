@@ -16,7 +16,7 @@
 //! - `apollo` (boundary-residual injection)
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use larql_compute::cpu_backend;
+use larql_inference::cpu_engine_backend;
 use larql_inference::ffn::WeightFfn;
 use larql_inference::test_utils::make_test_weights;
 use larql_kv::EngineKind;
@@ -60,7 +60,7 @@ fn bench_prefill(c: &mut Criterion) {
     for (name, kind) in all_engines() {
         group.bench_function(name, |b| {
             b.iter(|| {
-                let mut engine = kind.clone().build(cpu_backend());
+                let mut engine = kind.clone().build(cpu_engine_backend());
                 let _ = engine.prefill(&weights, &ffn, &prompt);
             });
         });
@@ -77,7 +77,7 @@ fn bench_decode_step(c: &mut Criterion) {
     for (name, kind) in all_engines() {
         group.bench_function(name, |b| {
             // Pre-warm: prefill once, then time a single decode_step.
-            let mut engine = kind.clone().build(cpu_backend());
+            let mut engine = kind.clone().build(cpu_engine_backend());
             let _ = engine.prefill(&weights, &ffn, &prompt);
             b.iter(|| {
                 let _ = engine.decode_step(&weights, &ffn, 1);

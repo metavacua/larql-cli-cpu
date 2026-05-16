@@ -401,3 +401,102 @@ impl PleInputBuffer {
         ((position * self.num_layers + layer) * self.ple_dim * 4) as u64
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn backend() -> MetalBackend {
+        MetalBackend::new().expect("Metal device available on test host")
+    }
+
+    #[test]
+    fn new_constructs_backend_with_populated_pipelines() {
+        let m = backend();
+        // Trivial readers: every accessor returns a live handle.
+        assert!(!m.queue().device().name().is_empty());
+        // cache_size starts at 0 — no mmap-backed buffers cached yet.
+        assert_eq!(m.cache_size(), 0);
+    }
+
+    #[test]
+    fn flop_threshold_set_and_min_floor_enforced() {
+        let m = backend();
+        // Default is calibrate::DEFAULT_FLOP_THRESHOLD; set raises it.
+        m.set_flop_threshold(usize::MAX);
+        assert_eq!(m.flop_threshold(), usize::MAX);
+
+        // Below the floor: setter clamps up.
+        m.set_flop_threshold(0);
+        assert_eq!(m.flop_threshold(), calibrate::MIN_FLOP_FLOOR);
+    }
+
+    #[test]
+    fn kv_cache_mut_uniform_shape_initializes_on_first_access() {
+        let m = backend();
+        {
+            let guard = m.kv_cache_mut(4, 2, 64);
+            assert!(
+                guard.is_some(),
+                "kv_cache_mut should initialize on first access"
+            );
+        }
+        // Second access reuses the same cache (same shapes, no realloc).
+        let guard = m.kv_cache_mut(4, 2, 64);
+        assert!(guard.is_some());
+    }
+
+    #[test]
+    fn kv_cache_mut_for_shapes_accepts_explicit_per_layer_geometry() {
+        let m = backend();
+        let shapes = vec![(2usize, 64usize), (2, 64), (4, 32)];
+        let guard = m.kv_cache_mut_for_shapes(&shapes);
+        assert!(guard.is_some());
+    }
+
+    #[test]
+    fn prepare_and_clear_ple_inputs_round_trip() {
+        let m = backend();
+        let num_layers = 4usize;
+        let ple_dim = 8usize;
+        let positions = 2usize;
+        let data: Vec<f32> = (0..positions * num_layers * ple_dim)
+            .map(|i| i as f32)
+            .collect();
+
+        m.prepare_ple_inputs(&data, num_layers, ple_dim);
+        let snap = m
+            .ple_inputs_snapshot()
+            .expect("ple inputs present after prepare");
+        assert_eq!(snap.num_layers, num_layers);
+        assert_eq!(snap.ple_dim, ple_dim);
+        assert_eq!(snap.positions, positions);
+
+        // Position-major offset: (pos=1, layer=2) → ((1*4+2) * 8 * 4) = 192.
+        assert_eq!(snap.row_offset_bytes(1, 2), 192);
+        // First element offset is zero.
+        assert_eq!(snap.row_offset_bytes(0, 0), 0);
+
+        m.clear_ple_inputs();
+        assert!(
+            m.ple_inputs_snapshot().is_none(),
+            "snapshot empty after clear"
+        );
+
+        // Double-clear is idempotent (no panic, still empty).
+        m.clear_ple_inputs();
+        assert!(m.ple_inputs_snapshot().is_none());
+    }
+
+    #[test]
+    fn with_options_explicit_construction_matches_env_path() {
+        // `with_options` is what `new()` calls under the hood after
+        // pulling `BackendOptions::from_env`.  Construct explicitly so
+        // the `BackendOptions` argument path is exercised.
+        let m =
+            MetalBackend::with_options(BackendOptions::from_env()).expect("Metal device available");
+        assert!(m.cache_size() == 0);
+        // decode_flags is plain-data; just confirm it's accessible.
+        let _flags = m.decode_flags;
+    }
+}

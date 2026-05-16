@@ -1,6 +1,6 @@
 //! MarkovResidualEngine — KvEngine implementation.
 
-use larql_compute::{cpu_backend, ComputeBackend};
+use larql_compute::ComputeBackend;
 use larql_vindex::VectorIndex;
 use ndarray::Array2;
 
@@ -11,11 +11,12 @@ use crate::profiler::EngineProfiler;
 use crate::{DecodeStageSummary, EngineInfo, KvEngine};
 use larql_inference::ffn::FfnBackend;
 use larql_inference::model::ModelWeights;
+use larql_inference::{cpu_engine_backend, EngineBackend};
 
 pub struct MarkovResidualEngine {
     window_size: Option<usize>,
     store: Option<RsStore>,
-    backend: Box<dyn ComputeBackend>,
+    backend: Box<dyn EngineBackend>,
     profiling: bool,
     profile: EngineProfiler,
     metal_prefill_done: bool,
@@ -23,10 +24,10 @@ pub struct MarkovResidualEngine {
 
 impl MarkovResidualEngine {
     pub fn new(window_size: Option<usize>) -> Self {
-        Self::with_backend(window_size, cpu_backend())
+        Self::with_backend(window_size, cpu_engine_backend())
     }
 
-    pub fn with_backend(window_size: Option<usize>, backend: Box<dyn ComputeBackend>) -> Self {
+    pub fn with_backend(window_size: Option<usize>, backend: Box<dyn EngineBackend>) -> Self {
         Self {
             window_size,
             store: None,

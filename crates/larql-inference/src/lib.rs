@@ -52,6 +52,9 @@ pub mod forward;
 pub mod forward_overrides;
 pub mod kv_dispatch;
 pub mod kv_dispatch_cpu;
+pub mod kv_dispatch_helpers;
+#[cfg(feature = "metal")]
+pub mod kv_dispatch_metal;
 pub mod kv_engine;
 pub mod layer_graph;
 pub mod model;
@@ -76,6 +79,29 @@ pub use tokenizers;
 pub use larql_compute::cpu::ops::moe::{run_single_expert, run_single_expert_with_norm};
 pub use larql_compute::QuantFormat;
 pub use larql_compute::{cpu_backend, default_backend, ComputeBackend};
+
+/// CPU backend boxed as `EngineBackend`. Use when you need to construct
+/// a backend that satisfies the `EngineBackend` umbrella (so engines
+/// can dispatch through both `ComputeBackend` and `KvDispatch`).
+/// `cpu_backend()` returns `Box<dyn ComputeBackend>` and can't be
+/// upcast to `Box<dyn EngineBackend>` at the trait-object level — use
+/// this factory instead.
+pub fn cpu_engine_backend() -> Box<dyn EngineBackend> {
+    Box::new(larql_compute::CpuBackend)
+}
+
+/// Default backend as `Box<dyn EngineBackend>` — Metal on macOS when
+/// the `metal` feature is enabled, CPU otherwise. Parallel to
+/// `default_backend()` but returns the wider trait object.
+pub fn default_engine_backend() -> Box<dyn EngineBackend> {
+    #[cfg(feature = "metal")]
+    {
+        if let Some(metal) = larql_compute::MetalBackend::new() {
+            return Box::new(metal);
+        }
+    }
+    cpu_engine_backend()
+}
 
 /// Map a model's activation function to the compute-layer `Activation` enum.
 pub fn activation_from_arch(
@@ -102,7 +128,8 @@ pub use ffn::{
     ShardConfig, SparseFfn, WeightFfn, WirePreference,
 };
 pub use kv_dispatch::{
-    CompressionCodec, KvDispatch, KvHandle, KvHandleInner, ResidualHandle, ResidualHandleInner,
+    CompressionCodec, EngineBackend, KvDispatch, KvHandle, KvHandleInner, ResidualHandle,
+    ResidualHandleInner,
 };
 pub use kv_engine::{DecodeStageSummary, EngineInfo, KvEngine};
 // Crate-root forward re-exports — kept for any name with external use OR

@@ -145,13 +145,28 @@ make bench-shard-query
 ```
 
 Latest in-process bench numbers on M3 Max (criterion median):
-`cache_lookup` 2.1 µs at n=16/d=256, 43 µs at n=64/d=1024, 173 µs at
-n=256/d=1024; `vindex_lookup` 3.3 µs / 48 µs / 189 µs at the same
+`cache_lookup` 2.1 µs at n=16/d=256, 43 µs at n=64/d=1024, 171 µs at
+n=256/d=1024; `vindex_lookup` 3.1 µs / 46 µs / 180 µs at the same
 shapes after the 2026-05-16 `PatchedVindex::gate_knn` optimization
-(O(overrides²) → O(overrides) merge, fast-path skip when no patches
-at the layer). The full gRPC wire path adds ~5–10 ms of tonic
-round-trip on loopback (see the demo output) — dominant cost is the
-transport, not the KNN itself.
+pass: empty-base short-circuit, O(overrides²) → O(overrides) merge
+via `HashMap<feat, hit_idx>`, `argmax` instead of sort at
+`top_k = 1`, sort-skip when only deletions modified hits, and a
+per-layer lazy contiguous-matrix cache with per-layer invalidation.
+Cache↔vindex gap closed from ~20% to ~7% at n=256.
+
+The per-layer invalidation wins on cross-layer mutation workloads.
+A/B comparison: querying layer 0 after a layer-1 mutation costs
+46.6 µs (per-layer, current) vs 54.0 µs (whole-cache, prior
+behavior) at n=64/d=1024, and **181.9 µs vs 218.8 µs at
+n=256/d=1024 — a 17% saving on the cross-layer query**. The savings
+scale with the queried layer's feature count (cost of the matvec
+we'd otherwise re-do on every mutation). See
+`bench_vindex_cross_layer_mutation*` in
+`crates/larql-server/benches/shard_query.rs`.
+
+The full gRPC wire path adds ~5–10 ms of tonic round-trip on
+loopback (see the demo output) — dominant cost is the transport,
+not the KNN itself.
 
 ## QUIC transport (opt-in)
 

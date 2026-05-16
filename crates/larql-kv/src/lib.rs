@@ -26,8 +26,6 @@ pub use engines::no_cache::NoCacheEngine;
 pub use engines::standard::StandardEngine;
 pub use engines::unlimited_context::UnlimitedContextEngine;
 
-use larql_compute::ComputeBackend;
-
 // ─── Trait surface re-exported from larql-inference ──────────────────────────
 //
 // `KvEngine`, `EngineInfo`, and `DecodeStageSummary` live in
@@ -157,14 +155,20 @@ impl EngineKind {
     }
 
     /// Build a boxed engine, dispatching compute through `backend`.
-    pub fn build(self, backend: Box<dyn ComputeBackend>) -> Box<dyn KvEngine> {
+    pub fn build(self, backend: Box<dyn larql_inference::EngineBackend>) -> Box<dyn KvEngine> {
         self.build_with_profiling(backend, false)
     }
 
     /// Build a boxed engine with optional per-stage decode profiling.
+    ///
+    /// Takes [`larql_inference::EngineBackend`] — the umbrella over
+    /// `ComputeBackend + KvDispatch` — so migrated engines (Step 3c
+    /// of the ComputeBackend redesign) can dispatch through the
+    /// trait. Construct via `larql_inference::cpu_engine_backend()` /
+    /// `larql_inference::default_engine_backend()`.
     pub fn build_with_profiling(
         self,
-        backend: Box<dyn ComputeBackend>,
+        backend: Box<dyn larql_inference::EngineBackend>,
         profiling: bool,
     ) -> Box<dyn KvEngine> {
         // `profiling` is honoured only by engines that implement it
@@ -320,7 +324,7 @@ mod tests {
 mod compliance_tests {
     use super::*;
     use larql_compute::cpu_backend;
-    use larql_inference::ModelWeights;
+    use larql_inference::{cpu_engine_backend, ModelWeights};
     use ndarray::Array2;
 
     fn all_kinds() -> Vec<EngineKind> {
@@ -348,7 +352,7 @@ mod compliance_tests {
     #[test]
     fn all_engines_memory_zero_before_prefill() {
         for kind in all_kinds() {
-            let engine = kind.clone().build(cpu_backend());
+            let engine = kind.clone().build(cpu_engine_backend());
             assert_eq!(
                 engine.memory_bytes(),
                 0,
@@ -372,7 +376,7 @@ mod compliance_tests {
             "apollo",
         ];
         for (kind, expected_name) in all_kinds().into_iter().zip(expected.iter()) {
-            let engine = kind.build(cpu_backend());
+            let engine = kind.build(cpu_engine_backend());
             assert_eq!(engine.name(), *expected_name);
         }
     }
@@ -381,7 +385,7 @@ mod compliance_tests {
     fn all_engines_info_has_nonempty_fields() {
         for kind in all_kinds() {
             let name = kind.display_name();
-            let engine = kind.build(cpu_backend());
+            let engine = kind.build(cpu_engine_backend());
             let info = engine.info();
             assert!(!info.name.is_empty(), "{name}: empty name");
             assert!(!info.backend.is_empty(), "{name}: empty backend");
@@ -391,7 +395,7 @@ mod compliance_tests {
     #[test]
     fn all_engines_window_tokens_zero_before_prefill() {
         for kind in all_kinds() {
-            let engine = kind.clone().build(cpu_backend());
+            let engine = kind.clone().build(cpu_engine_backend());
             assert_eq!(
                 engine.window_tokens(),
                 0,
@@ -404,7 +408,7 @@ mod compliance_tests {
     #[test]
     fn all_engines_cold_bytes_zero_before_prefill() {
         for kind in all_kinds() {
-            let engine = kind.clone().build(cpu_backend());
+            let engine = kind.clone().build(cpu_engine_backend());
             assert_eq!(
                 engine.cold_bytes(),
                 0,
@@ -417,7 +421,9 @@ mod compliance_tests {
     #[test]
     fn all_engines_stage_summary_none_before_decode() {
         for kind in all_kinds() {
-            let engine = kind.clone().build_with_profiling(cpu_backend(), true);
+            let engine = kind
+                .clone()
+                .build_with_profiling(cpu_engine_backend(), true);
             assert!(
                 engine.stage_summary().is_none(),
                 "{} stage_summary should be None before decode",

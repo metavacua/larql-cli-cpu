@@ -1049,7 +1049,7 @@ fn generate_stream(
     // that limit, so projections run on CPU BLAS even when Metal is
     // available. Real GPU wins require either the Q4K `full_pipeline`
     // (already wired via `--metal` on Q4K vindexes) or batched decode.
-    let backend = larql_compute::default_backend();
+    let backend = larql_inference::default_engine_backend();
     // Captured for the verbose label after `backend` is consumed by the
     // engine builder.
     let backend_name = backend.name().to_string();

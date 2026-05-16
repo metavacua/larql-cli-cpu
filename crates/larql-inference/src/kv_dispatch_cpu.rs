@@ -213,25 +213,23 @@ impl KvDispatch for CpuBackend {
         &self,
         weights: &ModelWeights,
         query: &Array2<f32>,
-        kv: &KvHandle,
+        kv: &mut KvHandle,
         layer: usize,
         abs_position: usize,
     ) -> Option<Array2<f32>> {
-        let h = cpu_handle(kv);
-        let prior_kv = h.as_shared_kv();
-        let (h_post_attn, _new_kv) = run_attention_block_decode_step_backend(
+        let h = cpu_handle_mut(kv);
+        let prior_kv = h.as_shared_kv().cloned();
+        let (h_post_attn, new_kv) = run_attention_block_decode_step_backend(
             weights,
             query,
             layer,
-            prior_kv,
+            prior_kv.as_ref(),
             abs_position,
             Some(self),
         )?;
-        // Note: this method intentionally does NOT mutate the cache. The
-        // returned hidden state is what the engine wants; if the engine
-        // also wants the new K/V written into the cache it should call
-        // `append_kv` separately. (Step 3 engine migration will define
-        // the canonical orchestration.)
+        // Mutate handle: new_kv now contains prior K/V + the current
+        // token's K/V appended. Bit-parity with the legacy decode loop.
+        h.replace_state(new_kv);
         Some(h_post_attn)
     }
 
@@ -350,8 +348,7 @@ mod tests {
     #[test]
     fn upload_boundary_residual_roundtrips() {
         let backend = backend();
-        let residual =
-            Array2::from_shape_vec((3, 4), (0..12).map(|i| i as f32).collect()).unwrap();
+        let residual = Array2::from_shape_vec((3, 4), (0..12).map(|i| i as f32).collect()).unwrap();
         let handle = backend.upload_boundary_residual(&residual).unwrap();
         assert_eq!(handle.shape(), (3, 4));
         assert_eq!(handle.backend_name(), "cpu");
@@ -393,21 +390,24 @@ mod tests {
         let h_in = crate::forward::embed_tokens_pub(&weights, &tokens);
 
         // Populate handle via prefill.
-        let (_, handle) = backend.attention_prefill(&weights, &h_in, 0, None).unwrap();
+        let (_, mut handle) = backend.attention_prefill(&weights, &h_in, 0, None).unwrap();
+        let prior_len = handle.cached_len();
+
+        // Snapshot prior K/V before the trait call mutates the handle.
+        let (k_prior, v_prior) = backend.read_kv_to_host(&handle).unwrap();
+        let prior_kv = (k_prior, v_prior);
 
         // Build a 1-row query as if decoding the next token.
         let h_new = crate::forward::embed_tokens_pub(&weights, &[3u32]);
         let abs_position = tokens.len(); // next position
 
-        // Trait dispatch.
+        // Trait dispatch — mutates handle.
         let h_trait = backend
-            .attention_step(&weights, &h_new, &handle, 0, abs_position)
+            .attention_step(&weights, &h_new, &mut handle, 0, abs_position)
             .expect("attention_step");
 
         // Legacy: same prior K/V, same call.
-        let (k_prior, v_prior) = backend.read_kv_to_host(&handle).unwrap();
-        let prior_kv = (k_prior, v_prior);
-        let (h_legacy, _new_kv) = run_attention_block_decode_step_backend(
+        let (h_legacy, legacy_new_kv) = run_attention_block_decode_step_backend(
             &weights,
             &h_new,
             0,
@@ -420,6 +420,21 @@ mod tests {
         assert_eq!(
             h_trait, h_legacy,
             "attention_step hidden must match legacy bit-for-bit"
+        );
+        // Handle should now hold the legacy `new_kv` (prior + new row).
+        let (k_after, v_after) = backend.read_kv_to_host(&handle).unwrap();
+        assert_eq!(
+            k_after, legacy_new_kv.0,
+            "attention_step must mutate handle K to legacy new_kv.0"
+        );
+        assert_eq!(
+            v_after, legacy_new_kv.1,
+            "attention_step must mutate handle V to legacy new_kv.1"
+        );
+        assert_eq!(
+            handle.cached_len(),
+            prior_len + 1,
+            "handle cached_len must grow by one row"
         );
     }
 
@@ -441,8 +456,7 @@ mod tests {
             .expect("forward_from_layer");
         assert_eq!(h_trait.shape(), &[1, weights.hidden_size]);
 
-        let legacy =
-            crate::forward::forward_from_layer(&weights, &tokens, &residual_flat, 1, None);
+        let legacy = crate::forward::forward_from_layer(&weights, &tokens, &residual_flat, 1, None);
         let last = legacy.h_pre_norm.shape()[0] - 1;
         let h_legacy = legacy
             .h_pre_norm

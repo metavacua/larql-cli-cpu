@@ -141,4 +141,50 @@ mod tests {
         assert!(s.contains("total=10.00ms"));
         assert!(s.contains("1.000ms/layer"));
     }
+
+    /// `format_summary(0)` takes the `else` branch (per_layer = 0.0).
+    #[test]
+    fn format_summary_zero_layers_uses_zero_per_layer() {
+        let p = ProfileTimings {
+            attn_ms: 1.0,
+            gate_up_ms: 1.0,
+            down_ms: 1.0,
+        };
+        let s = p.format_summary(0);
+        assert!(s.contains("0 layers"));
+        assert!(s.contains("0.000ms/layer"));
+    }
+
+    /// `store_last_split_timings` writes to the thread-local cell, and
+    /// `take_last_split_timings` consumes it.  Round-trip covers both
+    /// the `(crate)` writer and the public reader.
+    #[test]
+    fn store_and_take_last_split_timings_round_trip() {
+        // Clear any state leaked from earlier tests on this thread.
+        let _ = take_last_split_timings();
+
+        let written = ProfileTimings {
+            attn_ms: 4.0,
+            gate_up_ms: 2.0,
+            down_ms: 0.5,
+        };
+        store_last_split_timings(written);
+        let read = take_last_split_timings().expect("stored timing should be present");
+        assert!((read.attn_ms - 4.0).abs() < 1e-9);
+        assert!((read.gate_up_ms - 2.0).abs() < 1e-9);
+        assert!((read.down_ms - 0.5).abs() < 1e-9);
+
+        // `take` consumed the cell — second read returns None.
+        assert!(take_last_split_timings().is_none());
+    }
+
+    /// `split_profile_requested` just forwards to the options helper.
+    /// Pin its call shape so a future signature change is caught.
+    #[test]
+    fn split_profile_requested_returns_bool() {
+        // We don't assert a specific truthiness — the env may or may
+        // not be set in the harness — only that the helper is callable
+        // and returns a `bool`.
+        let _: bool = split_profile_requested();
+    }
 }

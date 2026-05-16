@@ -14,7 +14,8 @@
 //!   Token archive = 4 bytes/token
 //!   Total ≈ 30 MB  vs  25.8 GB for Standard KV  (≈2,000×)
 
-use larql_compute::{cpu_backend, ComputeBackend};
+use larql_compute::ComputeBackend;
+use larql_inference::{cpu_engine_backend, EngineBackend};
 use larql_vindex::VectorIndex;
 use ndarray::Array2;
 use serde::Serialize;
@@ -68,15 +69,15 @@ pub struct UnlimitedContextEngine {
     abs_offset: usize,
     /// Hidden state at the last processed token; set by `process()`.
     last_hidden: Option<Array2<f32>>,
-    backend: Box<dyn ComputeBackend>,
+    backend: Box<dyn EngineBackend>,
 }
 
 impl UnlimitedContextEngine {
     pub fn new(window_size: usize) -> Self {
-        Self::with_backend(window_size, cpu_backend())
+        Self::with_backend(window_size, cpu_engine_backend())
     }
 
-    pub fn with_backend(window_size: usize, backend: Box<dyn ComputeBackend>) -> Self {
+    pub fn with_backend(window_size: usize, backend: Box<dyn EngineBackend>) -> Self {
         Self {
             window_size,
             checkpoints: CheckpointStore::new(),

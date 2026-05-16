@@ -1,56 +1,65 @@
 //! StandardEngine — the production K/V cache, wrapped as a `KvEngine`.
 //!
-//! This is the live decode path: a per-layer `KvCache` of `(K_rope, V)`
-//! tensors with optional sliding-window eviction. It is *the same code*
-//! that `larql_inference::forward::generate_cached_bounded` runs today —
-//! `prefill` and `decode_step` delegate to `kv_prefill_run` /
-//! `kv_decode_step_run` in `larql-inference`.
+//! Step 3c (2026-05-16): migrated from direct `kv_prefill_run` /
+//! `kv_decode_step_run` calls to dispatch through
+//! [`larql_inference::EngineBackend`] via
+//! [`kv_prefill_via_dispatch`] / [`kv_decode_step_via_dispatch`].
+//! Cache state is now `Vec<KvHandle>` (one per layer) instead of
+//! `KvCache`. Bit-parity with the legacy path is preserved (verified
+//! in this file's parity tests + `larql-kv`'s end-to-end suite).
 //!
 //! Output is bit-identical to today's `--kv-cache standard` (with
 //! `window_size: None`) and `--kv-cache markov-bounded`
 //! (with `window_size: Some(N)`).
 
-use larql_compute::{cpu_backend, ComputeBackend};
 use ndarray::Array2;
 
 use crate::{EngineInfo, KvEngine};
-use larql_inference::attention::KvCache;
 use larql_inference::ffn::FfnBackend;
-use larql_inference::forward::hooks::NoopHook;
-use larql_inference::forward::{kv_decode_step_run, kv_prefill_run};
+use larql_inference::kv_dispatch_helpers::{kv_decode_step_via_dispatch, kv_prefill_via_dispatch};
 use larql_inference::model::ModelWeights;
+use larql_inference::{cpu_engine_backend, EngineBackend, KvHandle};
 
 /// Production K/V cache engine. `window_size: None` = unbounded growth
 /// (the `--kv-cache standard` flag); `Some(N)` = sliding window (the
 /// `--kv-cache markov-bounded --context-window N` flag combo).
 pub struct StandardEngine {
     window_size: Option<usize>,
-    cache: Option<KvCache>,
-    backend: Box<dyn ComputeBackend>,
+    /// One handle per layer; populated by `prefill`. `None` before
+    /// prefill or if the engine has been reset.
+    handles: Option<Vec<KvHandle>>,
+    /// Tracks the absolute token position of the next token to be
+    /// decoded. Set at the end of `prefill` to `prompt_ids.len()`;
+    /// incremented after each `decode_step`. The legacy `KvCache` had
+    /// its own `next_position` field; this engine tracks it directly.
+    abs_position: usize,
+    backend: Box<dyn EngineBackend>,
 }
 
 impl StandardEngine {
     pub fn new(window_size: Option<usize>) -> Self {
-        Self::with_backend(window_size, cpu_backend())
+        Self::with_backend(window_size, cpu_engine_backend())
     }
 
-    pub fn with_backend(window_size: Option<usize>, backend: Box<dyn ComputeBackend>) -> Self {
+    pub fn with_backend(window_size: Option<usize>, backend: Box<dyn EngineBackend>) -> Self {
         Self {
             window_size,
-            cache: None,
+            handles: None,
+            abs_position: 0,
             backend,
         }
     }
 
     fn cache_memory_bytes(&self) -> usize {
-        let Some(cache) = self.cache.as_ref() else {
+        let Some(handles) = self.handles.as_ref() else {
             return 0;
         };
-        cache
-            .layers
+        handles
             .iter()
-            .filter_map(|opt| opt.as_ref())
-            .map(|(k, v)| (k.len() + v.len()) * std::mem::size_of::<f32>())
+            .map(|h| {
+                // 2 × f32 per cached row (K + V), kv_dim wide.
+                h.cached_len() * h.kv_dim() * 2 * std::mem::size_of::<f32>()
+            })
             .sum()
     }
 }
@@ -83,15 +92,15 @@ impl KvEngine for StandardEngine {
         ffn: &dyn FfnBackend,
         token_ids: &[u32],
     ) -> Option<Array2<f32>> {
-        let (hidden, cache) = kv_prefill_run(
+        let (hidden, handles) = kv_prefill_via_dispatch(
+            self.backend.as_ref(),
             weights,
             ffn,
             token_ids,
             self.window_size,
-            Some(self.backend.as_ref()),
-            &mut NoopHook,
         )?;
-        self.cache = Some(cache);
+        self.handles = Some(handles);
+        self.abs_position = token_ids.len();
         Some(hidden)
     }
 
@@ -101,15 +110,18 @@ impl KvEngine for StandardEngine {
         ffn: &dyn FfnBackend,
         token_id: u32,
     ) -> Option<Array2<f32>> {
-        let cache = self.cache.as_mut()?;
-        kv_decode_step_run(
+        let handles = self.handles.as_mut()?;
+        let hidden = kv_decode_step_via_dispatch(
+            self.backend.as_ref(),
             weights,
             ffn,
-            cache,
+            handles,
             token_id,
-            Some(self.backend.as_ref()),
-            &mut NoopHook,
-        )
+            self.abs_position,
+            self.window_size,
+        )?;
+        self.abs_position += 1;
+        Some(hidden)
     }
 
     fn memory_bytes(&self) -> usize {
@@ -117,10 +129,10 @@ impl KvEngine for StandardEngine {
     }
 
     fn window_tokens(&self) -> usize {
-        self.cache
+        self.handles
             .as_ref()
-            .and_then(|c| c.layers.iter().filter_map(|l| l.as_ref()).next())
-            .map(|(k, _)| k.shape()[0])
+            .and_then(|h| h.first())
+            .map(|h| h.cached_len())
             .unwrap_or(0)
     }
 

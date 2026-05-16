@@ -166,9 +166,9 @@ pub fn run(args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
                 match EngineKind::from_name(engine_name) {
                     Some(kind) => {
                         let backend = if want_metal {
-                            larql_inference::default_backend()
+                            larql_inference::default_engine_backend()
                         } else {
-                            larql_inference::cpu_backend()
+                            larql_inference::cpu_engine_backend()
                         };
                         rows.push(run_engine_q4k(
                             &mut weights,
@@ -203,9 +203,9 @@ pub fn run(args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
                 match EngineKind::from_name(engine_name) {
                     Some(kind) => {
                         let backend = if want_metal {
-                            larql_inference::default_backend()
+                            larql_inference::default_engine_backend()
                         } else {
-                            larql_inference::cpu_backend()
+                            larql_inference::cpu_engine_backend()
                         };
                         rows.push(run_engine(
                             &weights,

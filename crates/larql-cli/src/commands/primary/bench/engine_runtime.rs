@@ -22,7 +22,7 @@ pub(super) fn run_engine(
     token_ids: &[u32],
     kv_ref_bytes: usize,
     kind: EngineKind,
-    backend: Box<dyn larql_inference::ComputeBackend>,
+    backend: Box<dyn larql_inference::EngineBackend>,
     args: &BenchArgs,
 ) -> Result<BenchRow, Box<dyn std::error::Error>> {
     use larql_inference::ffn::WeightFfn;
@@ -111,7 +111,7 @@ pub(super) fn run_engine_q4k(
     token_ids: &[u32],
     kv_ref_bytes: usize,
     kind: EngineKind,
-    backend: Box<dyn larql_inference::ComputeBackend>,
+    backend: Box<dyn larql_inference::EngineBackend>,
     args: &BenchArgs,
 ) -> Result<BenchRow, Box<dyn std::error::Error>> {
     let want_metal_q4k = args.backends.contains("metal");

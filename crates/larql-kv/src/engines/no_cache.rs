@@ -7,7 +7,6 @@
 //! Wraps `kv_prefill_run` (discarding the cache each call) so the
 //! forward-pass code is shared with `StandardEngine`.
 
-use larql_compute::{cpu_backend, ComputeBackend};
 use ndarray::Array2;
 
 use crate::{EngineInfo, KvEngine};
@@ -15,20 +14,21 @@ use larql_inference::ffn::FfnBackend;
 use larql_inference::forward::hooks::NoopHook;
 use larql_inference::forward::kv_prefill_run;
 use larql_inference::model::ModelWeights;
+use larql_inference::{cpu_engine_backend, EngineBackend};
 
 /// No-cache decode. Stores only the running token sequence and re-runs
 /// a full forward pass per step.
 pub struct NoCacheEngine {
     tokens: Vec<u32>,
-    backend: Box<dyn ComputeBackend>,
+    backend: Box<dyn EngineBackend>,
 }
 
 impl NoCacheEngine {
     pub fn new() -> Self {
-        Self::with_backend(cpu_backend())
+        Self::with_backend(cpu_engine_backend())
     }
 
-    pub fn with_backend(backend: Box<dyn ComputeBackend>) -> Self {
+    pub fn with_backend(backend: Box<dyn EngineBackend>) -> Self {
         Self {
             tokens: Vec::new(),
             backend,

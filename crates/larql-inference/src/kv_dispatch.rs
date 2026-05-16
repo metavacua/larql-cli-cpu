@@ -185,20 +185,27 @@ pub trait KvDispatch {
 
     // ── Attention primitives ────────────────────────────────────────
 
-    /// Run one decode-step attention: Q (one row) attends against
-    /// K/V from `handle` plus the new token's K/V (which the caller
-    /// must have already appended via [`Self::append_kv`]). Returns
-    /// the attention output (one row, hidden_dim wide).
+    /// Run one decode-step attention: Q (one row, pre-projection
+    /// hidden) is projected internally to Q/K/V via the layer's
+    /// weights, attended against K/V from `kv` PLUS the new token's
+    /// K/V (the backend computes the new K/V from the query and
+    /// appends it to `kv` as a side effect), and the post-O-projection
+    /// hidden state is returned.
+    ///
+    /// `kv` is `&mut` because the backend mutates it: K and V grow by
+    /// one row to include the current token. After this call the
+    /// caller may invoke [`Self::clip_kv`] to enforce a sliding window.
     ///
     /// Capability gate:
     /// [`larql_compute::Capability::FusedAttentionStep`]. Backends
     /// that don't support fused attention return `None`; callers fall
-    /// back to decomposed BLAS attention.
+    /// back to decomposed BLAS attention via [`larql_compute::MatMul`]
+    /// + manual K/V management.
     fn attention_step(
         &self,
         weights: &ModelWeights,
         query: &Array2<f32>,
-        kv: &KvHandle,
+        kv: &mut KvHandle,
         layer: usize,
         abs_position: usize,
     ) -> Option<Array2<f32>> {
@@ -208,23 +215,25 @@ pub trait KvDispatch {
 
     /// Like [`Self::attention_step`] but with a window bound baked
     /// into the dispatch — backend may use a specialised shader variant
-    /// that knows the window size at compile time.
+    /// that knows the window size at compile time. Backend may also
+    /// elide the post-attention `clip_kv` since the window is known.
     ///
     /// Capability gate:
     /// [`larql_compute::Capability::WindowedAttentionStep`]. Default
-    /// falls back to [`Self::attention_step`] with a clipped handle
-    /// (correct but not specialised).
+    /// runs [`Self::attention_step`] then [`Self::clip_kv`] (correct
+    /// but not specialised).
     fn attention_step_windowed(
         &self,
         weights: &ModelWeights,
         query: &Array2<f32>,
-        kv: &KvHandle,
+        kv: &mut KvHandle,
         layer: usize,
         abs_position: usize,
         window: usize,
     ) -> Option<Array2<f32>> {
-        let _ = window;
-        self.attention_step(weights, query, kv, layer, abs_position)
+        let h = self.attention_step(weights, query, kv, layer, abs_position)?;
+        self.clip_kv(kv, window);
+        Some(h)
     }
 
     /// Multi-token prefill attention: tokens have been embedded into
@@ -338,4 +347,35 @@ pub trait CompressionCodec: Send + Sync {
     fn encode(&self, vec: &[f32]) -> Vec<u8>;
     fn decode(&self, bytes: &[u8], dim: usize) -> Vec<f32>;
     fn name(&self) -> &str;
+}
+
+/// Umbrella trait combining substrate kernel primitives
+/// ([`larql_compute::ComputeBackend`]) and engine-facing dispatch
+/// intents ([`KvDispatch`]). Engine implementations
+/// ([`crate::KvEngine`] impls) take `&dyn EngineBackend` so they have
+/// access to both surfaces through one trait object.
+///
+/// Any type that implements both `ComputeBackend` and `KvDispatch`
+/// automatically implements `EngineBackend` via the blanket impl below.
+/// FFN dispatch ([`crate::FfnBackend`]) stays separate per the
+/// design's "FFN routing is a network-topology concern, not a substrate
+/// concern" resolution
+/// (`docs/specs/compute-backend-redesign.md` §11.1).
+pub trait EngineBackend: larql_compute::ComputeBackend + KvDispatch {
+    /// Trait-object upcast to `&dyn ComputeBackend`. Use when passing
+    /// an `&dyn EngineBackend` to an API that takes `&dyn ComputeBackend`
+    /// and Rust's trait-object upcasting can't infer the target type
+    /// (e.g. inside `Option<&dyn ...>` or generic contexts where the
+    /// expected type isn't a direct `&dyn ComputeBackend`).
+    ///
+    /// In simple call positions you can also write `self as &dyn ComputeBackend`,
+    /// but this method is friendlier when the call site is awkward
+    /// (e.g. `Some(self.backend.as_compute())`).
+    fn as_compute(&self) -> &dyn larql_compute::ComputeBackend;
+}
+
+impl<T: larql_compute::ComputeBackend + KvDispatch> EngineBackend for T {
+    fn as_compute(&self) -> &dyn larql_compute::ComputeBackend {
+        self
+    }
 }

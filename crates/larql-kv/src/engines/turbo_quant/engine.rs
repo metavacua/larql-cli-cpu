@@ -12,7 +12,8 @@
 //! decompresses the full prior K/V for attention, appends the new token's
 //! K/V, then re-compresses and stores the updated cache.
 
-use larql_compute::{cpu_backend, ComputeBackend};
+use larql_compute::ComputeBackend;
+use larql_inference::{cpu_engine_backend, EngineBackend};
 use larql_vindex::VectorIndex;
 use ndarray::{s, Array2};
 
@@ -180,17 +181,17 @@ pub(super) fn last_row(h: &Array2<f32>) -> Array2<f32> {
 
 pub struct TurboQuantEngine {
     tq: TurboQuant,
-    backend: Box<dyn ComputeBackend>,
+    backend: Box<dyn EngineBackend>,
     layers: Vec<CompressedLayer>,
     abs_position: usize,
 }
 
 impl TurboQuantEngine {
     pub fn new(bits: u8) -> Self {
-        Self::with_backend(bits, cpu_backend())
+        Self::with_backend(bits, cpu_engine_backend())
     }
 
-    pub fn with_backend(bits: u8, backend: Box<dyn ComputeBackend>) -> Self {
+    pub fn with_backend(bits: u8, backend: Box<dyn EngineBackend>) -> Self {
         Self {
             tq: TurboQuant::new(bits),
             backend,
@@ -226,7 +227,7 @@ impl KvEngine for TurboQuantEngine {
         token_ids: &[u32],
     ) -> Option<Array2<f32>> {
         let num_layers = weights.num_layers;
-        let be = Some(self.backend.as_ref());
+        let be = Some(self.backend.as_compute());
         let mut h = embed_tokens_pub(weights, token_ids);
         self.layers.clear();
 

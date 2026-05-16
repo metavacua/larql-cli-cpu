@@ -146,12 +146,22 @@ pub use ::metal::Buffer as MetalBuffer;
 pub fn default_backend() -> Box<dyn ComputeBackend> {
     #[cfg(all(feature = "metal", target_os = "macos"))]
     {
-        if let Some(m) = metal::MetalBackend::new() {
-            m.calibrate();
-            return Box::new(m);
-        }
-        eprintln!("[compute] Metal not available, falling back to CPU");
+        return default_backend_from_optional_metal(metal::MetalBackend::new());
     }
+    #[cfg(not(all(feature = "metal", target_os = "macos")))]
+    Box::new(cpu::CpuBackend)
+}
+
+/// Internal seam for [`default_backend`]: takes a pre-constructed
+/// `Option<MetalBackend>` so the "Metal unavailable → CPU fallback"
+/// branch can be exercised without disabling Metal on the host.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn default_backend_from_optional_metal(m: Option<metal::MetalBackend>) -> Box<dyn ComputeBackend> {
+    if let Some(m) = m {
+        m.calibrate();
+        return Box::new(m);
+    }
+    eprintln!("[compute] Metal not available, falling back to CPU");
     Box::new(cpu::CpuBackend)
 }
 
@@ -168,12 +178,7 @@ pub fn default_backend() -> Box<dyn ComputeBackend> {
 /// is ignored and the CPU backend is returned.
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub fn default_backend_with_options(options: BackendOptions) -> Box<dyn ComputeBackend> {
-    if let Some(m) = metal::MetalBackend::with_options(options) {
-        m.calibrate();
-        return Box::new(m);
-    }
-    eprintln!("[compute] Metal not available, falling back to CPU");
-    Box::new(cpu::CpuBackend)
+    default_backend_from_optional_metal(metal::MetalBackend::with_options(options))
 }
 
 /// CPU-only fallback for the explicit-options API on non-macOS hosts.
@@ -211,5 +216,40 @@ mod tests {
 
         let backend = default_backend();
         assert_compute_backend(backend.as_ref());
+    }
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn default_backend_with_options_returns_usable_backend() {
+        // Exercises the Metal-feature `default_backend_with_options` happy
+        // path on Apple silicon (Metal is always present on macOS test
+        // runners).  Falls back to CPU only when Metal init fails — a state
+        // we can't deterministically force on a real device, so we just
+        // assert the constructed backend exposes its trait surface
+        // regardless of which branch ran.
+        let backend = default_backend_with_options(BackendOptions::from_env());
+        assert!(backend.supports(Capability::QuantMatVec));
+        assert!(!backend.device_info().is_empty());
+    }
+
+    #[cfg(not(all(feature = "metal", target_os = "macos")))]
+    #[test]
+    fn default_backend_with_options_stub_returns_cpu_backend() {
+        // The non-Metal stub ignores its argument and always returns CPU.
+        // `()` satisfies the `T` bound on the stub signature.
+        let backend = default_backend_with_options(());
+        assert_eq!(backend.name(), cpu_backend().name());
+    }
+
+    /// Cover the "Metal unavailable → CPU fallback" branch of
+    /// `default_backend_from_optional_metal` by handing it `None`
+    /// directly.  We can't force `MetalBackend::new()` to return None
+    /// on a real Apple host, so the seam takes the argument explicitly.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn default_backend_falls_back_to_cpu_when_metal_unavailable() {
+        let backend = super::default_backend_from_optional_metal(None);
+        assert!(backend.name().starts_with("cpu"));
+        assert!(backend.supports(Capability::QuantMatVec));
     }
 }

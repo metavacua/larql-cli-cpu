@@ -213,7 +213,7 @@ Grid routing + rebalancing are covered by focused unit + integration tests:
 cargo test -p larql-router                    # 150 tests (lib + integration)
 cargo test -p larql-router-protocol --features quic
                                                # 18 tests (15 unit + 3 QUIC integration)
-make larql-router-coverage-summary             # 91.60% total, 7/7 files ≥90%
+make larql-router-coverage-summary             # 91.42% total, 7/7 files ≥90%
 make larql-router-protocol-coverage-summary    # 91.36% total, 1/1 files ≥90%
 ```
 

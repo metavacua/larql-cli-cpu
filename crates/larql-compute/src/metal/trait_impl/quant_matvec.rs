@@ -280,3 +280,129 @@ impl QuantMatVec for MetalBackend {
         true
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::backend::QuantMatVec;
+    use crate::metal::MetalBackend;
+
+    fn backend() -> MetalBackend {
+        MetalBackend::new().expect("Metal device available on test host")
+    }
+
+    /// `q4_matvec_topk1` returns `None` when `num_rows == 0`. Covers the
+    /// early-exit branch at the top of the function.
+    #[test]
+    fn q4_matvec_topk1_returns_none_for_zero_rows() {
+        let m = backend();
+        let out = m.q4_matvec_topk1(&[], &[1i8; 4], &[1.0f32], 0, 4);
+        assert!(out.is_none());
+    }
+
+    /// `q4_matvec_topk1` returns `None` when `q8_x.len() != hidden`.
+    #[test]
+    fn q4_matvec_topk1_returns_none_for_mismatched_q8x_length() {
+        let m = backend();
+        // hidden=64 but q8_x has 16 elements → mismatch.
+        let out = m.q4_matvec_topk1(&[], &[1i8; 16], &[1.0f32], 4, 64);
+        assert!(out.is_none());
+    }
+
+    /// `q4_matvec_topk` returns `None` for `top_k == 0` or `top_k >
+    /// K_TOPK`. Pin both edges of the early-exit.
+    #[test]
+    fn q4_matvec_topk_returns_none_for_invalid_top_k() {
+        let m = backend();
+        // top_k = 0
+        assert!(m
+            .q4_matvec_topk(&[], &[1i8; 4], &[1.0f32], 4, 4, 0)
+            .is_none());
+        // top_k = K_TOPK + 1 (just over the cap).
+        let too_big = crate::metal::shaders::f32_gemv::K_TOPK + 1;
+        assert!(m
+            .q4_matvec_topk(&[], &[1i8; 4], &[1.0f32], 4, 4, too_big)
+            .is_none());
+    }
+
+    /// `q4_matvec_topk` returns `None` when `num_rows == 0` or
+    /// `q8_x.len() != hidden`.
+    #[test]
+    fn q4_matvec_topk_returns_none_for_zero_rows_or_mismatched_q8x() {
+        let m = backend();
+        assert!(m
+            .q4_matvec_topk(&[], &[1i8; 4], &[1.0f32], 0, 4, 1)
+            .is_none());
+        assert!(m
+            .q4_matvec_topk(&[], &[1i8; 16], &[1.0f32], 4, 64, 1)
+            .is_none());
+    }
+
+    /// `q4_vecmat` trait wrapper delegates to `q4_vecmat_direct`.
+    /// Call with a minimal shape to cover the wrapper body.
+    #[test]
+    fn q4_vecmat_wrapper_returns_some_vector() {
+        let m = backend();
+        let hidden = 32usize; // multiple of 32 → one Q4_0 block per row
+        let inter = 32usize;
+        // 32 floats per Q4_0 block. block = 2-byte scale + 16-byte quants = 18 bytes.
+        let block_bytes = 18usize;
+        // q4_vecmat reads `inter` rows of `hidden/32` blocks each.
+        let q4_data = vec![0u8; inter * (hidden / 32) * block_bytes];
+        let activation = vec![0.1f32; inter];
+        let out = m
+            .q4_vecmat(&activation, &q4_data, inter, hidden)
+            .expect("q4_vecmat wrapper always returns Some");
+        assert_eq!(out.len(), hidden);
+    }
+
+    /// `q4_matvec_pair_batch` trait wrapper delegates to
+    /// `q4_matvec_pair_batch_direct`. Empty seq_len is the cheapest
+    /// way to invoke it without staging real Q4_0 model weights.
+    #[test]
+    fn q4_matvec_pair_batch_wrapper_returns_some() {
+        let m = backend();
+        // seq_len = 0 → the underlying direct path returns
+        // (vec![], vec![]) without doing any GPU work.
+        let out = m.q4_matvec_pair_batch(&[], &[], &[], 0, 0, 0);
+        assert!(out.is_some());
+    }
+
+    /// `q4k_matvec_stride32` trait wrapper. Use a hidden multiple of
+    /// 256 (Q4_K super-block) so the dispatch shape is valid; q4k_data
+    /// shape must equal num_rows × Q4_K_BLOCK_BYTES bytes per
+    /// (hidden/256) blocks.
+    #[test]
+    fn q4k_matvec_stride32_wrapper_returns_some_vector() {
+        let m = backend();
+        let hidden = 256usize;
+        let num_rows = 4usize;
+        let block_bytes = larql_models::quant::ggml::Q4_K_BLOCK_BYTES;
+        let q4k_data = vec![0u8; num_rows * (hidden / 256) * block_bytes];
+        let x = vec![0.1f32; hidden];
+        let out = m
+            .q4k_matvec_stride32(&q4k_data, &x, num_rows, hidden)
+            .expect("q4k_matvec_stride32 wrapper returns Some on valid shapes");
+        assert_eq!(out.len(), num_rows);
+    }
+
+    /// `q4k_matmul` returns an empty vec when any of `seq_len`,
+    /// `num_rows`, `hidden` is zero (line 211 early-out).
+    #[test]
+    fn q4k_matmul_zero_dims_returns_empty_vec() {
+        let m = backend();
+        let out = m
+            .q4k_matmul(&[], &[1.0f32; 4], 0, 4, 1)
+            .expect("zero-dim path returns Some(empty)");
+        assert!(out.is_empty());
+
+        let out = m
+            .q4k_matmul(&[], &[1.0f32; 4], 1, 0, 1)
+            .expect("zero-dim path returns Some(empty)");
+        assert!(out.is_empty());
+
+        let out = m
+            .q4k_matmul(&[], &[], 1, 4, 0)
+            .expect("zero-dim path returns Some(empty)");
+        assert!(out.is_empty());
+    }
+}

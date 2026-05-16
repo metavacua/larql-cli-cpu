@@ -527,11 +527,18 @@ not speed.
 
 ### 10.5 Step 5 — `MetalBackend`: real kernels
 
-Replace the host-roundtrip implementations one method at a time with
-real Metal compute. Start with the highest-leverage primitive:
-`attention_step` (closes the decode tok/s gap). Then
-`attention_step_windowed` (the `standard:window=N` win). Then engine-
-specific primitives in priority order.
+**Blocked on `async-compute-backend.md` Step A4.** Step-5 work
+discovered that the synchronous `KvDispatch` trait can't deliver
+Metal-class performance at per-layer granularity — each per-layer
+call would force a separate command-buffer commit, slower than
+today's fused decode path. The async trait is the prerequisite.
+
+Once `AsyncComputeBackend` Step A4 lands (deferred dispatch on
+Metal), this step picks back up: replace
+`AsyncComputeBackend::attention_step_async` etc. with real Metal
+shader kernels, one at a time. Start with `attention_step_windowed`
+(the `standard:window=N` win). Then engine-specific primitives in
+priority order.
 
 Each kernel landed is paired with a bench that measures the win on a
 real model. Wins must be empirically confirmed end-to-end, not just at
@@ -598,16 +605,26 @@ a future "request routing" spec.
 
 ### 11.4 CUDA shape commitments
 
-**Resolved 2026-05-16:** option (b) — sibling trait
-`AsyncComputeBackend: ComputeBackend` with future-returning variants
-when CUDA lands. `ComputeBackend` stays minimal (sync). CUDA implements
-both: the sync surface (per-method submit-and-wait) for engines that
-don't need streams, and the async extension (handle-future) for the
-ones that do.
+**Resolved 2026-05-16, revised 2026-05-16:** the original resolution
+(defer `AsyncComputeBackend` until CUDA bring-up) was overtaken by a
+Step-5 finding: per-layer Metal kernels at the synchronous trait's
+granularity are *slower* than today's fused Metal path because each
+per-layer call forces a GPU command-buffer commit. The async surface
+is therefore needed earlier than originally planned — for Metal +
+Vulkan, not just CUDA.
 
-This means **no async surface is added in this round.** CUDA bring-up
-is the trigger for `AsyncComputeBackend`; until then the trait is
-purely synchronous.
+**Revised plan:** `AsyncComputeBackend` becomes a sibling trait now
+(not deferred to CUDA). Its design is owned by
+[`async-compute-backend.md`](./async-compute-backend.md) — a full
+spec covering the intent-collector pattern, handle types, commit
+semantics, per-backend implementation contracts (Metal, Vulkan, CUDA,
+CPU), and a multi-step migration plan (~6-12 months end-to-end).
+
+This redesign spec's Step 5 (real Metal kernels) is therefore
+*blocked* on `async-compute-backend.md` Step A4 (deferred dispatch
+landing on Metal). Steps 1-4 of *this* spec remain shippable as the
+unification PR; the per-layer-Metal-kernels effort starts after this
+spec is signed off and `async-compute-backend.md` is accepted.
 
 ### 11.5 Quantisation as a backend concern?
 

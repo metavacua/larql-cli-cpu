@@ -262,8 +262,17 @@ pub fn append_and_attend(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use metal::Device;
+
     const SHAPE_SMALL: (usize, usize) = (2, 64);
     const SHAPE_LARGE: (usize, usize) = (4, 128);
+
+    fn fresh_cache() -> (BufferCache, Device) {
+        let d = Device::system_default().expect("Metal device available on test host");
+        let bufs = BufferCache::new(&d);
+        (bufs, d)
+    }
 
     #[test]
     fn shape_mismatch_detects_conflicting_existing_layer() {
@@ -275,5 +284,103 @@ mod tests {
             &[SHAPE_SMALL],
             &[SHAPE_LARGE]
         ));
+    }
+
+    /// `attention_span` returns `t` when `window_size == 0` (no
+    /// windowing) or when `t <= window_size` (cache still within
+    /// window). Returns `window_size` once `t` exceeds it.
+    #[test]
+    fn attention_span_clamps_at_window_size_when_exceeded() {
+        assert_eq!(attention_span(5, 0), 5, "window=0 disables clamp");
+        assert_eq!(attention_span(5, 10), 5, "t<=window returns t");
+        assert_eq!(attention_span(10, 10), 10, "t==window returns t");
+        assert_eq!(attention_span(15, 10), 10, "t>window clamps to window");
+    }
+
+    /// `LayerKVCache::clear` resets `current_len` without touching the
+    /// underlying buffers.
+    #[test]
+    fn layer_kv_cache_clear_resets_current_len() {
+        let (bufs, _) = fresh_cache();
+        let mut layer = LayerKVCache::new(&bufs, 64, 2, 64);
+        layer.current_len = 17;
+        layer.clear();
+        assert_eq!(layer.current_len, 0);
+        assert_eq!(layer.max_seq, 64);
+        assert_eq!(layer.num_kv_heads, 2);
+        assert_eq!(layer.head_dim, 64);
+    }
+
+    /// `KVCache::new` constructs the requested number of uniform-shape
+    /// layers.  Round-trips the per-layer dimensions through
+    /// `has_shape_mismatch`.
+    #[test]
+    fn kv_cache_new_creates_uniform_layers() {
+        let (bufs, _) = fresh_cache();
+        let cache = KVCache::new(&bufs, 3, 32, 2, 64);
+        assert_eq!(cache.layers.len(), 3);
+        assert!(!cache.has_shape_mismatch(&[(2, 64), (2, 64), (2, 64)]));
+        assert!(cache.has_shape_mismatch(&[(2, 64), (2, 64), (4, 64)]));
+    }
+
+    /// `KVCache::new_per_layer` allocates with heterogeneous shapes —
+    /// pin the Gemma 4 31B pattern (alternating sliding/global heads).
+    #[test]
+    fn kv_cache_new_per_layer_supports_heterogeneous_shapes() {
+        let (bufs, _) = fresh_cache();
+        let shapes = vec![(16usize, 256usize), (4, 512), (16, 256), (4, 512)];
+        let cache = KVCache::new_per_layer(&bufs, &shapes, 32);
+        assert_eq!(cache.layers.len(), 4);
+        for (layer, &(num_kv, hd)) in cache.layers.iter().zip(&shapes) {
+            assert_eq!(layer.num_kv_heads, num_kv);
+            assert_eq!(layer.head_dim, hd);
+        }
+    }
+
+    /// `grow_to_shapes` extends the cache when more layers are
+    /// requested than currently allocated.
+    #[test]
+    fn kv_cache_grow_to_shapes_extends_layers() {
+        let (bufs, _) = fresh_cache();
+        let mut cache = KVCache::new(&bufs, 2, 32, 2, 64);
+        assert_eq!(cache.layers.len(), 2);
+
+        let shapes = vec![(2usize, 64usize), (2, 64), (4, 128), (8, 256)];
+        cache.grow_to_shapes(&bufs, &shapes, 32);
+        assert_eq!(cache.layers.len(), 4);
+        assert_eq!(cache.layers[2].num_kv_heads, 4);
+        assert_eq!(cache.layers[2].head_dim, 128);
+        assert_eq!(cache.layers[3].num_kv_heads, 8);
+        assert_eq!(cache.layers[3].head_dim, 256);
+
+        // Idempotent: regrow to same length is a no-op.
+        cache.grow_to_shapes(&bufs, &shapes, 32);
+        assert_eq!(cache.layers.len(), 4);
+    }
+
+    /// `KVCache::clear` resets every layer's `current_len`.
+    #[test]
+    fn kv_cache_clear_resets_all_layers() {
+        let (bufs, _) = fresh_cache();
+        let mut cache = KVCache::new(&bufs, 3, 32, 2, 64);
+        for layer in &mut cache.layers {
+            layer.current_len = 9;
+        }
+        cache.clear();
+        assert!(cache.layers.iter().all(|l| l.current_len == 0));
+    }
+
+    /// `current_len` reads from the first layer (assumes uniform
+    /// progression).  Returns 0 when there are no layers.
+    #[test]
+    fn kv_cache_current_len_reads_first_layer() {
+        let (bufs, _) = fresh_cache();
+        let mut cache = KVCache::new(&bufs, 2, 32, 2, 64);
+        assert_eq!(cache.current_len(), 0);
+        cache.layers[0].current_len = 7;
+        assert_eq!(cache.current_len(), 7);
+
+        let empty = KVCache { layers: Vec::new() };
+        assert_eq!(empty.current_len(), 0);
     }
 }

@@ -141,4 +141,111 @@ mod tests {
         assert_eq!(tg_width(1024), 512);
         assert_eq!(tg_width(8192), 512);
     }
+
+    use crate::metal::MetalBackend;
+
+    fn backend() -> MetalBackend {
+        MetalBackend::new().expect("Metal device available on test host")
+    }
+
+    /// `encode_qk_norm` runs a real `qk_norm` dispatch over a minimal
+    /// 1-position Q/K shape.  After the command buffer completes the
+    /// buffers should hold finite normalised values (no NaNs / Infs).
+    #[test]
+    fn encode_qk_norm_dispatch_completes_and_normalises_in_place() {
+        let m = backend();
+        let head_dim = 64usize;
+        let num_q_heads = 2usize;
+        let num_kv_heads = 2usize;
+        let seq_len = 1usize;
+
+        let q_src: Vec<f32> = (0..num_q_heads * head_dim)
+            .map(|i| (i as f32) * 0.01)
+            .collect();
+        let k_src: Vec<f32> = (0..num_kv_heads * head_dim)
+            .map(|i| ((i + 1) as f32) * 0.02)
+            .collect();
+        let q_w_src = vec![1.0f32; head_dim];
+        let k_w_src = vec![1.0f32; head_dim];
+
+        let q_buf = m.bufs().transient_from_f32(&q_src);
+        let k_buf = m.bufs().transient_from_f32(&k_src);
+        let q_w_buf = m.bufs().transient_from_f32(&q_w_src);
+        let k_w_buf = m.bufs().transient_from_f32(&k_w_src);
+
+        let cmd = m.queue().new_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        encode_qk_norm(
+            enc,
+            &m.norms.qk_norm_pipeline,
+            &q_buf,
+            &q_w_buf,
+            &k_buf,
+            &k_w_buf,
+            seq_len,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+            1e-6,
+            0.0,
+        );
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        let q_out = crate::metal::buffers::read_buffer_f32(&q_buf, num_q_heads * head_dim);
+        let k_out = crate::metal::buffers::read_buffer_f32(&k_buf, num_kv_heads * head_dim);
+        assert!(
+            q_out.iter().all(|v| v.is_finite()),
+            "Q has non-finite values after qk_norm"
+        );
+        assert!(
+            k_out.iter().all(|v| v.is_finite()),
+            "K has non-finite values after qk_norm"
+        );
+    }
+
+    /// `encode_v_norm` runs the parameter-free per-head RMS dispatch
+    /// over V.  Verify dispatch completes with finite output.
+    #[test]
+    fn encode_v_norm_dispatch_completes_with_finite_output() {
+        let m = backend();
+        let head_dim = 64usize;
+        let num_kv_heads = 2usize;
+        let seq_len = 1usize;
+
+        let v_src: Vec<f32> = (0..num_kv_heads * head_dim)
+            .map(|i| ((i + 3) as f32) * 0.005)
+            .collect();
+        let ones = vec![1.0f32; head_dim];
+        let v_buf = m.bufs().transient_from_f32(&v_src);
+        let ones_buf = m.bufs().transient_from_f32(&ones);
+
+        // `encode_v_norm` reuses the `qk_norm` shader with all-ones
+        // weight, NOT the standalone `v_norm` shader — see
+        // `metal/ops/full_pipeline/dispatch.rs::encode_v_norm` callsite
+        // which passes `qk_norm_pipe`.  Production callers exercise the
+        // same path.
+        let cmd = m.queue().new_command_buffer();
+        let enc = cmd.new_compute_command_encoder();
+        encode_v_norm(
+            enc,
+            &m.norms.qk_norm_pipeline,
+            &v_buf,
+            &ones_buf,
+            seq_len,
+            num_kv_heads,
+            head_dim,
+            1e-6,
+        );
+        enc.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+
+        let v_out = crate::metal::buffers::read_buffer_f32(&v_buf, num_kv_heads * head_dim);
+        assert!(
+            v_out.iter().all(|v| v.is_finite()),
+            "V has non-finite values after v_norm"
+        );
+    }
 }
