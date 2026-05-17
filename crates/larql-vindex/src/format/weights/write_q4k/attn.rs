@@ -33,7 +33,7 @@ pub(super) fn write_attn_weights_q4k(
     let mut attn_manifest: Vec<Q4kManifestEntry> = Vec::with_capacity(num_layers * 4);
 
     for layer in 0..num_layers {
-        callbacks.on_layer_start(COMP_ATTN_Q4K, layer, num_layers);
+        callbacks.on_layer_start(COMP_ATTN_KQUANT, layer, num_layers);
 
         // Resolve each tensor. For V, fall back to K when v_shares_k=true or
         // v_proj simply isn't present (global layers on 31B).
@@ -94,7 +94,7 @@ pub(super) fn write_attn_weights_q4k(
             attn_offset += length;
         }
 
-        callbacks.on_layer_done(COMP_ATTN_Q4K, layer, 0.0);
+        callbacks.on_layer_done(COMP_ATTN_KQUANT, layer, 0.0);
     }
     attn_file.flush()?;
     drop(attn_file);

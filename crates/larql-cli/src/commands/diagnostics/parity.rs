@@ -580,10 +580,10 @@ fn run_layer_diff(
 
     // ── Load vindex (shared mmap; two weight copies for the two runs) ────────
     let mut cb = larql_vindex::SilentLoadCallbacks;
-    let mut q4_index = larql_vindex::VectorIndex::load_vindex(path, &mut cb)?;
-    q4_index.load_attn_kquant(path)?;
-    q4_index.load_interleaved_kquant(path)?;
-    let _ = q4_index.load_lm_head_q4(path);
+    let mut index = larql_vindex::VectorIndex::load_vindex(path, &mut cb)?;
+    index.load_attn_kquant(path)?;
+    index.load_interleaved_kquant(path)?;
+    let _ = index.load_lm_head_q4(path);
     let tokenizer = larql_vindex::load_vindex_tokenizer(path)?;
     let mut w_metal = larql_vindex::load_model_weights_q4k(path, &mut cb)?;
     let mut w_cpu = larql_vindex::load_model_weights_q4k(path, &mut cb)?;
@@ -621,7 +621,7 @@ fn run_layer_diff(
             &tokenizer,
             &token_ids,
             1,
-            &q4_index,
+            &index,
             &backend,
             &cache,
             0..num_layers,
@@ -635,7 +635,7 @@ fn run_layer_diff(
     std::env::set_var("LARQL_CPU_DUMP_LAYERS", cpu_path);
     std::env::set_var("LARQL_CPU_STAGE_DUMP", cpu_path);
     println!("Running CPU…");
-    predict_kquant_hidden(&mut w_cpu, &token_ids, &q4_index, None);
+    predict_kquant_hidden(&mut w_cpu, &token_ids, &index, None);
     std::env::remove_var("LARQL_CPU_DUMP_LAYERS");
     std::env::remove_var("LARQL_CPU_STAGE_DUMP");
 

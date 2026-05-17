@@ -239,7 +239,7 @@ mod tests {
     /// Build a minimal vindex directory with the given attn_weights_q4k.bin
     /// payload + manifest. Returns a `tempfile::TempDir` whose path can be
     /// passed straight to `load_attn_kquant`.
-    fn make_vindex_with_attn_q4k(payload: &[u8], manifest: serde_json::Value) -> tempfile::TempDir {
+    fn make_vindex_with_attn_kquant(payload: &[u8], manifest: serde_json::Value) -> tempfile::TempDir {
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(tmp.path().join(ATTN_WEIGHTS_Q4K_BIN), payload).unwrap();
         std::fs::write(
@@ -259,7 +259,7 @@ mod tests {
     /// Q4_K shape `[2048, 2560]` at the canonical Q4_K_BLOCK_BYTES stride
     /// must load cleanly.
     #[test]
-    fn load_attn_q4k_accepts_correct_144_byte_stride() {
+    fn load_attn_kquant_accepts_correct_144_byte_stride() {
         use larql_models::quant::ggml::{Q4_K_BLOCK_BYTES, Q4_K_BLOCK_ELEMS};
         let len = 2048 * (2560 / Q4_K_BLOCK_ELEMS) * Q4_K_BLOCK_BYTES; // 2_949_120
         let payload = vec![0u8; len];
@@ -272,7 +272,7 @@ mod tests {
                 "length": len,
             }
         ]);
-        let tmp = make_vindex_with_attn_q4k(&payload, manifest);
+        let tmp = make_vindex_with_attn_kquant(&payload, manifest);
         let mut idx = empty_vindex();
         idx.load_attn_kquant(tmp.path())
             .expect("clean stride must load");
@@ -284,7 +284,7 @@ mod tests {
     /// row's read window drifts by 4 bytes per superblock and the GPU
     /// prefill silently produces all-NaN.
     #[test]
-    fn load_attn_q4k_rejects_legacy_148_byte_stride() {
+    fn load_attn_kquant_rejects_legacy_148_byte_stride() {
         use crate::quant::registry::LEGACY_BLOCK_Q4_K_STRIDE;
         use larql_models::quant::ggml::K_QUANT_BLOCK_ELEMS;
         // 3_031_040 — what 8-Apr vindexes have.
@@ -299,7 +299,7 @@ mod tests {
                 "length": bad_len,
             }
         ]);
-        let tmp = make_vindex_with_attn_q4k(&payload, manifest);
+        let tmp = make_vindex_with_attn_kquant(&payload, manifest);
         let mut idx = empty_vindex();
         let err = idx
             .load_attn_kquant(tmp.path())
@@ -318,7 +318,7 @@ mod tests {
     /// A length that's neither 144 × n nor 148 × n still gets rejected
     /// (anything that's not the canonical stride is an error).
     #[test]
-    fn load_attn_q4k_rejects_arbitrary_wrong_length() {
+    fn load_attn_kquant_rejects_arbitrary_wrong_length() {
         let weird_len = 2_949_120 + 17; // off-by-17 — definitely not aligned
         let payload = vec![0u8; weird_len];
         let manifest = serde_json::json!([
@@ -330,7 +330,7 @@ mod tests {
                 "length": weird_len,
             }
         ]);
-        let tmp = make_vindex_with_attn_q4k(&payload, manifest);
+        let tmp = make_vindex_with_attn_kquant(&payload, manifest);
         let mut idx = empty_vindex();
         idx.load_attn_kquant(tmp.path())
             .expect_err("non-canonical stride must be rejected");
@@ -340,7 +340,7 @@ mod tests {
     /// — V projections in Gemma 3 4B are Q6_K and would suffer the same
     /// silent-drift class of bug.
     #[test]
-    fn load_attn_q4k_validates_q6k_v_projection() {
+    fn load_attn_kquant_validates_q6k_v_projection() {
         use larql_models::quant::ggml::{K_QUANT_BLOCK_ELEMS, Q4_K_BLOCK_BYTES, Q6_K_BLOCK_BYTES};
         let q4k_len = 1024 * (2560 / K_QUANT_BLOCK_ELEMS) * Q4_K_BLOCK_BYTES; // K proj: 1024 × 1440
         let q6k_len = 1024 * (2560 / K_QUANT_BLOCK_ELEMS) * Q6_K_BLOCK_BYTES; // V proj: 1024 × 2100
@@ -362,7 +362,7 @@ mod tests {
                 "length": q6k_len,
             }
         ]);
-        let tmp = make_vindex_with_attn_q4k(&payload, manifest);
+        let tmp = make_vindex_with_attn_kquant(&payload, manifest);
         let mut idx = empty_vindex();
         idx.load_attn_kquant(tmp.path())
             .expect("matched Q4_K + Q6_K strides must load");
@@ -371,7 +371,7 @@ mod tests {
     /// A Q6_K manifest entry recorded with a Q4_K-sized length (210 vs
     /// 144 confusion at write time) must be rejected.
     #[test]
-    fn load_attn_q4k_rejects_q6k_with_q4k_stride() {
+    fn load_attn_kquant_rejects_q6k_with_q4k_stride() {
         use larql_models::quant::ggml::{K_QUANT_BLOCK_ELEMS, Q4_K_BLOCK_BYTES};
         let wrong_len = 1024 * (2560 / K_QUANT_BLOCK_ELEMS) * Q4_K_BLOCK_BYTES; // Q4_K stride for Q6_K tensor
         let payload = vec![0u8; wrong_len];
@@ -384,7 +384,7 @@ mod tests {
                 "length": wrong_len,
             }
         ]);
-        let tmp = make_vindex_with_attn_q4k(&payload, manifest);
+        let tmp = make_vindex_with_attn_kquant(&payload, manifest);
         let mut idx = empty_vindex();
         idx.load_attn_kquant(tmp.path())
             .expect_err("Q6_K tensor with Q4_K length must be rejected");
@@ -395,7 +395,7 @@ mod tests {
     /// `attn_kquant_layer_data`, not a slice-bounds panic. Mirrors the
     /// defensive behavior already in `interleaved_kquant_layer_data`.
     #[test]
-    fn attn_q4k_layer_data_returns_none_on_out_of_bounds_manifest() {
+    fn attn_kquant_layer_data_returns_none_on_out_of_bounds_manifest() {
         use larql_models::quant::ggml::{K_QUANT_BLOCK_ELEMS, Q4_K_BLOCK_BYTES};
         // Load a real, valid Q4_K vindex first…
         let len = 2048 * (2560 / K_QUANT_BLOCK_ELEMS) * Q4_K_BLOCK_BYTES;
@@ -430,7 +430,7 @@ mod tests {
                 "length": len,
             },
         ]);
-        let tmp = make_vindex_with_attn_q4k(&payload, manifest);
+        let tmp = make_vindex_with_attn_kquant(&payload, manifest);
         let mut idx = empty_vindex();
         idx.load_attn_kquant(tmp.path()).expect("clean load");
 

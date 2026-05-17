@@ -49,7 +49,7 @@ pub const COMP_ATTN_WEIGHTS: &str = "attn_weights";
 /// `up/down_weights` — f32 FFN up/down weight write per layer.
 pub const COMP_UP_DOWN_WEIGHTS: &str = "up/down_weights";
 /// `attn_kquant` — Q4_K/Q6_K attention weight write per layer.
-pub const COMP_ATTN_Q4K: &str = "attn_kquant";
+pub const COMP_ATTN_KQUANT: &str = "attn_kquant";
 /// `ffn_q4k` — Q4_K/Q6_K FFN weight write per layer.
 pub const COMP_FFN_Q4K: &str = "ffn_q4k";
 
@@ -75,7 +75,7 @@ mod tests {
             COMP_DOWN,
             COMP_ATTN_WEIGHTS,
             COMP_UP_DOWN_WEIGHTS,
-            COMP_ATTN_Q4K,
+            COMP_ATTN_KQUANT,
             COMP_FFN_Q4K,
         ];
         let unique: std::collections::HashSet<_> = labels.iter().collect();

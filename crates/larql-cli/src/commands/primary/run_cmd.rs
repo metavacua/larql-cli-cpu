@@ -718,7 +718,7 @@ mod experts {
     struct Runtime {
         weights: larql_inference::ModelWeights,
         tokenizer: tokenizers::Tokenizer,
-        q4_index: Option<VectorIndex>,
+        index: Option<VectorIndex>,
         strategy: Strategy,
     }
 
@@ -758,7 +758,7 @@ mod experts {
 
             let text = match self.strategy {
                 Strategy::MetalQ4K => {
-                    let q4_index = self.q4_index.as_ref().expect("metal-q4k needs q4_index");
+                    let index = self.index.as_ref().expect("metal-q4k needs index");
                     let backend = larql_compute::default_backend();
                     let cached_layers =
                         larql_inference::layer_graph::CachedLayerGraph::from_residuals(Vec::new());
@@ -771,7 +771,7 @@ mod experts {
                             &self.tokenizer,
                             &token_ids,
                             max_tokens,
-                            q4_index,
+                            index,
                             &*backend,
                             &cached_layers,
                             0..num_layers,
@@ -783,7 +783,7 @@ mod experts {
                             &self.tokenizer,
                             &token_ids,
                             max_tokens,
-                            q4_index,
+                            index,
                             &*backend,
                             &cached_layers,
                             0..num_layers,
@@ -792,7 +792,7 @@ mod experts {
                     result.tokens.iter().map(|(t, _)| t.as_str()).collect()
                 }
                 Strategy::CpuQ4K => {
-                    let q4_index = self.q4_index.as_ref().expect("cpu-q4k needs q4_index");
+                    let index = self.index.as_ref().expect("cpu-q4k needs index");
                     let toks = if let Some(ops) = mask_op_names {
                         let mut mask = OpNameMask::new(ops.to_vec(), &self.tokenizer);
                         mask.set_seed_text(OP_CALL_PREFIX);
@@ -801,7 +801,7 @@ mod experts {
                             &self.tokenizer,
                             &token_ids,
                             max_tokens,
-                            q4_index,
+                            index,
                             |ids, logits| mask.apply(ids, logits),
                         )
                     } else {
@@ -810,7 +810,7 @@ mod experts {
                             &self.tokenizer,
                             &token_ids,
                             max_tokens,
-                            q4_index,
+                            index,
                         )
                     };
                     toks.into_iter().map(|(t, _)| t).collect()
@@ -962,7 +962,7 @@ mod experts {
             );
         }
 
-        let (weights, q4_index) = match strategy {
+        let (weights, index) = match strategy {
             Strategy::MetalQ4K | Strategy::CpuQ4K => {
                 let weights = larql_vindex::load_model_weights_q4k(vindex_path, &mut cb)?;
                 let mut idx = VectorIndex::load_vindex(vindex_path, &mut cb)?;
@@ -984,7 +984,7 @@ mod experts {
         Ok(Runtime {
             weights,
             tokenizer,
-            q4_index,
+            index,
             strategy,
         })
     }

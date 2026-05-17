@@ -54,10 +54,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cb = larql_vindex::SilentLoadCallbacks;
     let cfg = larql_vindex::load_vindex_config(&vindex_path)?;
     let tokenizer = larql_vindex::load_vindex_tokenizer(&vindex_path)?;
-    let mut q4_index = larql_vindex::VectorIndex::load_vindex(&vindex_path, &mut cb)?;
-    q4_index.load_attn_kquant(&vindex_path)?;
-    q4_index.load_interleaved_kquant(&vindex_path)?;
-    let _ = q4_index.load_lm_head_q4(&vindex_path);
+    let mut index = larql_vindex::VectorIndex::load_vindex(&vindex_path, &mut cb)?;
+    index.load_attn_kquant(&vindex_path)?;
+    index.load_interleaved_kquant(&vindex_path)?;
+    let _ = index.load_lm_head_q4(&vindex_path);
 
     // Separate weight handles so CPU's per-layer dequant inserts don't
     // race with Metal's forward on a shared ModelWeights.
@@ -92,7 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &tokenizer,
         &prompt_ids,
         1,
-        &q4_index,
+        &index,
         &metal_backend,
         &cached,
         0..num_layers,
@@ -104,7 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &tokenizer,
         &prompt_ids,
         1,
-        &q4_index,
+        &index,
         &metal_backend,
         &cached,
         0..num_layers,
@@ -137,7 +137,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // twice.
     let t0 = Instant::now();
     let cpu_hidden_full =
-        larql_inference::vindex::predict_kquant_hidden(&mut w_cpu, &appended_ids, &q4_index, None);
+        larql_inference::vindex::predict_kquant_hidden(&mut w_cpu, &appended_ids, &index, None);
     let cpu_ms = t0.elapsed().as_secs_f64() * 1000.0;
     let cpu_last = cpu_hidden_full
         .row(cpu_hidden_full.nrows().saturating_sub(1))
@@ -153,7 +153,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // subsequent decode_token calls as long as we don't re-prefill.
     // Reset + re-prefill explicitly so the two paths are equivalent
     // up to the prefill; then run one decode for `token_0_id`.
-    let layers = build_layers(&w_metal, &q4_index, num_layers)?;
+    let layers = build_layers(&w_metal, &index, num_layers)?;
     let arch = &*w_metal.arch;
     // head_dim / num_q_heads / num_kv_heads / q_dim / kv_dim / rope used
     // to be passed to the pre-refactor `decode_token` / `prefill_q4`;
@@ -172,7 +172,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let prefill_x: Vec<f32> = embedded.as_slice().unwrap().to_vec();
     let softcap = arch.attn_logit_softcapping().unwrap_or(0.0);
     let qk_norm_val = arch.attn_q_norm_key(0).is_some();
-    let intermediate = q4_index.num_features(0);
+    let intermediate = index.num_features(0);
 
     let t1 = Instant::now();
     let prefill_result = metal_backend
@@ -218,7 +218,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // prefill we already paid for.
     let mut w_cpu2 = larql_vindex::load_model_weights_q4k(&vindex_path, &mut cb)?;
     let _ =
-        larql_inference::vindex::predict_kquant_hidden(&mut w_cpu2, &appended_ids, &q4_index, None);
+        larql_inference::vindex::predict_kquant_hidden(&mut w_cpu2, &appended_ids, &index, None);
 
     println!(
         "  B) Metal prefill({} tok) + decode(1 tok) took {:>5.1} + {:>5.1} ms",

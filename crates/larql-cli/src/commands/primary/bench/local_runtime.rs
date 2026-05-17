@@ -31,9 +31,9 @@ pub(super) fn run_larql(
     }
 
     let mut cb = larql_vindex::SilentLoadCallbacks;
-    let mut q4_index = larql_vindex::VectorIndex::load_vindex(vindex_path, &mut cb)?;
-    q4_index.load_attn_kquant(vindex_path)?;
-    q4_index.load_interleaved_kquant(vindex_path)?;
+    let mut index = larql_vindex::VectorIndex::load_vindex(vindex_path, &mut cb)?;
+    index.load_attn_kquant(vindex_path)?;
+    index.load_interleaved_kquant(vindex_path)?;
 
     let cfg = larql_vindex::load_vindex_config(vindex_path)?;
     if cfg.quant != larql_vindex::QuantFormat::Q4K {
@@ -83,7 +83,7 @@ pub(super) fn run_larql(
             &tokenizer,
             &token_ids,
             1,
-            &q4_index,
+            &index,
             &*backend,
             &cached_layers,
             0..num_layers,
@@ -101,7 +101,7 @@ pub(super) fn run_larql(
         &tokenizer,
         &token_ids,
         max_tokens,
-        &q4_index,
+        &index,
         &*backend,
         &cached_layers,
         0..num_layers,
@@ -109,7 +109,7 @@ pub(super) fn run_larql(
     let wall_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
     if args.verbose {
-        let (slots, bytes) = q4_index.kquant_ffn_cache_stats();
+        let (slots, bytes) = index.kquant_ffn_cache_stats();
         eprintln!(
             "{}",
             format_q4k_cache_log(backend_name_for(metal), slots, bytes)

@@ -504,10 +504,10 @@ fn run_predict_q4k(
         .as_deref()
         .ok_or("--index required for Q4 predict path")?;
     let mut cb = larql_vindex::SilentLoadCallbacks;
-    let mut q4_index = VectorIndex::load_vindex(vindex_path, &mut cb)?;
-    q4_index.load_attn_kquant(vindex_path)?;
-    q4_index.load_interleaved_kquant(vindex_path)?;
-    let _ = q4_index.load_lm_head_q4(vindex_path);
+    let mut index = VectorIndex::load_vindex(vindex_path, &mut cb)?;
+    index.load_attn_kquant(vindex_path)?;
+    index.load_interleaved_kquant(vindex_path)?;
+    let _ = index.load_lm_head_q4(vindex_path);
 
     // Metal Q4K path (`--metal`) routes autoregressive generation through the
     // fused `full_pipeline_q4` prefill + `decode_token` KV-cached decode in
@@ -525,7 +525,7 @@ fn run_predict_q4k(
         // CPU Q4K autoregressive: per-step, dequantise layer weights
         // just-in-time (`predict_kquant` does this internally) and loop.
         // Not token-cached, so O(N²) but correct. For speed use --metal.
-        return run_q4k_generate_cpu(weights, tokenizer, &token_ids, args, &q4_index);
+        return run_q4k_generate_cpu(weights, tokenizer, &token_ids, args, &index);
     }
 
     let result = if args.metal {
@@ -556,7 +556,7 @@ fn run_predict_q4k(
                 tokenizer,
                 &token_ids,
                 args.max_tokens,
-                &q4_index,
+                &index,
                 &*backend,
                 &cached_layers,
                 0..num_layers,
@@ -582,7 +582,7 @@ fn run_predict_q4k(
             tokenizer,
             &token_ids,
             args.predict_top_k,
-            &q4_index,
+            &index,
             &*backend,
         )
     } else {
@@ -592,7 +592,7 @@ fn run_predict_q4k(
             tokenizer,
             &token_ids,
             args.predict_top_k,
-            &q4_index,
+            &index,
         )
     };
     vlog!(
@@ -644,8 +644,8 @@ fn run_predict_q4k_remote(
     // Build a fresh VectorIndex with the q4k attention mmap wired in.
     // Q4K FFN mmap is NOT loaded — FFN runs on the server.
     let mut cb = larql_vindex::SilentLoadCallbacks;
-    let mut q4_index = VectorIndex::load_vindex(vindex_path, &mut cb)?;
-    q4_index.load_attn_kquant(vindex_path)?;
+    let mut index = VectorIndex::load_vindex(vindex_path, &mut cb)?;
+    index.load_attn_kquant(vindex_path)?;
 
     let token_ids = larql_inference::encode_prompt(tokenizer, &*weights.arch, args.prompt.as_str())
         .map_err(|e| format!("tokenize error: {e}"))?;
@@ -662,7 +662,7 @@ fn run_predict_q4k_remote(
         tokenizer,
         &token_ids,
         args.predict_top_k,
-        &q4_index,
+        &index,
         &remote,
     );
     let elapsed = start.elapsed();
@@ -687,7 +687,7 @@ fn run_q4k_generate_cpu(
     tokenizer: &tokenizers::Tokenizer,
     initial_ids: &[u32],
     args: &WalkArgs,
-    q4_index: &VectorIndex,
+    index: &VectorIndex,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Write;
     let verbose = args.verbose;
@@ -696,7 +696,7 @@ fn run_q4k_generate_cpu(
     let start = Instant::now();
 
     for _step in 0..args.max_tokens {
-        let result = larql_inference::vindex::predict_kquant(weights, tokenizer, &ids, 1, q4_index);
+        let result = larql_inference::vindex::predict_kquant(weights, tokenizer, &ids, 1, index);
         let next_id = match result.token_ids.first() {
             Some(&id) => id,
             None => break,
@@ -929,23 +929,23 @@ fn run_predict_remote(
         // requests. Requires the Q4K vindex with interleaved FFN mmap.
         use larql_inference::generate_with_remote_ffn_batch;
         let mut cb = SilentLoadCallbacks;
-        let mut q4_index = VectorIndex::load_vindex(
+        let mut index = VectorIndex::load_vindex(
             args.index
                 .as_deref()
                 .expect("index required for batch dispatch"),
             &mut cb,
         )?;
-        q4_index.load_attn_kquant(
+        index.load_attn_kquant(
             args.index
                 .as_deref()
                 .expect("index required for batch dispatch"),
         )?;
-        q4_index.load_interleaved_kquant(
+        index.load_interleaved_kquant(
             args.index
                 .as_deref()
                 .expect("index required for batch dispatch"),
         )?;
-        let _ = q4_index.load_lm_head_q4(
+        let _ = index.load_lm_head_q4(
             args.index
                 .as_deref()
                 .expect("index required for batch dispatch"),
@@ -966,7 +966,7 @@ fn run_predict_remote(
             tokenizer,
             batch_ids,
             args.max_tokens,
-            &q4_index,
+            &index,
             &*backend,
             &remote,
             &eos,

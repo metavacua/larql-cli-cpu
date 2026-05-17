@@ -137,15 +137,15 @@ fn check_n_steps(case: &ConsistencyCase, n_steps: usize) -> Result<(), String> {
     }
     let tokenizer =
         load_vindex_tokenizer(&vindex_path).map_err(|e| format!("load_vindex_tokenizer: {e}"))?;
-    let mut q4_index =
+    let mut index =
         VectorIndex::load_vindex(&vindex_path, &mut cb).map_err(|e| format!("load vindex: {e}"))?;
-    q4_index
+    index
         .load_attn_kquant(&vindex_path)
         .map_err(|e| format!("load_attn_kquant: {e}"))?;
-    q4_index
+    index
         .load_interleaved_kquant(&vindex_path)
         .map_err(|e| format!("load_interleaved_kquant: {e}"))?;
-    let _ = q4_index.load_lm_head_q4(&vindex_path);
+    let _ = index.load_lm_head_q4(&vindex_path);
 
     let mut w_metal = load_model_weights_q4k(&vindex_path, &mut cb)
         .map_err(|e| format!("load weights (metal): {e}"))?;
@@ -171,7 +171,7 @@ fn check_n_steps(case: &ConsistencyCase, n_steps: usize) -> Result<(), String> {
         &tokenizer,
         &prompt_ids,
         n_steps,
-        &q4_index,
+        &index,
         &metal_backend,
         &cached,
         0..metal_num_layers,
@@ -207,10 +207,10 @@ fn check_n_steps(case: &ConsistencyCase, n_steps: usize) -> Result<(), String> {
         &mut w_metal,
         &prompt_ids,
         &new_ids,
-        &q4_index,
+        &index,
         &metal_backend,
     )?;
-    let cpu_ref_full = ResidualCapture::cpu_prefill(&mut w_cpu, &appended_ids, &q4_index)?;
+    let cpu_ref_full = ResidualCapture::cpu_prefill(&mut w_cpu, &appended_ids, &index)?;
     let cpu_ref = cpu_ref_full.project_to_last_position();
 
     let report = compare_captures(&cpu_ref, &metal_decode, ParityThreshold::tight());
@@ -252,15 +252,15 @@ fn check_one_step(case: &ConsistencyCase) -> Result<(), String> {
     }
     let tokenizer =
         load_vindex_tokenizer(&vindex_path).map_err(|e| format!("load_vindex_tokenizer: {e}"))?;
-    let mut q4_index =
+    let mut index =
         VectorIndex::load_vindex(&vindex_path, &mut cb).map_err(|e| format!("load vindex: {e}"))?;
-    q4_index
+    index
         .load_attn_kquant(&vindex_path)
         .map_err(|e| format!("load_attn_kquant: {e}"))?;
-    q4_index
+    index
         .load_interleaved_kquant(&vindex_path)
         .map_err(|e| format!("load_interleaved_kquant: {e}"))?;
-    let _ = q4_index.load_lm_head_q4(&vindex_path);
+    let _ = index.load_lm_head_q4(&vindex_path);
 
     let mut w_metal = load_model_weights_q4k(&vindex_path, &mut cb)
         .map_err(|e| format!("load weights (metal): {e}"))?;
@@ -286,7 +286,7 @@ fn check_one_step(case: &ConsistencyCase) -> Result<(), String> {
         &tokenizer,
         &prompt_ids,
         1,
-        &q4_index,
+        &index,
         &metal_backend,
         &cached,
         0..metal_num_layers,
@@ -319,10 +319,10 @@ fn check_one_step(case: &ConsistencyCase) -> Result<(), String> {
         &mut w_metal,
         &prompt_ids,
         token_0_id,
-        &q4_index,
+        &index,
         &metal_backend,
     )?;
-    let cpu_ref_full = ResidualCapture::cpu_prefill(&mut w_cpu, &appended_ids, &q4_index)?;
+    let cpu_ref_full = ResidualCapture::cpu_prefill(&mut w_cpu, &appended_ids, &index)?;
     // CPU is `[seq=N+1, hidden]` per layer; decode is `[1, hidden]`.
     // Slice CPU's last-position row to align shapes.
     let cpu_ref = cpu_ref_full.project_to_last_position();

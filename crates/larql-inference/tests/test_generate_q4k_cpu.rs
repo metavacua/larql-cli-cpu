@@ -70,14 +70,12 @@ fn generate_q4k_cpu_produces_tokens_against_real_vindex() {
     let mut cb = SilentLoadCallbacks;
     let mut weights = load_model_weights_q4k(&vindex_path, &mut cb).expect("load weights");
     let tokenizer = load_vindex_tokenizer(&vindex_path).expect("load tokenizer");
-    let mut q4_index = VectorIndex::load_vindex(&vindex_path, &mut cb).expect("load index");
-    q4_index
-        .load_attn_kquant(&vindex_path)
-        .expect("load attn Q4K");
-    q4_index
+    let mut index = VectorIndex::load_vindex(&vindex_path, &mut cb).expect("load index");
+    index.load_attn_kquant(&vindex_path).expect("load attn Q4K");
+    index
         .load_interleaved_kquant(&vindex_path)
         .expect("load FFN Q4K");
-    let _ = q4_index.load_lm_head_q4(&vindex_path);
+    let _ = index.load_lm_head_q4(&vindex_path);
 
     // ── Tokenise a tiny prompt ──
     let prompt = "The capital of France is";
@@ -88,7 +86,7 @@ fn generate_q4k_cpu_produces_tokens_against_real_vindex() {
     // ── Generate a handful of tokens ──
     let max_tokens = 4;
     let t0 = Instant::now();
-    let tokens = generate_kquant_cpu(&mut weights, &tokenizer, &prompt_ids, max_tokens, &q4_index);
+    let tokens = generate_kquant_cpu(&mut weights, &tokenizer, &prompt_ids, max_tokens, &index);
     let elapsed = t0.elapsed();
 
     eprintln!(

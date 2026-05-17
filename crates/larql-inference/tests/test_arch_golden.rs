@@ -192,15 +192,15 @@ fn run_case(
         .map_err(|e| format!("load_model_weights_q4k: {e}"))?;
     let tokenizer =
         load_vindex_tokenizer(vindex_path).map_err(|e| format!("load_vindex_tokenizer: {e}"))?;
-    let mut q4_index = VectorIndex::load_vindex(vindex_path, &mut cb)
+    let mut index = VectorIndex::load_vindex(vindex_path, &mut cb)
         .map_err(|e| format!("VectorIndex::load_vindex: {e}"))?;
-    q4_index
+    index
         .load_attn_kquant(vindex_path)
         .map_err(|e| format!("load_attn_kquant: {e}"))?;
-    q4_index
+    index
         .load_interleaved_kquant(vindex_path)
         .map_err(|e| format!("load_interleaved_kquant: {e}"))?;
-    let _ = q4_index.load_lm_head_q4(vindex_path);
+    let _ = index.load_lm_head_q4(vindex_path);
 
     // Instruct-tuned models answer trivia only inside their chat template.
     // Primary source is the HF-published template snapshotted into the
@@ -227,7 +227,7 @@ fn run_case(
         &tokenizer,
         &prompt_ids,
         max_tokens,
-        &q4_index,
+        &index,
         &*backend,
         &cached,
         0..num_layers,

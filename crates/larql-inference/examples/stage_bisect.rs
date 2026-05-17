@@ -107,10 +107,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let tokenizer = load_vindex_tokenizer(&vindex_path)?;
 
-    let mut q4_index = VectorIndex::load_vindex(&vindex_path, &mut cb)?;
-    q4_index.load_attn_kquant(&vindex_path)?;
-    q4_index.load_interleaved_kquant(&vindex_path)?;
-    let _ = q4_index.load_lm_head_q4(&vindex_path);
+    let mut index = VectorIndex::load_vindex(&vindex_path, &mut cb)?;
+    index.load_attn_kquant(&vindex_path)?;
+    index.load_interleaved_kquant(&vindex_path)?;
+    let _ = index.load_lm_head_q4(&vindex_path);
 
     let mut w_metal = load_model_weights_q4k(&vindex_path, &mut cb)?;
     let mut w_cpu = load_model_weights_q4k(&vindex_path, &mut cb)?;
@@ -143,7 +143,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &tokenizer,
         &prompt_ids,
         1,
-        &q4_index,
+        &index,
         &metal_backend,
         &cached,
         0..metal_num_layers,
@@ -181,7 +181,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mut w_metal,
         &prompt_ids,
         token_0_id,
-        &q4_index,
+        &index,
         &metal_backend,
         layer,
     )?;
@@ -190,7 +190,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Running CPU prefill({}) with stage dump …",
         appended_ids.len()
     );
-    let cpu_stages = StageCapture::cpu_prefill(&mut w_cpu, &appended_ids, &q4_index, layer)?
+    let cpu_stages = StageCapture::cpu_prefill(&mut w_cpu, &appended_ids, &index, layer)?
         .project_to_last_position();
 
     if cpu_stages.is_empty() {

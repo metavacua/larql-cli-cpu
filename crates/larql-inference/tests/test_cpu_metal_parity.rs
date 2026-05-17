@@ -121,15 +121,15 @@ fn run_case(case: &ParityCase) -> Result<(), String> {
     }
     let tokenizer =
         load_vindex_tokenizer(&vindex_path).map_err(|e| format!("load_vindex_tokenizer: {e}"))?;
-    let mut q4_index =
+    let mut index =
         VectorIndex::load_vindex(&vindex_path, &mut cb).map_err(|e| format!("load vindex: {e}"))?;
-    q4_index
+    index
         .load_attn_kquant(&vindex_path)
         .map_err(|e| format!("load_attn_kquant: {e}"))?;
-    q4_index
+    index
         .load_interleaved_kquant(&vindex_path)
         .map_err(|e| format!("load_interleaved_kquant: {e}"))?;
-    let _ = q4_index.load_lm_head_q4(&vindex_path);
+    let _ = index.load_lm_head_q4(&vindex_path);
 
     // Disjoint weight handles — CPU's per-layer dequant inserts into
     // `weights.tensors`, which would race if both backends shared a
@@ -147,9 +147,8 @@ fn run_case(case: &ParityCase) -> Result<(), String> {
     let metal_backend = larql_compute_metal::MetalBackend::new()
         .ok_or("Metal backend unavailable — rebuild with --features metal")?;
 
-    let metal =
-        ResidualCapture::metal_prefill(&mut w_metal, &token_ids, &q4_index, &metal_backend)?;
-    let cpu = ResidualCapture::cpu_prefill(&mut w_cpu, &token_ids, &q4_index)?;
+    let metal = ResidualCapture::metal_prefill(&mut w_metal, &token_ids, &index, &metal_backend)?;
+    let cpu = ResidualCapture::cpu_prefill(&mut w_cpu, &token_ids, &index)?;
 
     if cpu.num_layers() != metal.num_layers() {
         return Err(format!(

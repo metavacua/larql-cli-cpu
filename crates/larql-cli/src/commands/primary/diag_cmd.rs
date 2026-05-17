@@ -325,10 +325,10 @@ fn probe_run(
     use larql_inference::{default_backend, generate, CachedLayerGraph};
 
     let mut cb = larql_vindex::SilentLoadCallbacks;
-    let mut q4_index = larql_vindex::VectorIndex::load_vindex(vindex_path, &mut cb)?;
-    q4_index.load_attn_kquant(vindex_path)?;
-    q4_index.load_interleaved_kquant(vindex_path)?;
-    let _ = q4_index.load_lm_head_q4(vindex_path);
+    let mut index = larql_vindex::VectorIndex::load_vindex(vindex_path, &mut cb)?;
+    index.load_attn_kquant(vindex_path)?;
+    index.load_interleaved_kquant(vindex_path)?;
+    let _ = index.load_lm_head_q4(vindex_path);
     let mut weights = larql_vindex::load_model_weights_q4k(vindex_path, &mut cb)?;
     let tokenizer = larql_vindex::load_vindex_tokenizer(vindex_path)?;
 
@@ -346,7 +346,7 @@ fn probe_run(
         &tokenizer,
         &token_ids,
         3,
-        &q4_index,
+        &index,
         &*backend,
         &cache,
         0..num_layers,
@@ -356,7 +356,7 @@ fn probe_run(
         &tokenizer,
         &token_ids,
         tokens,
-        &q4_index,
+        &index,
         &*backend,
         &cache,
         0..num_layers,
