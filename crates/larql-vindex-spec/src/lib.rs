@@ -355,7 +355,7 @@ mod tests {
 
     fn sample_manifest() -> VindexManifest {
         let mut checksums = BTreeMap::new();
-        checksums.insert("interleaved_kquant.bin".into(), "a".repeat(64));
+        checksums.insert("interleaved_q4k.bin".into(), "a".repeat(64));
         VindexManifest {
             vindex_spec_version: VINDEX_SPEC_VERSION,
             version: 2,
@@ -382,7 +382,7 @@ mod tests {
             layers: vec![LayerEntry {
                 layer: 0,
                 num_features: 10240,
-                file: Some("interleaved_kquant.bin".into()),
+                file: Some("interleaved_q4k.bin".into()),
                 offset: Some(0),
                 length: Some(52_428_800),
                 shards: None,

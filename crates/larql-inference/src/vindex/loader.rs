@@ -154,7 +154,7 @@ mod tests {
         // names; a divergence here is the warning sign.
         assert_eq!(super::ATTN_Q4K_BIN, "attn_weights_q4k.bin");
         assert_eq!(super::ATTN_Q8_BIN, "attn_weights_q8.bin");
-        assert_eq!(super::INTERLEAVED_Q4K_BIN, "interleaved_kquant.bin");
+        assert_eq!(super::INTERLEAVED_Q4K_BIN, "interleaved_q4k.bin");
         assert_eq!(super::INTERLEAVED_Q4_BIN, "interleaved_q4.bin");
         assert_eq!(super::LM_HEAD_BIN, "lm_head.bin");
         assert_eq!(super::LM_HEAD_Q4_BIN, "lm_head_q4.bin");
@@ -226,7 +226,7 @@ mod tests {
         use crate::test_utils::write_synthetic_q4k_model_dir;
         write_synthetic_q4k_model_dir(tmp.path()).expect("write q4k fixture");
         let _ = std::fs::remove_file(tmp.path().join(INTERLEAVED_Q4K_BIN));
-        let _ = std::fs::remove_file(tmp.path().join("interleaved_kquant_manifest.json"));
+        let _ = std::fs::remove_file(tmp.path().join("interleaved_q4k_manifest.json"));
         let result = open_inference_vindex(tmp.path());
         let msg = match result {
             Ok(_) => panic!("loader must reject vindex without FFN weights"),

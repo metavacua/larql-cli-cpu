@@ -111,7 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  iters:     {iters}");
 
     let gate_path = vindex_path.join("gate_vectors.bin");
-    let interleaved_path = vindex_path.join("interleaved_kquant.bin");
+    let interleaved_path = vindex_path.join("interleaved_q4k.bin");
     let gate_gb = file_size_gb(&gate_path);
     let interleaved_gb = file_size_gb(&interleaved_path);
     println!("\n  gate_vectors.bin:   {gate_gb:.2} GB   (savings if dropped)");

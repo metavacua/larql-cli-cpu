@@ -77,3 +77,83 @@ fn dequantize_matrix(bytes: &[u8], format: &str, rows: usize, cols: usize) -> Ar
     };
     Array2::from_shape_vec((rows, cols), truncated).expect("shape mismatch")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
+
+    /// `ensure_attn_tensors_dequantised` populates every layer's
+    /// Q/K/V/O tensors when the vindex carries Q4K attention bytes.
+    #[test]
+    fn ensure_attn_tensors_populates_qkvo_per_layer() {
+        let mut weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+        // Strip the f32 attention tensors the synthetic fixture left
+        // behind so we exercise the *insert* path, not the
+        // already-present short-circuit.
+        let arch = weights.arch.clone();
+        for layer in 0..weights.num_layers {
+            weights.tensors.remove(&arch.attn_q_key(layer));
+            weights.tensors.remove(&arch.attn_k_key(layer));
+            weights.tensors.remove(&arch.attn_v_key(layer));
+            weights.tensors.remove(&arch.attn_o_key(layer));
+        }
+        ensure_attn_tensors_dequantised(&mut weights, &index);
+        for layer in 0..weights.num_layers {
+            assert!(
+                weights.tensors.contains_key(&arch.attn_q_key(layer)),
+                "Q tensor missing for layer {layer}"
+            );
+            assert!(weights.tensors.contains_key(&arch.attn_k_key(layer)));
+            assert!(weights.tensors.contains_key(&arch.attn_v_key(layer)));
+            assert!(weights.tensors.contains_key(&arch.attn_o_key(layer)));
+        }
+    }
+
+    /// Idempotent — calling twice doesn't re-dequantise (and doesn't
+    /// panic on the contains_key short-circuit).
+    #[test]
+    fn ensure_attn_tensors_is_idempotent() {
+        let mut weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+        ensure_attn_tensors_dequantised(&mut weights, &index);
+        let q_before = weights
+            .tensors
+            .get(&weights.arch.attn_q_key(0))
+            .expect("Q present after first dequant");
+        // Same object handle implies short-circuit branch fired.
+        let q_ptr_before = std::sync::Arc::as_ptr(q_before);
+        ensure_attn_tensors_dequantised(&mut weights, &index);
+        let q_after = weights.tensors.get(&weights.arch.attn_q_key(0)).unwrap();
+        let q_ptr_after = std::sync::Arc::as_ptr(q_after);
+        assert_eq!(
+            q_ptr_before, q_ptr_after,
+            "idempotent call must not replace the tensor"
+        );
+    }
+
+    /// No-op when the vindex has no Q4K attention data (the
+    /// `attn_kquant_layer_data → None` continue branch).
+    #[test]
+    fn ensure_attn_tensors_skips_layers_without_q4k_data() {
+        let mut weights = make_test_q4k_weights();
+        let empty_index = larql_vindex::VectorIndex::new(
+            vec![None; weights.num_layers],
+            vec![None; weights.num_layers],
+            weights.num_layers,
+            weights.hidden_size,
+        );
+        // Remove the pre-populated tensors so we'd notice if the
+        // function inserted anything.
+        let arch = weights.arch.clone();
+        for layer in 0..weights.num_layers {
+            weights.tensors.remove(&arch.attn_q_key(layer));
+        }
+        ensure_attn_tensors_dequantised(&mut weights, &empty_index);
+        assert!(
+            !weights.tensors.contains_key(&arch.attn_q_key(0)),
+            "no Q4K data → no insert"
+        );
+    }
+}

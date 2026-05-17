@@ -225,6 +225,15 @@ and [`docs/adr/0008-embed-server.md`](docs/adr/0008-embed-server.md).
 
 ### Publish to HuggingFace — full + slices + collections
 
+Every published vindex carries a versioned on-disk contract. The
+`crates/larql-vindex-spec` crate defines the v1 manifest schema —
+hardened provenance (pinned upstream commit + per-shard safetensors
+digests), closed enums for `extract_level` / `dtype` / `quant`, and a
+20 GiB shard cap. Repos stamp `library_name: larql` in their model
+card so the Hub filters them at
+[`huggingface.co/models?library=larql`](https://huggingface.co/models?library=larql).
+The contract lives in [`crates/larql-vindex-spec/SPEC.md`](crates/larql-vindex-spec/SPEC.md).
+
 `larql publish` combines `slice` + `hf publish` and adds HuggingFace
 **collections**: one run uploads six sibling repos and files them into
 three nested collections (model / family / library) for discovery.
@@ -714,6 +723,8 @@ The full surface is documented in `crates/larql-inference/ROADMAP.md` §
 | [docs/specs/vindex-format-spec.md](docs/specs/vindex-format-spec.md) | Vindex file format specification (v0.3, ~98% implemented) |
 | [docs/specs/vindex-operations-spec.md](docs/specs/vindex-operations-spec.md) | Vindex operations, API, patches (~98% implemented) |
 | [docs/specs/vindex-ecosystem-spec.md](docs/specs/vindex-ecosystem-spec.md) | Distributed hosting, HuggingFace, Vindexfile (~85% implemented) |
+| [crates/larql-vindex-spec/SPEC.md](crates/larql-vindex-spec/SPEC.md) | Vindex v1 public contract — manifest schema, sharding rule, validation thresholds, model card tags |
+| [crates/larql-vindex-spec/schema/vindex-v1.schema.json](crates/larql-vindex-spec/schema/vindex-v1.schema.json) | JSON Schema 2020-12 mirror of the v1 manifest |
 | [docs/lql-guide.md](docs/lql-guide.md) | LQL quick start guide |
 | [docs/cli.md](docs/cli.md) | CLI reference |
 | [docs/inference-engine.md](docs/inference-engine.md) | Inference engine — BLAS-fused attention, Metal GPU, auto-calibration |

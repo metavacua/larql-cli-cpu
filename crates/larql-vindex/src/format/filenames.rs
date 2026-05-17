@@ -71,8 +71,8 @@ pub const DOWN_FEATURES_Q4K_MANIFEST_JSON: &str = "down_features_q4k_manifest.js
 // ── Interleaved FFN (gate|up|down packed per layer) ────────────────────
 pub const INTERLEAVED_BIN: &str = "interleaved.bin";
 pub const INTERLEAVED_Q4_BIN: &str = "interleaved_q4.bin";
-pub const INTERLEAVED_Q4K_BIN: &str = "interleaved_kquant.bin";
-pub const INTERLEAVED_Q4K_MANIFEST_JSON: &str = "interleaved_kquant_manifest.json";
+pub const INTERLEAVED_Q4K_BIN: &str = "interleaved_q4k.bin";
+pub const INTERLEAVED_Q4K_MANIFEST_JSON: &str = "interleaved_q4k_manifest.json";
 
 // ── Attention weights ──────────────────────────────────────────────────
 pub const ATTN_WEIGHTS_BIN: &str = "attn_weights.bin";
