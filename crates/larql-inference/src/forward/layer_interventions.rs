@@ -452,10 +452,7 @@ mod tests {
         let input = h(2, weights.hidden_size);
         let result =
             run_layer_with_mapped_pre_o_head(&weights, &input, 0, &ffn, 0, None, None, |_| None);
-        assert!(
-            result.is_none(),
-            "mapper returning None must short-circuit"
-        );
+        assert!(result.is_none(), "mapper returning None must short-circuit");
     }
 
     #[test]
@@ -527,7 +524,14 @@ mod tests {
         let ffn = WeightFfn { weights: &weights };
         let input = h(2, weights.hidden_size);
         let result = run_layer_with_mapped_head_residual_delta(
-            &weights, &input, 0, &ffn, 0, None, None, |_| None,
+            &weights,
+            &input,
+            0,
+            &ffn,
+            0,
+            None,
+            None,
+            |_| None,
         );
         assert!(result.is_none());
     }
@@ -539,7 +543,13 @@ mod tests {
         let ffn = WeightFfn { weights: &weights };
         let input = h(2, weights.hidden_size);
         let result = run_layer_with_mapped_head_residual_delta(
-            &weights, &input, 0, &ffn, 0, None, None,
+            &weights,
+            &input,
+            0,
+            &ffn,
+            0,
+            None,
+            None,
             |_| Some(Array2::<f32>::zeros((2, 1))), // wrong column count
         );
         assert!(result.is_none());
@@ -551,7 +561,13 @@ mod tests {
         let ffn = WeightFfn { weights: &weights };
         let input = h(2, weights.hidden_size);
         let result = run_layer_with_mapped_head_residual_delta(
-            &weights, &input, 0, &ffn, 99, None, None,
+            &weights,
+            &input,
+            0,
+            &ffn,
+            99,
+            None,
+            None,
             |h| Some(Array2::<f32>::zeros((h.nrows(), weights.hidden_size))),
         );
         assert!(result.is_none());

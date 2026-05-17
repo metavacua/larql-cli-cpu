@@ -61,6 +61,37 @@ pub struct VindexModelConfig {
     /// wrong token (observed: "Paris" → "hyperparameters").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub final_logit_softcapping: Option<f64>,
+
+    // ── Granite-family scaling multipliers ──
+    // None on every other arch. Captured at vindex-build time so the
+    // reconstructed `ModelArchitecture` knows about them at load time;
+    // without these the vindex Metal forward path silently runs with
+    // all three at 1.0 and Granite emits gibberish (the safetensors
+    // detect path picks them up from config.json directly, which is why
+    // `shannon verify` was clean while `larql run` on a Granite vindex
+    // was not). `embedding_multiplier` is already captured at the top
+    // level of `VindexConfig` as `embed_scale`.
+    /// Attention score multiplier (Granite 4.1: 1/64 on 3B, 1/128 on
+    /// 8B/30B). Applied on top of 1/sqrt(head_dim) — see
+    /// [`larql_models::ModelArchitecture::attention_multiplier`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention_multiplier: Option<f64>,
+    /// Residual-stream scaling factor applied after attention and FFN
+    /// additions (Granite 4.1: 0.22 on 3B/8B, 0.175 on 30B).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub residual_multiplier: Option<f64>,
+    /// Logits scaling factor — final logits are divided by this before
+    /// softmax (Granite 4.1: 10 on 3B, 16 on 8B/30B).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logits_scaling: Option<f64>,
+    /// RMS-norm / LayerNorm epsilon parsed from `rms_norm_eps` (or
+    /// `layer_norm_eps`). Llama 3, Mistral, Gemma 3, and Granite 4.1 all
+    /// ship 1e-5; older default was 1e-6. Captured here so the vindex
+    /// load path doesn't silently fall back to the arch-class default —
+    /// same regression mode that broke the safetensors path before the
+    /// fix in `docs/diagnoses/shannon-cross-engine-divergence.md`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub norm_eps: Option<f64>,
 }
 
 /// MoE (Mixture of Experts) configuration.
@@ -130,6 +161,10 @@ impl VindexModelConfig {
             rope_local_base: cfg.rope_local_base,
             query_pre_attn_scalar: cfg.query_pre_attn_scalar,
             final_logit_softcapping: cfg.final_logit_softcapping,
+            attention_multiplier: cfg.attention_multiplier,
+            residual_multiplier: cfg.residual_multiplier,
+            logits_scaling: cfg.logits_scaling,
+            norm_eps: cfg.norm_eps,
         }
     }
 }
@@ -158,6 +193,10 @@ mod tests {
             rope_local_base: None,
             query_pre_attn_scalar: None,
             final_logit_softcapping: None,
+            attention_multiplier: None,
+            residual_multiplier: None,
+            logits_scaling: None,
+            norm_eps: None,
         }
     }
 
@@ -227,5 +266,70 @@ mod tests {
         let moe: MoeConfig = serde_json::from_str(json).unwrap();
         assert!(!moe.shared_expert);
         assert!(!moe.hybrid);
+    }
+
+    #[test]
+    fn granite_scalars_round_trip_through_from_arch() {
+        // Granite 4.1 3B exact config. The four scalars must survive
+        // arch detect → from_arch → JSON → deserialize so the vindex
+        // load path can hand them back to the forward pass.
+        let arch = larql_models::detect_from_json(&serde_json::json!({
+            "model_type": "granite",
+            "hidden_size": 2560,
+            "num_hidden_layers": 40,
+            "intermediate_size": 8192,
+            "num_attention_heads": 40,
+            "num_key_value_heads": 8,
+            "rms_norm_eps": 1e-05,
+            "attention_multiplier": 0.015625,
+            "embedding_multiplier": 12.0,
+            "logits_scaling": 10.0,
+            "residual_multiplier": 0.22,
+        }));
+        let vc = VindexModelConfig::from_arch(&*arch);
+        assert_eq!(vc.attention_multiplier, Some(0.015625));
+        assert_eq!(vc.residual_multiplier, Some(0.22));
+        assert_eq!(vc.logits_scaling, Some(10.0));
+        assert_eq!(vc.norm_eps, Some(1e-05));
+
+        let json = serde_json::to_string(&vc).unwrap();
+        // All four must serialise (regression: an earlier vindex format
+        // dropped them silently, so Granite 4.1 vindexes loaded with
+        // multipliers defaulted to 1.0 and the model emitted garbage).
+        assert!(json.contains("\"attention_multiplier\":0.015625"), "{json}");
+        assert!(json.contains("\"residual_multiplier\":0.22"), "{json}");
+        assert!(json.contains("\"logits_scaling\":10.0"), "{json}");
+        // `serde_json::to_string` emits this f64 as `0.00001`, not
+        // `1e-5`; numeric equality (not text equality) is what matters.
+        assert!(json.contains("\"norm_eps\":0.00001"), "{json}");
+
+        let back: VindexModelConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.attention_multiplier, Some(0.015625));
+        assert_eq!(back.residual_multiplier, Some(0.22));
+        assert_eq!(back.logits_scaling, Some(10.0));
+        assert_eq!(back.norm_eps, Some(1e-05));
+    }
+
+    #[test]
+    fn granite_scalars_absent_for_non_granite_arch() {
+        // Llama and Mistral don't carry these multipliers; verify the
+        // serialised JSON omits the fields entirely so existing vindexes
+        // on those arches are byte-stable after a round trip.
+        let arch = larql_models::detect_from_json(&serde_json::json!({
+            "model_type": "llama",
+            "hidden_size": 4096,
+            "num_hidden_layers": 32,
+            "intermediate_size": 14336,
+            "num_attention_heads": 32,
+            "num_key_value_heads": 8,
+        }));
+        let vc = VindexModelConfig::from_arch(&*arch);
+        assert!(vc.attention_multiplier.is_none());
+        assert!(vc.residual_multiplier.is_none());
+        assert!(vc.logits_scaling.is_none());
+        let json = serde_json::to_string(&vc).unwrap();
+        assert!(!json.contains("attention_multiplier"));
+        assert!(!json.contains("residual_multiplier"));
+        assert!(!json.contains("logits_scaling"));
     }
 }

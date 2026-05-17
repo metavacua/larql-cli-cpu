@@ -302,7 +302,7 @@ fn explain_walk_empty_prompt_errors() {
     // Hits explain.rs:26-28 — empty-prompt early return.
     let (mut session, _dir, _) = fresh_session();
     let err = try_run(&mut session, r#"EXPLAIN WALK "";"#).expect_err("empty prompt");
-    let msg = format!("{err}");
+    let msg = err.to_string();
     assert!(
         msg.contains("empty") || msg.contains("Error"),
         "expected empty-prompt error, got: {msg}"

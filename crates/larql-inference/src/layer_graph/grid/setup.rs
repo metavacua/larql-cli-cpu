@@ -70,3 +70,72 @@ pub(super) fn reset_and_preallocate_grid_kv(weights: &ModelWeights, backend: &dy
     let kv_shapes = kv_cache_shapes_for_arch(weights);
     backend.preallocate_kv_cache_per_layer(&kv_shapes, DEFAULT_GPU_KV_CACHE_MAX_SEQ);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
+    use larql_compute::CpuBackend;
+
+    #[test]
+    fn build_grid_pipeline_setup_succeeds_with_q4k_fixture_moe_patch() {
+        let weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let setup = build_grid_pipeline_setup(&weights, &index, RemotePatch::Moe)
+            .expect("build_grid_pipeline_setup should succeed on Q4K fixture");
+        assert_eq!(setup.num_layers, weights.num_layers);
+        assert_eq!(setup.hidden, weights.hidden_size);
+        assert_eq!(setup.layers.len(), weights.num_layers);
+    }
+
+    #[test]
+    fn build_grid_pipeline_setup_succeeds_with_ffn_patch() {
+        let weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let setup = build_grid_pipeline_setup(&weights, &index, RemotePatch::Ffn)
+            .expect("build_grid_pipeline_setup should succeed on Q4K fixture");
+        assert_eq!(setup.layers.len(), weights.num_layers);
+    }
+
+    #[test]
+    fn build_grid_pipeline_setup_errors_when_no_q4_ffn_mmap() {
+        // Construct a bare VectorIndex with no FFN data.
+        let weights = make_test_q4k_weights();
+        let empty_index = larql_vindex::VectorIndex::new(
+            vec![None; weights.num_layers],
+            vec![None; weights.num_layers],
+            weights.num_layers,
+            weights.hidden_size,
+        );
+        let result = build_grid_pipeline_setup(&weights, &empty_index, RemotePatch::Moe);
+        let err = match result {
+            Ok(_) => panic!("missing Q4 FFN mmap must error"),
+            Err(e) => e,
+        };
+        let msg = format!("{err}");
+        assert!(
+            msg.to_lowercase().contains("interleaved q4"),
+            "error should mention missing interleaved Q4 FFN — got: {msg}"
+        );
+    }
+
+    #[test]
+    fn remote_patch_enum_clones() {
+        // Trivial coverage for the Clone/Copy derives.
+        let p = RemotePatch::Moe;
+        let _ = p;
+        let q = RemotePatch::Ffn;
+        let _ = q;
+        // Debug fmt — exercises the Debug derive.
+        let _ = format!("{:?} {:?}", p, q);
+    }
+
+    #[test]
+    fn reset_and_preallocate_grid_kv_runs_on_cpu_backend() {
+        let weights = make_test_q4k_weights();
+        let backend = CpuBackend;
+        // Should not panic — CpuBackend's reset/preallocate are no-ops
+        // (CPU KV cache is allocated lazily by the engine).
+        reset_and_preallocate_grid_kv(&weights, &backend);
+    }
+}

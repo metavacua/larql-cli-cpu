@@ -423,6 +423,30 @@ mod tests {
     }
 
     #[test]
+    fn infer_patched_q4k_returns_predictions_via_quantised_path() {
+        // Exercises `infer_patched_q4k` end-to-end — same contract as
+        // `infer_patched` but routes through the Q4K dequant forward
+        // path. Uses the Q4KTestFixtures so the vindex has Q4K bytes
+        // for attention + FFN.
+        use crate::test_utils::Q4KTestFixtures;
+        let mut fx = Q4KTestFixtures::build();
+        let tokens = vec![0u32, 1, 2];
+        let result = infer_patched_q4k(
+            &mut fx.weights,
+            &fx.tokenizer,
+            &fx.index,
+            None,
+            &tokens,
+            5,
+            &fx.index,
+        );
+        assert!(result.predictions.len() <= 5);
+        assert!(result.knn_override.is_none());
+        assert_eq!(result.model_top1, result.predictions.first().cloned());
+        assert!(result.walk_ms >= 0.0);
+    }
+
+    #[test]
     fn infer_patched_with_knn_store_override_routes_through() {
         use crate::test_utils::TestFixtures;
         let fx = TestFixtures::build();

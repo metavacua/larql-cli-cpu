@@ -27,7 +27,6 @@ use std::path::Path;
 #[cfg(not(windows))]
 use sha2::{Digest, Sha256};
 
-#[cfg(not(windows))]
 use larql_core::Graph;
 use larql_vindex::walker::{
     attention_walker::AttentionWalker,

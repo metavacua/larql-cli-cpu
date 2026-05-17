@@ -723,4 +723,33 @@ mod dispatch_tests {
         let out = ffn.forward(0, &x);
         assert_eq!(out.shape(), &[1, weights.hidden_size]);
     }
+
+    /// `WalkFfn::new` with `top_k = usize::MAX` routes through the dense
+    /// `WalkFfnConfig::dense` branch (line 178). The `new(_, _, k)`
+    /// constructor's other branch (sparse) is already exercised by
+    /// `walk_ffn_sparse_k`.
+    #[test]
+    fn walk_ffn_new_with_usize_max_takes_dense_branch() {
+        let weights = shared_weights();
+        let idx = mock_index(weights);
+        let ffn = WalkFfn::new(weights, &idx, usize::MAX);
+        let x = input(1, weights.hidden_size);
+        let out = ffn.forward(0, &x);
+        assert_eq!(out.shape(), &[1, weights.hidden_size]);
+    }
+
+    /// Forward against the Q4K test fixture routes through the native
+    /// kquant path (priority 4 in the routing ladder, line 340-343),
+    /// which fires when the vindex has interleaved_kquant data.
+    #[test]
+    fn walk_ffn_forward_routes_through_native_kquant_path() {
+        use crate::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
+        let weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let ffn = WalkFfn::new_unlimited(&weights, &index);
+        let x = input(1, weights.hidden_size);
+        let out = ffn.forward(0, &x);
+        assert_eq!(out.shape(), &[1, weights.hidden_size]);
+        assert!(out.iter().all(|v| v.is_finite()));
+    }
 }

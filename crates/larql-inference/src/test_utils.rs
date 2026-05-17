@@ -263,6 +263,10 @@ pub fn write_synthetic_model_dir(dir: &std::path::Path) -> Result<(), String> {
         rope_local_base: None,
         query_pre_attn_scalar: None,
         final_logit_softcapping: None,
+        attention_multiplier: None,
+        residual_multiplier: None,
+        logits_scaling: None,
+        norm_eps: None,
     };
 
     let mut config = VindexConfig {

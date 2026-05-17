@@ -759,6 +759,16 @@ mod tests {
                 self
             }
         }
+        // Exercise the FakeHandle method bodies so they don't show as
+        // uncovered (the panic short-circuits before the dispatch traits
+        // can call them through the KvHandle wrapper).
+        let mut bare = FakeHandle;
+        assert_eq!(bare.cached_len(), 0);
+        assert_eq!(bare.kv_dim(), 0);
+        assert_eq!(bare.backend_name(), "fake");
+        assert!(bare.as_any().is::<FakeHandle>());
+        assert!(bare.as_any_mut().is::<FakeHandle>());
+
         let mut fake = KvHandle::new(FakeHandle);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             super::cpu_q4k_cache_mut(&mut fake);
@@ -767,5 +777,111 @@ mod tests {
             result.is_err(),
             "expected panic on cross-backend Q4K cache handle"
         );
+    }
+
+    // ── Coarse fused intents (Q4K path) ──────────────────────────────────
+
+    /// `coarse_prefill` returns `None` when the prompt is empty — fastest
+    /// early-exit branch.
+    #[test]
+    fn coarse_prefill_empty_prompt_returns_none() {
+        let backend = backend();
+        let mut weights = make_test_weights();
+        let result = backend.coarse_prefill(&mut weights, &[], None);
+        assert!(result.is_none(), "empty prompt must yield None");
+    }
+
+    /// `coarse_prefill` returns `None` when no vindex is provided —
+    /// f32-only models route through the per-layer dispatch path.
+    #[test]
+    fn coarse_prefill_without_index_returns_none() {
+        let backend = backend();
+        let mut weights = make_test_weights();
+        let result = backend.coarse_prefill(&mut weights, &[0, 1, 2], None);
+        assert!(
+            result.is_none(),
+            "no-index call must defer to per-layer dispatch"
+        );
+    }
+
+    /// `coarse_prefill` happy path on the Q4K test fixture. Drives the
+    /// cached-decode pipeline end-to-end and returns a populated KvHandle.
+    #[test]
+    fn coarse_prefill_q4k_fixture_returns_hidden_and_handle() {
+        use crate::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
+        let backend = backend();
+        let mut weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let (h, handle) = backend
+            .coarse_prefill(&mut weights, &[0u32, 1, 2], Some(&index))
+            .expect("Q4K prefill should succeed");
+        // Last-row hidden shape: [1, hidden_size].
+        assert_eq!(h.shape(), &[1, weights.hidden_size]);
+        assert!(
+            h.iter().all(|v| v.is_finite()),
+            "prefill hidden must be finite"
+        );
+        // Backend tag identifies the cache as ours.
+        assert_eq!(handle.backend_name(), "cpu-q4k");
+    }
+
+    /// `coarse_decode_step` returns `None` without a vindex.
+    #[test]
+    fn coarse_decode_step_without_index_returns_none() {
+        let backend = backend();
+        let mut weights = make_test_weights();
+        // Build a placeholder cache handle — must be the cpu-q4k kind so
+        // the dispatch reaches the `index?` early-return.
+        let mut handle = KvHandle::new(CpuQ4kCacheHandle {
+            cache: vec![None; weights.num_layers],
+        });
+        let result = backend.coarse_decode_step(&mut weights, 0, None, &mut handle, 0);
+        assert!(result.is_none());
+    }
+
+    /// `coarse_decode_step` happy path: prefill → decode one token →
+    /// expect a `[1, hidden]` hidden state.
+    #[test]
+    fn coarse_decode_step_q4k_fixture_decodes_one_token() {
+        use crate::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
+        let backend = backend();
+        let mut weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let (_h, mut handle) = backend
+            .coarse_prefill(&mut weights, &[0u32, 1, 2], Some(&index))
+            .expect("Q4K prefill should succeed");
+
+        // Decode the next token at abs_position=3.
+        let h = backend
+            .coarse_decode_step(&mut weights, 4u32, Some(&index), &mut handle, 3)
+            .expect("Q4K decode step should succeed");
+        assert_eq!(h.shape(), &[1, weights.hidden_size]);
+        assert!(h.iter().all(|v| v.is_finite()));
+    }
+
+    /// `clip_kv` on a cache with prior K/V exercises the slice-and-truncate
+    /// branch (L260-266) that the existing tests' empty-cache call skipped.
+    #[test]
+    fn clip_kv_truncates_populated_handle_to_window() {
+        let backend = backend();
+        // Build a CpuKvHandle with state (10 rows, 8 cols), then clip to 4.
+        let k = Array2::<f32>::from_shape_fn((10, 8), |(r, c)| (r * 8 + c) as f32);
+        let v = Array2::<f32>::from_shape_fn((10, 8), |(r, c)| (r * 8 + c) as f32 + 100.0);
+        let mut handle = backend.alloc_kv_buffer(0, 32, 8);
+        // `alloc_kv_buffer` returns an empty CpuKvHandle; install state
+        // via `replace_state` reached through `cpu_handle_mut`.
+        super::cpu_handle_mut(&mut handle).replace_state((k.clone(), v.clone()));
+        assert_eq!(handle.cached_len(), 10);
+
+        backend.clip_kv(&mut handle, 4);
+        assert_eq!(handle.cached_len(), 4);
+        // Should be the *tail* 4 rows (rows 6..10).
+        let (k_out, v_out) = backend
+            .read_kv_to_host(&handle)
+            .expect("read_kv_to_host after clip");
+        assert_eq!(k_out.shape(), &[4, 8]);
+        assert_eq!(v_out.shape(), &[4, 8]);
+        assert_eq!(k_out[[0, 0]], k[[6, 0]]);
+        assert_eq!(k_out[[3, 7]], k[[9, 7]]);
     }
 }

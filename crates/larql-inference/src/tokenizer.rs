@@ -7,7 +7,26 @@ use larql_models::ModelArchitecture;
 
 use crate::error::InferenceError;
 
+/// Classic GPT-2 pre-tokenization regex. Used as the override pattern
+/// when a model's `tokenizer_config.json` declares
+/// `tokenizer_class: "GPT2Tokenizer"` but the shipped `tokenizer.json`
+/// has been packaged with a different (cl100k-style) pre-tokenizer.
+/// See [`maybe_patch_gpt2_pretok`] for the why.
+const GPT2_PRETOK_REGEX: &str =
+    r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+";
+
 /// Load a tokenizer from a model directory.
+///
+/// Honours `tokenizer_config.json`'s `tokenizer_class` declaration: when
+/// the config says `GPT2Tokenizer` we patch the shipped `tokenizer.json`'s
+/// pre-tokenizer regex to the classic GPT-2 form before handing it to
+/// `tokenizers::Tokenizer::from_bytes`. This works around models (IBM
+/// Granite 4.1 3B/8B/30B) that ship a cl100k-style pre-tokenizer regex
+/// in `tokenizer.json` but were actually trained against the slow
+/// `GPT2Tokenizer` regex — without this, LARQL Rust tokenizes the same
+/// 1 KB corpus to ~244 tokens while HF/MLX (which honour
+/// `tokenizer_class`) get ~264, and the bits/char delta blows the
+/// shannon-verify gate by ~40 %. See `detect/tests.rs::test_real_granite_4_1_3b`.
 pub fn load_tokenizer(model_dir: &Path) -> Result<tokenizers::Tokenizer, InferenceError> {
     let path = model_dir.join(TOKENIZER_JSON);
     if !path.exists() {
@@ -15,7 +34,51 @@ pub fn load_tokenizer(model_dir: &Path) -> Result<tokenizers::Tokenizer, Inferen
             "tokenizer.json not found".into(),
         ));
     }
-    tokenizers::Tokenizer::from_file(&path).map_err(|e| InferenceError::Parse(e.to_string()))
+    let raw = std::fs::read(&path).map_err(|e| InferenceError::Parse(e.to_string()))?;
+    let bytes = match read_tokenizer_class(model_dir).as_deref() {
+        Some("GPT2Tokenizer") => maybe_patch_gpt2_pretok(&raw).unwrap_or(raw),
+        _ => raw,
+    };
+    tokenizers::Tokenizer::from_bytes(&bytes).map_err(|e| InferenceError::Parse(e.to_string()))
+}
+
+/// Read `tokenizer_class` from `tokenizer_config.json` if present.
+/// Returns `None` when the file is absent, unreadable, or has no
+/// `tokenizer_class` key — both are non-fatal: the legacy load path
+/// just consumes `tokenizer.json` as shipped.
+fn read_tokenizer_class(model_dir: &Path) -> Option<String> {
+    let cfg_path = model_dir.join(TOKENIZER_CONFIG_JSON);
+    let cfg_raw = std::fs::read(&cfg_path).ok()?;
+    let cfg: serde_json::Value = serde_json::from_slice(&cfg_raw).ok()?;
+    cfg.get("tokenizer_class")?.as_str().map(str::to_string)
+}
+
+/// Patch the first pre-tokenizer's `Split` regex in a `tokenizer.json`
+/// payload to the classic GPT-2 pattern. Returns the rewritten JSON as
+/// bytes, or `None` if the payload doesn't match the expected shape (in
+/// which case the caller falls back to the unpatched file rather than
+/// failing the load).
+///
+/// The cl100k-style regex shipped in Granite 4.1's `tokenizer.json` eats
+/// a leading punctuation char into adjacent letter runs (`"re-use"` →
+/// `["re", "-use"]`) and merges mixed whitespace into single pretokens
+/// (`"\n    \n"` → one token). GPT-2's regex keeps them separated. Both
+/// regexes share the same `'s|'t|...` and trailing `\s+(?!\S)|\s+` arms,
+/// so the patch is a single-field rewrite — no other branches of the
+/// `Sequence` pre-tokenizer (ByteLevel etc.) are touched.
+fn maybe_patch_gpt2_pretok(raw: &[u8]) -> Option<Vec<u8>> {
+    let mut tj: serde_json::Value = serde_json::from_slice(raw).ok()?;
+    let regex_slot = tj
+        .get_mut("pre_tokenizer")?
+        .get_mut("pretokenizers")?
+        .get_mut(0)?
+        .get_mut("pattern")?
+        .get_mut("Regex")?;
+    if !regex_slot.is_string() {
+        return None;
+    }
+    *regex_slot = serde_json::Value::String(GPT2_PRETOK_REGEX.to_string());
+    serde_json::to_vec(&tj).ok()
 }
 
 /// Tokenize `prompt` with BOS prepended when the architecture requires
@@ -127,6 +190,60 @@ mod tests {
         let result = load_tokenizer(&dir);
         assert!(matches!(result, Err(InferenceError::MissingTensor(_))));
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn maybe_patch_gpt2_pretok_replaces_first_regex() {
+        // Minimal tokenizer.json shape that mirrors the Granite 4.1
+        // packaging: a Sequence pre_tokenizer whose first leaf is a
+        // Split with a Regex pattern. The patched bytes must round-trip
+        // through JSON with the GPT-2 regex installed; everything else
+        // (ByteLevel sibling, model section, etc.) must round-trip
+        // untouched.
+        let original = serde_json::json!({
+            "pre_tokenizer": {
+                "type": "Sequence",
+                "pretokenizers": [
+                    {
+                        "type": "Split",
+                        "pattern": {"Regex": "shipped-cl100k-regex-here"},
+                        "behavior": "Removed",
+                        "invert": true,
+                    },
+                    {"type": "ByteLevel", "add_prefix_space": false}
+                ]
+            },
+            "model": {"type": "BPE"},
+        });
+        let raw = serde_json::to_vec(&original).unwrap();
+        let patched = maybe_patch_gpt2_pretok(&raw).expect("patch must succeed for known shape");
+        let parsed: serde_json::Value = serde_json::from_slice(&patched).unwrap();
+        let regex = parsed["pre_tokenizer"]["pretokenizers"][0]["pattern"]["Regex"]
+            .as_str()
+            .unwrap();
+        assert_eq!(regex, GPT2_PRETOK_REGEX);
+        // ByteLevel sibling untouched
+        assert_eq!(
+            parsed["pre_tokenizer"]["pretokenizers"][1]["type"],
+            "ByteLevel"
+        );
+        assert_eq!(parsed["model"]["type"], "BPE");
+    }
+
+    #[test]
+    fn maybe_patch_gpt2_pretok_returns_none_for_unexpected_shape() {
+        // tokenizer.json without a Sequence pre_tokenizer (e.g. a
+        // Llama-style Metaspace pre-tokenizer) should not be mutated —
+        // we return None and the caller falls through to the unpatched
+        // load. Otherwise we'd corrupt every model that happens to
+        // declare tokenizer_class: GPT2Tokenizer but ships a non-Split
+        // pre-tokenizer.
+        let metaspace = serde_json::json!({
+            "pre_tokenizer": {"type": "Metaspace", "replacement": "▁"},
+            "model": {"type": "BPE"},
+        });
+        let raw = serde_json::to_vec(&metaspace).unwrap();
+        assert!(maybe_patch_gpt2_pretok(&raw).is_none());
     }
 
     #[test]
