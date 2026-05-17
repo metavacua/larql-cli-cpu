@@ -110,3 +110,64 @@ pub fn predict_kquant_hidden_with_ffn(
 
     h
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ffn::WeightFfn;
+    use crate::test_utils::{
+        make_test_gemma4_moe_weights, make_test_q4k_vindex, make_test_q4k_weights,
+        make_test_tokenizer,
+    };
+
+    /// `predict_kquant_hidden_with_ffn` end-to-end against the Q4K
+    /// fixture using a `WeightFfn` backend. Non-MoE arch → the
+    /// hybrid-MoE branch (lines 73-83) does NOT fire; instead the
+    /// standard `run_layer_with_ffn` path executes.
+    #[test]
+    fn predict_kquant_hidden_with_ffn_runs_against_q4k_fixture() {
+        let mut weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+        // We need the WeightFfn to borrow weights immutably for the
+        // ffn dispatch — but predict_kquant_hidden_with_ffn already
+        // does an unsafe aliased read internally. Just construct one
+        // bound to a clone-equivalent borrow.
+        let weights_ref: &ModelWeights = unsafe { &*(&weights as *const ModelWeights) };
+        let ffn = WeightFfn {
+            weights: weights_ref,
+        };
+        let h = predict_kquant_hidden_with_ffn(&mut weights, &[0u32, 1], &index, &ffn);
+        assert_eq!(h.shape(), &[2, weights.hidden_size]);
+        assert!(h.iter().all(|v| v.is_finite()));
+    }
+
+    /// Gemma 4 MoE arch drives the hybrid-MoE branch — `forward_moe_full_layer`
+    /// on the FFN backend (lines 75-83). `WeightFfn`'s default impl returns
+    /// None for that call, so the function falls through to the standard
+    /// `run_layer_with_ffn` path. The branch body still executes.
+    #[test]
+    fn predict_kquant_hidden_with_ffn_runs_through_moe_attempt_on_gemma4() {
+        let mut weights = make_test_gemma4_moe_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let weights_ref: &ModelWeights = unsafe { &*(&weights as *const ModelWeights) };
+        let ffn = WeightFfn {
+            weights: weights_ref,
+        };
+        let h = predict_kquant_hidden_with_ffn(&mut weights, &[0u32, 1], &index, &ffn);
+        assert_eq!(h.shape(), &[2, weights.hidden_size]);
+        assert!(h.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn predict_kquant_with_ffn_returns_predictions() {
+        let mut weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let weights_ref: &ModelWeights = unsafe { &*(&weights as *const ModelWeights) };
+        let ffn = WeightFfn {
+            weights: weights_ref,
+        };
+        let result = predict_kquant_with_ffn(&mut weights, &tokenizer, &[0u32, 1], 3, &index, &ffn);
+        assert!(result.predictions.len() <= 3);
+    }
+}

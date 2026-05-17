@@ -25,6 +25,10 @@ pub struct MarkovResidualCodecEngine {
     /// bypasses the residual store entirely). Subsequent `decode_step_quant`
     /// calls route through `fused_decode_step`. Matches `MarkovResidualEngine`.
     metal_prefill_done: bool,
+    /// Force the codec walk path even when the backend's fused fast path
+    /// is available. See `MarkovResidualEngine::force_walk` for the use
+    /// case. False by default.
+    force_walk: bool,
 }
 
 impl MarkovResidualCodecEngine {
@@ -45,7 +49,15 @@ impl MarkovResidualCodecEngine {
             store: None,
             backend,
             metal_prefill_done: false,
+            force_walk: false,
         }
+    }
+
+    /// Force the codec walk path even when the backend's fused fast path
+    /// is available.
+    pub fn with_force_walk(mut self, enabled: bool) -> Self {
+        self.force_walk = enabled;
+        self
     }
 
     pub fn codec(&self) -> ColdResidualCodec {
@@ -140,10 +152,12 @@ impl KvEngine for MarkovResidualCodecEngine {
         //      `rs_prefill_codec_walk` (Q4K-aware FFN via WalkFfn +
         //      Q4K-native K/V via `recompute_kv(Some(index))`).
         use crate::engines::unlimited_context::engine::fused_prefill;
-        if let Some(h) = fused_prefill(weights, index, token_ids, backend) {
-            self.metal_prefill_done = true;
-            self.store = None;
-            return Some(h);
+        if !self.force_walk {
+            if let Some(h) = fused_prefill(weights, index, token_ids, backend) {
+                self.metal_prefill_done = true;
+                self.store = None;
+                return Some(h);
+            }
         }
         self.metal_prefill_done = false;
         ensure_attn_tensors_dequantised(weights, index);

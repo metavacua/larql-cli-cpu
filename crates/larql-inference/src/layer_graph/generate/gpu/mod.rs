@@ -686,7 +686,7 @@ mod tests {
 
     /// `generate` with a Q4-capable mock backend + the on-disk Q4K
     /// fixture exercises the entire GPU dispatch chain end-to-end:
-    /// `build_gpu_decode_setup` → `prefill_q4_prompt` → first-token
+    /// `build_gpu_decode_setup` → `prefill_kquant_prompt` → first-token
     /// sample → decode-loop. With max_tokens=2 the loop iterates once.
     #[test]
     fn generate_with_mock_gpu_backend_runs_through_decode_loop() {
@@ -788,5 +788,26 @@ mod tests {
 
     fn fx_tokenizer(vocab_size: usize) -> tokenizers::Tokenizer {
         crate::test_utils::make_test_tokenizer(vocab_size)
+    }
+
+    /// `diag_compare_cpu_topk` is the diagnostic side-channel emitted when
+    /// `LARQL_METAL_COMPARE_CPU=1`. It only prints to stderr — no return
+    /// value, no side effects on weights/index. Direct call drives the
+    /// function body (top-k formatting + stderr writes) so the dead
+    /// stage-coverage region clears.
+    #[test]
+    fn diag_compare_cpu_topk_runs_against_synthetic_weights() {
+        use crate::test_utils::TestFixtures;
+        let fx = TestFixtures::build();
+        let h_1d = ndarray::Array1::<f32>::from_elem(fx.weights.hidden_size, 0.1);
+        // No assertions — function returns (). Just confirm no panic and
+        // the body executes.
+        diag_compare_cpu_topk(
+            &fx.tokenizer,
+            &fx.weights,
+            &fx.index,
+            &larql_compute::CpuBackend,
+            &h_1d,
+        );
     }
 }

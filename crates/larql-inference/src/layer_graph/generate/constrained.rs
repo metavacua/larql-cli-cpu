@@ -5,7 +5,7 @@ use super::cpu::{
 };
 use super::eos::EosConfig;
 use super::gpu_setup::{
-    build_gpu_decode_setup, ensure_prompt_fits, prefill_q4_prompt, reset_and_preallocate_kv_cache,
+    build_gpu_decode_setup, ensure_prompt_fits, prefill_kquant_prompt, reset_and_preallocate_kv_cache,
 };
 use super::lm_head::pick_next_token_masked_sampled;
 use super::sampling::{Sampler, SamplingConfig};
@@ -205,7 +205,7 @@ where
     let x: Vec<f32> = h_embed.as_slice().unwrap_or(&[]).to_vec();
     let softcap_val = arch.attn_logit_softcapping().unwrap_or(0.0);
     let qk_norm_val = arch.attn_q_norm_key(0).is_some();
-    let h_vec = match prefill_q4_prompt(
+    let h_vec = match prefill_kquant_prompt(
         backend,
         &layers,
         &x,
@@ -421,6 +421,85 @@ mod tests {
         );
         // No error → the GPU constrained pipeline ran end-to-end.
         assert!(result.error.is_none());
+    }
+
+    /// `try_generate_constrained` delegates to `generate_constrained`
+    /// + `.into_result()`. Drives the wrapper body (lines 71-82).
+    #[test]
+    fn try_generate_constrained_returns_ok_on_zero_tokens() {
+        let mut weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let cached = CachedLayerGraph::from_residuals(vec![]);
+        let backend = MockGpuBackend::new();
+        let num_layers = weights.num_layers;
+        let result = try_generate_constrained(
+            &mut weights,
+            &tokenizer,
+            &[0u32, 1],
+            0,
+            &index,
+            &backend,
+            &cached,
+            0..num_layers,
+            |_ids, _logits| {},
+        );
+        assert!(result.is_ok());
+    }
+
+    /// `try_generate_constrained_streaming` — wrapper over the
+    /// streaming variant. Drives lines 121-147.
+    #[test]
+    fn try_generate_constrained_streaming_returns_ok_on_zero_tokens() {
+        let mut weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let cached = CachedLayerGraph::from_residuals(vec![]);
+        let backend = MockGpuBackend::new();
+        let num_layers = weights.num_layers;
+        let mut callback_count = 0;
+        let result = try_generate_constrained_streaming(
+            &mut weights,
+            &tokenizer,
+            &[0u32, 1],
+            0,
+            &index,
+            &backend,
+            &cached,
+            0..num_layers,
+            |_ids, _logits| {},
+            |_id, _text, _prob| callback_count += 1,
+        );
+        assert!(result.is_ok());
+        assert_eq!(callback_count, 0);
+    }
+
+    /// `generate_constrained_streaming` end-to-end (greedy variant
+    /// without explicit SamplingConfig — uses the default greedy).
+    #[test]
+    fn generate_constrained_streaming_runs_through_mock_gpu_backend() {
+        let mut weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let cached = CachedLayerGraph::from_residuals(vec![]);
+        let backend = MockGpuBackend::new();
+        let num_layers = weights.num_layers;
+        let mut callback_count = 0;
+        let result = generate_constrained_streaming(
+            &mut weights,
+            &tokenizer,
+            &[0u32, 1, 2],
+            2,
+            &index,
+            &backend,
+            &cached,
+            0..num_layers,
+            |_ids, _logits| {},
+            |_id, _text, _prob| callback_count += 1,
+        );
+        // No error; callback fired per token.
+        assert!(result.error.is_none());
+        assert_eq!(callback_count, result.tokens.len());
     }
 
     /// `try_generate_constrained_streaming_sampled` happy path with

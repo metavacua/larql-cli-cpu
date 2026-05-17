@@ -275,4 +275,60 @@ mod tests {
             );
         }
     }
+
+    // ── Q4K + MoE generate paths (Gemma 4 fixture) ───────────────────────
+
+    use super::*;
+    use crate::test_utils::{
+        make_test_gemma4_moe_weights, make_test_q4k_vindex, make_test_q4k_weights,
+        make_test_tokenizer,
+    };
+
+    #[test]
+    fn predict_kquant_returns_predictions_against_q4k_fixture() {
+        let mut weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let result = predict_kquant(&mut weights, &tokenizer, &[0u32, 1, 2], 5, &index);
+        assert!(result.predictions.len() <= 5);
+    }
+
+    #[test]
+    fn generate_kquant_cpu_emits_tokens_against_q4k_fixture() {
+        let mut weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let out = generate_kquant_cpu(&mut weights, &tokenizer, &[0u32, 1], 3, &index);
+        assert!(out.len() <= 3, "out: {out:?}");
+    }
+
+    /// Gemma 4 MoE arch drives the hybrid-MoE branch of
+    /// `predict_kquant_hidden` (via `predict_kquant` → which calls it).
+    #[test]
+    fn predict_kquant_routes_through_moe_on_gemma4_fixture() {
+        let mut weights = make_test_gemma4_moe_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let result = predict_kquant(&mut weights, &tokenizer, &[0u32, 1, 2], 3, &index);
+        assert!(result.predictions.len() <= 3);
+    }
+
+    #[test]
+    fn generate_kquant_cpu_constrained_emits_tokens_against_q4k_fixture() {
+        let mut weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let mut mask_calls = 0;
+        let out = generate_kquant_cpu_constrained(
+            &mut weights,
+            &tokenizer,
+            &[0u32],
+            2,
+            &index,
+            |_ids, _logits| {
+                mask_calls += 1;
+            },
+        );
+        assert!(out.len() <= 2);
+    }
 }

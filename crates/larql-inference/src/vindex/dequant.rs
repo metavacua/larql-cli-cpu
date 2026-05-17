@@ -89,44 +89,53 @@ mod tests {
     fn ensure_attn_tensors_populates_qkvo_per_layer() {
         let mut weights = make_test_q4k_weights();
         let index = make_test_q4k_vindex(&weights);
+        // Capture per-layer keys upfront so we can drop the &arch
+        // borrow before mutating weights.tensors.
+        let num_layers = weights.num_layers;
+        let keys: Vec<(String, String, String, String)> = (0..num_layers)
+            .map(|l| {
+                (
+                    weights.arch.attn_q_key(l),
+                    weights.arch.attn_k_key(l),
+                    weights.arch.attn_v_key(l),
+                    weights.arch.attn_o_key(l),
+                )
+            })
+            .collect();
         // Strip the f32 attention tensors the synthetic fixture left
         // behind so we exercise the *insert* path, not the
         // already-present short-circuit.
-        let arch = weights.arch.clone();
-        for layer in 0..weights.num_layers {
-            weights.tensors.remove(&arch.attn_q_key(layer));
-            weights.tensors.remove(&arch.attn_k_key(layer));
-            weights.tensors.remove(&arch.attn_v_key(layer));
-            weights.tensors.remove(&arch.attn_o_key(layer));
+        for (q, k, v, o) in &keys {
+            weights.tensors.remove(q);
+            weights.tensors.remove(k);
+            weights.tensors.remove(v);
+            weights.tensors.remove(o);
         }
         ensure_attn_tensors_dequantised(&mut weights, &index);
-        for layer in 0..weights.num_layers {
-            assert!(
-                weights.tensors.contains_key(&arch.attn_q_key(layer)),
-                "Q tensor missing for layer {layer}"
-            );
-            assert!(weights.tensors.contains_key(&arch.attn_k_key(layer)));
-            assert!(weights.tensors.contains_key(&arch.attn_v_key(layer)));
-            assert!(weights.tensors.contains_key(&arch.attn_o_key(layer)));
+        for (l, (q, k, v, o)) in keys.iter().enumerate() {
+            assert!(weights.tensors.contains_key(q), "Q missing layer {l}");
+            assert!(weights.tensors.contains_key(k), "K missing layer {l}");
+            assert!(weights.tensors.contains_key(v), "V missing layer {l}");
+            assert!(weights.tensors.contains_key(o), "O missing layer {l}");
         }
     }
 
-    /// Idempotent — calling twice doesn't re-dequantise (and doesn't
-    /// panic on the contains_key short-circuit).
+    /// Idempotent — calling twice doesn't re-dequantise (the
+    /// `contains_key` short-circuit fires on the second pass; same
+    /// data pointer means the tensor wasn't replaced).
     #[test]
     fn ensure_attn_tensors_is_idempotent() {
         let mut weights = make_test_q4k_weights();
         let index = make_test_q4k_vindex(&weights);
+        let q_key = weights.arch.attn_q_key(0);
         ensure_attn_tensors_dequantised(&mut weights, &index);
-        let q_before = weights
+        let q_ptr_before = weights
             .tensors
-            .get(&weights.arch.attn_q_key(0))
-            .expect("Q present after first dequant");
-        // Same object handle implies short-circuit branch fired.
-        let q_ptr_before = std::sync::Arc::as_ptr(q_before);
+            .get(&q_key)
+            .expect("Q present after first dequant")
+            .as_ptr();
         ensure_attn_tensors_dequantised(&mut weights, &index);
-        let q_after = weights.tensors.get(&weights.arch.attn_q_key(0)).unwrap();
-        let q_ptr_after = std::sync::Arc::as_ptr(q_after);
+        let q_ptr_after = weights.tensors.get(&q_key).unwrap().as_ptr();
         assert_eq!(
             q_ptr_before, q_ptr_after,
             "idempotent call must not replace the tensor"
@@ -144,15 +153,11 @@ mod tests {
             weights.num_layers,
             weights.hidden_size,
         );
-        // Remove the pre-populated tensors so we'd notice if the
-        // function inserted anything.
-        let arch = weights.arch.clone();
-        for layer in 0..weights.num_layers {
-            weights.tensors.remove(&arch.attn_q_key(layer));
-        }
+        let q_key = weights.arch.attn_q_key(0);
+        weights.tensors.remove(&q_key);
         ensure_attn_tensors_dequantised(&mut weights, &empty_index);
         assert!(
-            !weights.tensors.contains_key(&arch.attn_q_key(0)),
+            !weights.tensors.contains_key(&q_key),
             "no Q4K data → no insert"
         );
     }

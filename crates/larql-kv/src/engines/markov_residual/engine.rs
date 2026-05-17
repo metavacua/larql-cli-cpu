@@ -20,6 +20,14 @@ pub struct MarkovResidualEngine {
     profiling: bool,
     profile: EngineProfiler,
     metal_prefill_done: bool,
+    /// When `true`, `prefill_quant` / `decode_step_quant` skip the
+    /// `fused_prefill` fast path and always route through the residual-
+    /// stream walk path. Use to force the engine's state-management
+    /// contract to fire on backends that would otherwise take over the
+    /// whole decode (Metal's `prefill_kquant` + `decode_token` bypass the
+    /// engine's residual store entirely). False by default — production
+    /// callers want the fast path.
+    force_walk: bool,
 }
 
 impl MarkovResidualEngine {
@@ -35,11 +43,20 @@ impl MarkovResidualEngine {
             profiling: false,
             profile: EngineProfiler::default(),
             metal_prefill_done: false,
+            force_walk: false,
         }
     }
 
     pub fn with_profiling(mut self, enabled: bool) -> Self {
         self.profiling = enabled;
+        self
+    }
+
+    /// Force the residual-stream walk path even when the backend's fused
+    /// fast path is available. See the field doc-comment on `force_walk`
+    /// for the use case.
+    pub fn with_force_walk(mut self, enabled: bool) -> Self {
+        self.force_walk = enabled;
         self
     }
 
@@ -132,10 +149,16 @@ impl KvEngine for MarkovResidualEngine {
         backend: &dyn ComputeBackend,
     ) -> Option<Array2<f32>> {
         use crate::engines::unlimited_context::engine::fused_prefill;
-        if let Some(h) = fused_prefill(weights, index, token_ids, backend) {
-            self.metal_prefill_done = true;
-            self.store = None;
-            return Some(h);
+        // `force_walk` skips the fused fast path so the residual-stream
+        // contract actually fires. Without it, Metal's whole-model K/V
+        // cache absorbs the entire decode and the engine never gets to
+        // do its job.
+        if !self.force_walk {
+            if let Some(h) = fused_prefill(weights, index, token_ids, backend) {
+                self.metal_prefill_done = true;
+                self.store = None;
+                return Some(h);
+            }
         }
         self.metal_prefill_done = false;
         ensure_attn_tensors_dequantised(weights, index);

@@ -69,6 +69,10 @@ pub enum EngineKind {
     NoCache,
     MarkovResidual {
         window_size: Option<usize>,
+        /// Skip the fused fast path; force the residual-stream walk path
+        /// even on backends that would otherwise take over the decode.
+        /// See `MarkovResidualEngine::with_force_walk`.
+        force_walk: bool,
     },
     UnlimitedContext {
         window_size: usize,
@@ -95,6 +99,8 @@ pub enum EngineKind {
     MarkovResidualCodec {
         window_size: Option<usize>,
         codec: markov_residual_codec::ColdResidualCodec,
+        /// See `MarkovResidualEngine::with_force_walk`.
+        force_walk: bool,
     },
 }
 
@@ -150,7 +156,14 @@ impl EngineKind {
             "no-cache" | "no_cache" | "none" | "off" => Some(EngineKind::NoCache),
             "markov-rs" | "markov_rs" | "markov-residual" | "markov_residual" => {
                 let window_size = params.get("window").and_then(|v| v.parse().ok());
-                Some(EngineKind::MarkovResidual { window_size })
+                let force_walk = params
+                    .get("force_walk")
+                    .map(|v| matches!(*v, "1" | "true" | "yes"))
+                    .unwrap_or(false);
+                Some(EngineKind::MarkovResidual {
+                    window_size,
+                    force_walk,
+                })
             }
             "unlimited" | "unlimited-context" | "unlimited_context" => {
                 Some(EngineKind::UnlimitedContext {
@@ -186,6 +199,10 @@ impl EngineKind {
                 // ColdResidualCodec variants require explicit per-architecture
                 // calibration that does not yet exist in tree.
                 codec: markov_residual_codec::ColdResidualCodec::Bf16,
+                force_walk: params
+                    .get("force_walk")
+                    .map(|v| matches!(*v, "1" | "true" | "yes"))
+                    .unwrap_or(false),
             }),
             _ => None,
         }
@@ -283,9 +300,13 @@ impl EngineKind {
                 Box::new(standard::StandardEngine::with_backend(window_size, backend))
             }
             EngineKind::NoCache => Box::new(no_cache::NoCacheEngine::with_backend(backend)),
-            EngineKind::MarkovResidual { window_size } => Box::new(
+            EngineKind::MarkovResidual {
+                window_size,
+                force_walk,
+            } => Box::new(
                 markov_residual::MarkovResidualEngine::with_backend(window_size, backend)
-                    .with_profiling(profiling),
+                    .with_profiling(profiling)
+                    .with_force_walk(force_walk),
             ),
             EngineKind::UnlimitedContext { window_size } => Box::new(
                 unlimited_context::UnlimitedContextEngine::with_backend(window_size, backend),
@@ -313,12 +334,17 @@ impl EngineKind {
                 config.chunk_tokens = chunk_tokens;
                 Box::new(boundary_kv::BoundaryKvEngine::with_backend(config, backend))
             }
-            EngineKind::MarkovResidualCodec { window_size, codec } => Box::new(
+            EngineKind::MarkovResidualCodec {
+                window_size,
+                codec,
+                force_walk,
+            } => Box::new(
                 markov_residual_codec::MarkovResidualCodecEngine::with_backend(
                     window_size,
                     codec,
                     backend,
-                ),
+                )
+                .with_force_walk(force_walk),
             ),
         }
     }
@@ -387,6 +413,7 @@ mod tests {
         match EngineKind::from_name("markov-rs:window=1024") {
             Some(EngineKind::MarkovResidual {
                 window_size: Some(1024),
+                ..
             }) => {}
             other => panic!("expected MarkovResidual{{window=1024}}, got {other:?}"),
         }
@@ -407,7 +434,7 @@ mod tests {
             other => panic!("expected Apollo{{layer=25,top_k=12}}, got {other:?}"),
         }
         match EngineKind::from_name("markov-rs:unknown=999") {
-            Some(EngineKind::MarkovResidual { window_size: None }) => {}
+            Some(EngineKind::MarkovResidual { window_size: None, .. }) => {}
             other => panic!("expected MarkovResidual{{window=None}}, got {other:?}"),
         }
     }
@@ -492,6 +519,7 @@ mod tests {
             Some(EngineKind::MarkovResidualCodec {
                 window_size: Some(256),
                 codec: markov_residual_codec::ColdResidualCodec::Bf16,
+                ..
             }) => {}
             other => panic!("expected MarkovResidualCodec{{window=256,codec=Bf16}}, got {other:?}"),
         }
@@ -510,6 +538,7 @@ mod tests {
             EngineKind::MarkovResidualCodec {
                 window_size: None,
                 codec: markov_residual_codec::ColdResidualCodec::Bf16,
+                force_walk: false,
             },
         ];
         let expected = ["boundary-kv", "markov-rs-codec"];
@@ -536,9 +565,33 @@ mod tests {
         let kind = EngineKind::MarkovResidualCodec {
             window_size: Some(32),
             codec: markov_residual_codec::ColdResidualCodec::Bf16,
+            force_walk: false,
         };
         let engine = kind.build(larql_inference::cpu_engine_backend());
         assert_eq!(engine.name(), "markov-rs-codec");
+    }
+
+    #[test]
+    fn engine_kind_from_name_markov_rs_force_walk_true() {
+        match EngineKind::from_name("markov-rs:force_walk=true") {
+            Some(EngineKind::MarkovResidual {
+                window_size: None,
+                force_walk: true,
+            }) => {}
+            other => panic!("expected MarkovResidual{{force_walk=true}}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn engine_kind_from_name_markov_rs_codec_force_walk_true() {
+        match EngineKind::from_name("markov-rs-codec:window=64,force_walk=1") {
+            Some(EngineKind::MarkovResidualCodec {
+                window_size: Some(64),
+                force_walk: true,
+                ..
+            }) => {}
+            other => panic!("expected MarkovResidualCodec{{force_walk=true}}, got {other:?}"),
+        }
     }
 
     // ── split_specs edge: first piece doesn't parse ───────────────────────
@@ -600,9 +653,13 @@ mod compliance_tests {
                 window_size: Some(64),
             },
             EngineKind::NoCache,
-            EngineKind::MarkovResidual { window_size: None },
+            EngineKind::MarkovResidual {
+                window_size: None,
+                force_walk: false,
+            },
             EngineKind::MarkovResidual {
                 window_size: Some(32),
+                force_walk: false,
             },
             EngineKind::UnlimitedContext { window_size: 64 },
             EngineKind::TurboQuant { bits: 4 },
