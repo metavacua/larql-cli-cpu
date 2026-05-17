@@ -764,19 +764,12 @@ larql-inference-lint:
 larql-inference-bench-test:
 	cargo test -p larql-inference --benches
 
+# Inference coverage: per-file 90% floor with debt baselines for the
+# live-shard / mmap-backed surface. See
+# crates/larql-inference/coverage-policy.json for the policy_note.
+LARQL_INFERENCE_COVERAGE_MIN ?= 70
 LARQL_INFERENCE_COVERAGE_POLICY ?= crates/larql-inference/coverage-policy.json
 LARQL_INFERENCE_COVERAGE_REPORT ?= coverage/larql-inference/summary.json
-
-larql-inference-coverage-summary:
-	@if ! command -v cargo-llvm-cov >/dev/null 2>&1; then \
-		echo "cargo-llvm-cov not installed. Install with:"; \
-		echo "  cargo install cargo-llvm-cov"; \
-		exit 1; \
-	fi
-	cargo llvm-cov --package larql-inference --features metal --summary-only
-	@mkdir -p coverage/larql-inference
-	cargo llvm-cov report --package larql-inference --json --summary-only --output-path $(LARQL_INFERENCE_COVERAGE_REPORT)
-	$(MAKE) larql-inference-coverage-policy
 
 larql-inference-coverage-policy:
 	@if [ ! -f "$(LARQL_INFERENCE_COVERAGE_REPORT)" ]; then \
@@ -785,6 +778,35 @@ larql-inference-coverage-policy:
 		exit 1; \
 	fi
 	python3 scripts/check_coverage_policy.py $(LARQL_INFERENCE_COVERAGE_REPORT) $(LARQL_INFERENCE_COVERAGE_POLICY)
+
+larql-inference-coverage:
+	@if ! command -v cargo-llvm-cov >/dev/null 2>&1; then \
+		echo "cargo-llvm-cov not installed. Install with:"; \
+		echo "  cargo install cargo-llvm-cov"; \
+		exit 1; \
+	fi
+	cargo llvm-cov --package larql-inference --features metal --fail-under-lines $(LARQL_INFERENCE_COVERAGE_MIN)
+	@mkdir -p coverage/larql-inference
+	cargo llvm-cov report --package larql-inference --json --summary-only --output-path $(LARQL_INFERENCE_COVERAGE_REPORT)
+	$(MAKE) larql-inference-coverage-policy
+
+larql-inference-coverage-summary:
+	@if ! command -v cargo-llvm-cov >/dev/null 2>&1; then \
+		echo "cargo-llvm-cov not installed. Install with:"; \
+		echo "  cargo install cargo-llvm-cov"; \
+		exit 1; \
+	fi
+	cargo llvm-cov --package larql-inference --features metal --summary-only --fail-under-lines $(LARQL_INFERENCE_COVERAGE_MIN)
+	@mkdir -p coverage/larql-inference
+	cargo llvm-cov report --package larql-inference --json --summary-only --output-path $(LARQL_INFERENCE_COVERAGE_REPORT)
+	$(MAKE) larql-inference-coverage-policy
+
+larql-inference-coverage-html:
+	@if ! command -v cargo-llvm-cov >/dev/null 2>&1; then \
+		echo "cargo-llvm-cov not installed."; exit 1; \
+	fi
+	cargo llvm-cov --package larql-inference --features metal --html --output-dir coverage/larql-inference
+	@echo "Report: coverage/larql-inference/html/index.html"
 
 larql-inference-ci: larql-inference-fmt-check larql-inference-lint larql-inference-test larql-inference-bench-test larql-inference-coverage-summary
 

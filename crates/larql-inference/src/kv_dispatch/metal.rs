@@ -19,9 +19,7 @@
 
 use ndarray::Array2;
 
-use super::{
-    CompressionCodec, KvDispatch, KvHandle, KvHandleInner, ResidualHandle, ResidualHandleInner,
-};
+use super::{CompressionCodec, KvDispatch, KvHandle, KvHandleInner, ResidualHandle};
 use crate::model::ModelWeights;
 use larql_compute::CpuBackend;
 use larql_compute_metal::MetalBackend;

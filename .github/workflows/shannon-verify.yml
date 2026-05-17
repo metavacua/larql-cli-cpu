@@ -100,6 +100,16 @@ jobs:
           .venv/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch
           .venv/bin/pip install transformers
 
+      - name: Pre-download HF model snapshot
+        # `larql shannon verify` calls `InferenceModel::load(model_id)` which
+        # resolves the ID via `resolve_model_path` — that only looks at an
+        # already-populated HF cache and never triggers a download. Without
+        # this step the CLI fails with "not a directory" on a clean runner.
+        # Using `huggingface_hub.snapshot_download` populates the cache layout
+        # that `resolve_model_path` expects (snapshots/<rev>/...).
+        run: |
+          .venv/bin/python -c "from huggingface_hub import snapshot_download; snapshot_download('$LARQL_VERIFY_MODEL')"
+
       - name: Prep corpus (strip BOM + CRLF, truncate to 1 KB)
         run: |
           mkdir -p target/ci

@@ -184,6 +184,167 @@ impl TestFixtures {
     }
 }
 
+/// Serialise the synthetic `make_test_weights()` model + matching
+/// vindex + tokenizer to an on-disk directory that any code path
+/// reaching for `larql_vindex::load_vindex_config` /
+/// `load_model_weights` will accept.
+///
+/// Replaces the previous "set `LARQL_MODEL` to a real Gemma snapshot"
+/// pattern: tests can call this with a `tempfile::TempDir` and exercise
+/// the full disk-loading pipeline without depending on multi-gigabyte
+/// model artifacts in `~/.cache`.
+///
+/// The fixture is **synthetic**: the weights produce garbage logits.
+/// Tests asserting plumbing (correct files written, correct error on
+/// missing config, correct dispatch on backend type, etc.) work fine;
+/// tests asserting semantic content ("model predicts Paris") still
+/// need a real model and don't belong in `tests/`.
+///
+/// Layout written:
+/// ```text
+/// dir/
+///   index.json              -- VindexConfig with has_model_weights=true
+///   tokenizer.json          -- WordLevel "[0]".."[VOCAB-1]" tokenizer
+///   embeddings.bin          -- VOCAB × HIDDEN f32 (from weights.embed)
+///   weight_manifest.json    -- per-tensor offset/length manifest
+///   attn_weights.bin        -- per-layer Q/K/V/O + norms
+///   up_weights.bin          -- per-layer gate + up
+///   down_weights.bin        -- per-layer down
+///   norms.bin               -- final norm
+///   lm_head.bin             -- output projection
+///   gate_vectors.bin        -- vindex gate matrices (from make_test_vindex)
+///   down_meta.bin           -- vindex down metadata (empty per layer)
+/// ```
+pub fn write_synthetic_model_dir(dir: &std::path::Path) -> Result<(), String> {
+    use larql_vindex::{
+        write_model_weights, ExtractLevel, MoeConfig, StorageDtype, VindexConfig, VindexModelConfig,
+    };
+
+    std::fs::create_dir_all(dir).map_err(|e| format!("create_dir_all: {e}"))?;
+
+    let weights = make_test_weights();
+    let tokenizer = make_test_tokenizer(weights.vocab_size);
+    let index = make_test_vindex(&weights);
+
+    // ── tokenizer.json ────────────────────────────────────────────────
+    // Write a tokenizer that encodes `[N]` to id N *as a single token*
+    // — `make_test_tokenizer`'s Whitespace pre-tokenizer would split
+    // `[1]` into `[`, `1`, `]`, all of which UNK, blowing up the
+    // embedding lookup with id=vocab_size. The on-disk fixture uses a
+    // pre-tokenizer-free variant so test prompts like `EXPLAIN INFER
+    // "[1]"` lookup directly. `tokenizer` is kept above for any caller
+    // that needs the in-memory shape.
+    let _ = &tokenizer; // returned by make_test_tokenizer; not the on-disk shape
+    let tok_path = dir.join("tokenizer.json");
+    std::fs::write(&tok_path, synthetic_tokenizer_json(weights.vocab_size))
+        .map_err(|e| format!("write tokenizer.json: {e}"))?;
+
+    // ── model_config + index.json ─────────────────────────────────────
+    // `has_model_weights=true` is the gate the loader checks; without
+    // it `load_model_weights` errors with "rebuild with extract --level
+    // all". model_config carries the arch fields detect_from_json needs
+    // to reconstruct the tinymodel arch on the loader side.
+    let model_config = VindexModelConfig {
+        model_type: "tinymodel".into(),
+        head_dim: weights.head_dim,
+        num_q_heads: weights.num_q_heads,
+        num_kv_heads: weights.num_kv_heads,
+        rope_base: weights.rope_base,
+        sliding_window: None,
+        moe: None::<MoeConfig>,
+        global_head_dim: None,
+        num_global_kv_heads: None,
+        partial_rotary_factor: None,
+        sliding_window_pattern: None,
+        layer_types: None,
+        attention_k_eq_v: false,
+        num_kv_shared_layers: None,
+        per_layer_embed_dim: None,
+        rope_local_base: None,
+        query_pre_attn_scalar: None,
+        final_logit_softcapping: None,
+    };
+
+    let mut config = VindexConfig {
+        version: 2,
+        model: "synthetic/tinymodel".into(),
+        family: "tinymodel".into(),
+        source: None,
+        checksums: None,
+        num_layers: weights.num_layers,
+        hidden_size: weights.hidden_size,
+        intermediate_size: weights.intermediate_size,
+        vocab_size: weights.vocab_size,
+        embed_scale: 1.0,
+        extract_level: ExtractLevel::All,
+        dtype: StorageDtype::F32,
+        quant: larql_vindex::QuantFormat::None,
+        layer_bands: None,
+        layers: Vec::new(),
+        down_top_k: 5,
+        has_model_weights: true,
+        model_config: Some(model_config),
+        fp4: None,
+        ffn_layout: None,
+    };
+
+    // Writes index.json + gate_vectors.bin + down_meta.bin.
+    // `save_vindex` mutates `config` to record layer manifests.
+    index
+        .save_vindex(dir, &mut config)
+        .map_err(|e| format!("save_vindex: {e}"))?;
+
+    // ── Model weights (attn / up / down / norms / lm_head) ────────────
+    let mut cb = larql_vindex::SilentBuildCallbacks;
+    write_model_weights(&weights, dir, &mut cb).map_err(|e| format!("write_model_weights: {e}"))?;
+
+    // ── Embeddings (vocab × hidden f32, little-endian) ────────────────
+    let embed_slice = weights.embed.as_slice().ok_or("embed not contiguous")?;
+    let mut embed_bytes = Vec::with_capacity(embed_slice.len() * 4);
+    for &v in embed_slice {
+        embed_bytes.extend_from_slice(&v.to_le_bytes());
+    }
+    std::fs::write(dir.join("embeddings.bin"), &embed_bytes)
+        .map_err(|e| format!("write embeddings.bin: {e}"))?;
+
+    Ok(())
+}
+
+/// Build a tokenizer JSON whose vocab is `[0]`..`[vocab_size-1]` and
+/// whose `pre_tokenizer` is **null** — so bracketed forms encode as a
+/// single token instead of being split into `[`, `N`, `]` (all UNK)
+/// by [`make_test_tokenizer`]'s Whitespace pre-tokenizer.
+///
+/// Used only by [`write_synthetic_model_dir`] so on-disk-fixture
+/// callers can write test prompts like `"[1]"` and have them
+/// encode to a single in-vocab id. `make_test_tokenizer` is kept
+/// in its prior shape for backward-compatibility with in-memory
+/// fixture consumers.
+fn synthetic_tokenizer_json(vocab_size: usize) -> String {
+    let mut vocab_json = serde_json::Map::new();
+    for i in 0..vocab_size as u64 {
+        vocab_json.insert(format!("[{i}]"), serde_json::Value::Number(i.into()));
+    }
+    vocab_json.insert("[UNK]".into(), serde_json::Value::Number(vocab_size.into()));
+
+    let tokenizer_json = serde_json::json!({
+        "version": "1.0",
+        "truncation": null,
+        "padding": null,
+        "added_tokens": [],
+        "normalizer": null,
+        "pre_tokenizer": null,
+        "post_processor": null,
+        "decoder": null,
+        "model": {
+            "type": "WordLevel",
+            "vocab": vocab_json,
+            "unk_token": "[UNK]"
+        }
+    });
+    serde_json::to_string(&tokenizer_json).expect("synthetic tokenizer json")
+}
+
 // ── Alternate-arch fixtures ─────────────────────────────────────────────
 //
 // `make_test_weights` uses the `tinymodel` arch which leaves many optional
@@ -724,5 +885,63 @@ impl Q4KTestFixtures {
             tokenizer,
             index,
         }
+    }
+}
+
+#[cfg(test)]
+mod synthetic_model_dir_tests {
+    use super::*;
+    use larql_vindex::{load_vindex_config, SilentLoadCallbacks};
+
+    #[test]
+    fn write_then_load_round_trips() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_synthetic_model_dir(dir.path()).expect("write fixture");
+
+        // 1. Config round-trips with the flags the EXPLAIN INFER pipeline gates on.
+        let config = load_vindex_config(dir.path()).expect("load_vindex_config");
+        assert!(
+            config.has_model_weights,
+            "fixture must set has_model_weights=true"
+        );
+        assert_eq!(config.quant, larql_vindex::QuantFormat::None);
+        assert_eq!(config.num_layers, 2);
+        assert_eq!(config.hidden_size, 16);
+        let mc = config.model_config.as_ref().expect("model_config");
+        assert_eq!(mc.model_type, "tinymodel");
+        assert_eq!(mc.head_dim, 8);
+
+        // 2. Weights load via the same path InferenceWeights::load uses.
+        let mut cb = SilentLoadCallbacks;
+        let weights = larql_vindex::load_model_weights(dir.path(), &mut cb)
+            .expect("load_model_weights against synthetic fixture");
+        assert_eq!(weights.num_layers, 2);
+        assert_eq!(weights.hidden_size, 16);
+        assert_eq!(weights.vocab_size, 32);
+        // Round-tripped tensors must be retrievable by the arch-keyed
+        // names the forward pass walks — pick a representative entry.
+        assert!(
+            weights.tensors.contains_key(&weights.arch.attn_q_key(0)),
+            "expected attn_q tensor for layer 0 after round-trip"
+        );
+        assert!(weights.tensors.contains_key(&weights.arch.ffn_gate_key(0)));
+    }
+
+    #[test]
+    fn tokenizer_file_is_present_and_loadable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_synthetic_model_dir(dir.path()).expect("write fixture");
+        let tok_path = dir.path().join("tokenizer.json");
+        assert!(tok_path.exists(), "tokenizer.json must be written");
+        let _ = tokenizers::Tokenizer::from_file(&tok_path).expect("tokenizer round-trips");
+    }
+
+    #[test]
+    fn embeddings_bin_has_expected_size() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_synthetic_model_dir(dir.path()).expect("write fixture");
+        let bytes = std::fs::read(dir.path().join("embeddings.bin")).expect("embeddings.bin");
+        // 32 vocab × 16 hidden × 4 bytes = 2048
+        assert_eq!(bytes.len(), 32 * 16 * 4);
     }
 }

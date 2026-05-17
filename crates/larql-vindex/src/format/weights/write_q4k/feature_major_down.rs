@@ -111,8 +111,7 @@ mod tests {
     #[test]
     fn append_layer_rejects_unsupported_format() {
         let tmp = TempDir::new().unwrap();
-        let mut state =
-            FeatureMajorDownState::new(&tmp.path().join("down.bin"), 1).expect("new");
+        let mut state = FeatureMajorDownState::new(&tmp.path().join("down.bin"), 1).expect("new");
         // 1 hidden row × 256 padded intermediate cols — minimum that
         // satisfies the length debug-assert and pad_rows_to_block's
         // 256-multiple expectation.
@@ -144,10 +143,22 @@ mod tests {
         // a degenerate path).
         let padded: Vec<f32> = (0..2 * 256).map(|i| (i as f32) * 0.001).collect();
         state
-            .append_layer("blocks.0.down".into(), &padded, 2, 256, QuantBlockFormat::Q4K)
+            .append_layer(
+                "blocks.0.down".into(),
+                &padded,
+                2,
+                256,
+                QuantBlockFormat::Q4K,
+            )
             .expect("Q4_K append");
         state
-            .append_layer("blocks.1.down".into(), &padded, 2, 256, QuantBlockFormat::Q6K)
+            .append_layer(
+                "blocks.1.down".into(),
+                &padded,
+                2,
+                256,
+                QuantBlockFormat::Q6K,
+            )
             .expect("Q6_K append");
         state.finalize(&manifest_path).expect("finalize");
         let bin_size = std::fs::metadata(&bin_path).unwrap().len();

@@ -2246,6 +2246,7 @@ dependencies = [
  "rustyline",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
 ]
 
@@ -2364,6 +2365,7 @@ dependencies = [
  "rayon",
  "reqwest",
  "rustls",
+ "safetensors",
  "serde",
  "serde_json",
  "sha2",
