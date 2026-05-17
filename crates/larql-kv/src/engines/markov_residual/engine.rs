@@ -19,15 +19,6 @@ pub struct MarkovResidualEngine {
     backend: Box<dyn EngineBackend>,
     profiling: bool,
     profile: EngineProfiler,
-    metal_prefill_done: bool,
-    /// When `true`, `prefill_quant` / `decode_step_quant` skip the
-    /// `fused_prefill` fast path and always route through the residual-
-    /// stream walk path. Use to force the engine's state-management
-    /// contract to fire on backends that would otherwise take over the
-    /// whole decode (Metal's `prefill_kquant` + `decode_token` bypass the
-    /// engine's residual store entirely). False by default — production
-    /// callers want the fast path.
-    force_walk: bool,
 }
 
 impl MarkovResidualEngine {
@@ -42,21 +33,11 @@ impl MarkovResidualEngine {
             backend,
             profiling: false,
             profile: EngineProfiler::default(),
-            metal_prefill_done: false,
-            force_walk: false,
         }
     }
 
     pub fn with_profiling(mut self, enabled: bool) -> Self {
         self.profiling = enabled;
-        self
-    }
-
-    /// Force the residual-stream walk path even when the backend's fused
-    /// fast path is available. See the field doc-comment on `force_walk`
-    /// for the use case.
-    pub fn with_force_walk(mut self, enabled: bool) -> Self {
-        self.force_walk = enabled;
         self
     }
 
@@ -148,19 +129,10 @@ impl KvEngine for MarkovResidualEngine {
         token_ids: &[u32],
         backend: &dyn ComputeBackend,
     ) -> Option<Array2<f32>> {
-        use crate::engines::unlimited_context::engine::fused_prefill;
-        // `force_walk` skips the fused fast path so the residual-stream
-        // contract actually fires. Without it, Metal's whole-model K/V
-        // cache absorbs the entire decode and the engine never gets to
-        // do its job.
-        if !self.force_walk {
-            if let Some(h) = fused_prefill(weights, index, token_ids, backend) {
-                self.metal_prefill_done = true;
-                self.store = None;
-                return Some(h);
-            }
-        }
-        self.metal_prefill_done = false;
+        // This engine's state policy IS the residual-stream walk path.
+        // The backend-fused fast path is a different engine
+        // (`StandardEngine` via `coarse_prefill`); engines that want the
+        // fused speed must select it explicitly. No hidden bypass here.
         ensure_attn_tensors_dequantised(weights, index);
         let result = rs_prefill_walk(weights, index, token_ids, self.window_size, backend);
         let hidden = result.hidden.clone();
@@ -176,12 +148,6 @@ impl KvEngine for MarkovResidualEngine {
         token_id: u32,
         backend: &dyn ComputeBackend,
     ) -> Option<Array2<f32>> {
-        use crate::engines::unlimited_context::engine::fused_decode_step;
-        if self.metal_prefill_done {
-            if let Some(h) = fused_decode_step(weights, index, token_id, backend) {
-                return Some(h);
-            }
-        }
         ensure_attn_tensors_dequantised(weights, index);
         let rs = self.store.take()?;
         let (hidden, new_rs) = rs_decode_step_walk(weights, index, token_id, rs, backend)?;
@@ -272,7 +238,6 @@ impl KvEngine for MarkovResidualEngine {
             let last = h.shape()[0] - 1;
             h.slice(s![last..=last, ..]).to_owned()
         };
-        self.metal_prefill_done = false;
         self.store = Some(rs);
         Some(hidden)
     }

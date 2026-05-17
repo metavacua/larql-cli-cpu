@@ -35,10 +35,7 @@ fn all_engines() -> Vec<(&'static str, EngineKind)> {
         ("no-cache", EngineKind::NoCache),
         (
             "markov-rs",
-            EngineKind::MarkovResidual {
-                window_size: None,
-                force_walk: false,
-            },
+            EngineKind::MarkovResidual { window_size: None },
         ),
         (
             "unlimited-context",

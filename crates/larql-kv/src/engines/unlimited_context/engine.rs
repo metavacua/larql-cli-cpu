@@ -355,12 +355,11 @@ impl KvEngine for UnlimitedContextEngine {
         self.checkpoints.total_bytes() + self.archive.total_bytes()
     }
 
-    /// Q4K prefill — uses Metal `prefill_kquant` when available (full GPU pipeline).
-    ///
-    /// Falls back to the CPU `process()` path when the backend does not support
-    /// the fused Q4 pipeline. The Metal path runs at ~75 tok/s on Gemma 3 4B
-    /// (same as `larql bench`) because it submits all 34 layers in one command
-    /// buffer rather than per-layer CPU dispatch.
+    /// Q4K prefill — runs the windowed-checkpoint extension regardless of
+    /// backend. Engines that want the backend's fused fast path must
+    /// select `StandardEngine` explicitly; this engine's whole identity
+    /// is window-bounded K/V with checkpoint replay, and bypassing to
+    /// fused would skip every checkpoint we'd otherwise emit.
     fn prefill_quant(
         &mut self,
         weights: &mut ModelWeights,
@@ -369,13 +368,6 @@ impl KvEngine for UnlimitedContextEngine {
         token_ids: &[u32],
         backend: &dyn ComputeBackend,
     ) -> Option<Array2<f32>> {
-        // Try Metal full pipeline. Returns None for CpuBackend — fall through.
-        if let Some(h) = fused_prefill(weights, index, token_ids, backend) {
-            self.abs_offset = token_ids.len();
-            self.last_hidden = Some(h.clone());
-            return Some(h);
-        }
-        // CPU Q4K path: dequantise attention tensors, use WalkFfn for FFN.
         ensure_attn_tensors_dequantised(weights, index);
         self.process_q4k(weights, index, token_ids, backend)?;
         self.last_hidden.clone()
@@ -389,13 +381,6 @@ impl KvEngine for UnlimitedContextEngine {
         token_id: u32,
         backend: &dyn ComputeBackend,
     ) -> Option<Array2<f32>> {
-        // Try Metal decode_token. Returns None for CpuBackend — fall through.
-        if let Some(h) = fused_decode_step(weights, index, token_id, backend) {
-            self.abs_offset += 1;
-            self.last_hidden = Some(h.clone());
-            return Some(h);
-        }
-        // CPU Q4K path.
         ensure_attn_tensors_dequantised(weights, index);
         self.process_q4k(weights, index, &[token_id], backend)?;
         self.last_hidden.clone()
@@ -528,20 +513,6 @@ impl UnlimitedContextEngine {
         Some(())
     }
 }
-
-// ─── Q4K / Metal helper fns ───────────────────────────────────────────────────
-
-/// Run GPU prefill via `backend.prefill_kquant` using Q4K pipeline layers built
-/// from `index`. Returns the last-token hidden state on success.
-/// Re-export — moved to [`larql_inference::vindex::fused_prefill`]
-/// (2026-05-16) so `MetalBackend::coarse_prefill` can call it without
-/// an `larql-inference → larql-kv` dep cycle.
-pub(crate) use larql_inference::vindex::fused_prefill;
-
-/// Run one Metal decode step via `backend.decode_token`.
-/// Re-export — moved to [`larql_inference::vindex::fused_decode_step`]
-/// (2026-05-16).
-pub(crate) use larql_inference::vindex::fused_decode_step;
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 

@@ -76,17 +76,24 @@ state-management code. The new shape:
 
 ### Engines on the new surface
 
-| Engine | Override | FFN honored | Notes |
-|---|---|---|---|
-| `markov_residual` | ✅ `*_quant_via_executor` | ✅ counter test | Drives per-layer loop through executor |
-| `markov_residual_codec` | ✅ `*_quant_via_executor` | ✅ counter test | Same shape; codec cold tier is engine state |
-| `boundary_per_layer` | ✅ `*_via_executor` (dense) | ✅ counter test | Per-layer codec policy |
-| `no_cache` | ✅ `*_quant_via_executor` | ✅ already did on legacy `prefill` | Re-runs full forward; no K/V cache |
-| `unlimited_context` | ✅ `*_quant_via_executor` | ✅ counter test | Per-token windowed extension drives executor; window-close + archive remain engine state. (2026-05-17 evening) |
-| `turbo_quant` | ✅ `*_quant_via_executor` | ✅ counter test | Per-layer compute through executor; WHT+Lloyd-Max compression policy remains engine state. (2026-05-17 evening) |
-| `apollo` | ✅ `*_quant_via_executor` | ✅ counter test | Boundary-prefix + perturb-at-injection-layer driven through per-layer executor. PLE/layer_scalar omitted to match `markov_residual`'s accepted approximation. (2026-05-17 evening) |
-| `standard` | — (legacy default) | n/a | KvDispatch fast path; no FFN coupling |
-| `boundary_kv` | — (legacy default) | n/a | Delegates to `standard` |
+Every engine now runs its own state-policy code; there is no hidden
+fall-through to the backend's fused kernel from per-layer engines.
+`standard` (and by delegation `boundary_kv`) is the **only** engine
+that exercises the fused fast path — via
+`ComputeBackend::coarse_prefill` / `coarse_decode_step`, which on
+Metal calls `larql_inference::vindex::fused_prefill`.
+
+| Engine | Default dispatch | `*_via_executor` override | Honors FFN backend | Tok/s (Gemma 3 4B Q4K, Metal) | Hot state |
+|---|---|---|---|---:|---:|
+| `standard` | `ComputeBackend::coarse_prefill` (fused fast path) | n/a (no per-layer code to migrate) | n/a | 104 | 0 MB (backend owns K/V) |
+| `boundary_kv` | Delegates to `standard` + emits boundary frames | n/a | n/a | ≈104 | 0 MB |
+| `markov_residual` | Per-layer walk via `rs_prefill_walk` | ✅ | ✅ counter test | 3.6 | 6.0 MB |
+| `markov_residual_codec` | Per-layer walk via `rs_prefill_codec_walk` (bf16 cold) | ✅ | ✅ counter test | 4.3 | 6.0 MB |
+| `unlimited_context` | Windowed checkpoint extension via `process_q4k` | ✅ | ✅ counter test | 25.6 | 4.8 MB |
+| `turbo_quant` | Per-layer WHT + Lloyd-Max compression cycle | ✅ | ✅ counter test | 3.9 | 0.6 MB |
+| `boundary_per_layer` | Per-layer walk with per-layer codec policy | ✅ (dense) | ✅ counter test | — | matches markov_residual_codec |
+| `apollo` | Whole-forward through `forward_layer_range` (boundary prefix + perturb) | ✅ | ✅ counter test | requires store | scales with store |
+| `no_cache` | Full re-forward per step (O(N²) wall-time) | ✅ | ✅ already did on legacy `prefill` | — | token list only |
 
 ## Coverage debt
 
@@ -99,6 +106,19 @@ re-introducing a debt baseline.
 ## Open work
 
 ### P0 — correctness / performance
+
+- **Close the 25-30× standard-vs-per-layer gap.** After the
+  2026-05-17 fused-bypass strip, the honest numbers are: standard 104
+  tok/s, markov-rs 3.6, codec 4.3, unlimited-context 25.6, turbo-quant
+  3.9 (Gemma 3 4B Q4K, Metal). Previously every per-layer engine was
+  silently running standard's kernel and posting ~103 tok/s, so this
+  gap was invisible. Each per-layer engine's per-step cost should be
+  decomposed (`larql bench --profile` already does this for
+  markov-rs; wire it for the others — see "Engine-level profiler
+  coverage" below). Likely culprits: per-layer Metal command-buffer
+  overhead (each layer = one submit), per-layer dequant on the
+  attn tensors, codec encode/decode work in the inner loop. None of
+  these were targetable while the bypass hid them.
 - **`LocalFusedExecutor`.** Phase 2 of the
   [engine-state-vs-execution spec](../larql-inference/docs/specs/engine-state-vs-execution.md)
   needs a fused executor for `standard` + `boundary_kv` to migrate
@@ -197,6 +217,29 @@ re-introducing a debt baseline.
 
 ## Closed (recent)
 
+- **2026-05-17 night — Fused-bypass strip: engines are now engines.**
+  Every per-layer engine (`markov_residual`, `markov_residual_codec`,
+  `unlimited_context`, `turbo_quant`) had a hidden
+  `if let Some(h) = fused_prefill(...) { return Some(h); }` short-
+  circuit at the top of `prefill_quant` / `decode_step_quant`. The
+  short-circuit meant `--engine markov-rs` on Metal silently ran
+  `StandardEngine`'s fused kernel instead — five engines tied at
+  ~103 tok/s with `hot=0.0MB`, masking every state-policy difference
+  and making per-layer optimization invisible. Cut: removed every
+  short-circuit; deleted dead `metal_prefill_done` + `force_walk`
+  fields and `with_force_walk` builders; dropped the pub(crate)
+  `fused_prefill`/`fused_decode_step` re-exports from
+  `unlimited_context::engine` (only `StandardEngine::coarse_prefill`
+  uses the underlying `larql_inference::vindex::fused_prefill` now,
+  via `ComputeBackend::coarse_prefill`). `StandardEngine` remains the
+  default engine and the only home of the fused fast path. Bench now
+  reports honest numbers: standard 104 tok/s, markov-rs 3.6, codec
+  4.3, unlimited-context 25.6, turbo-quant 3.9 — every per-layer
+  engine reports non-zero `hot=` memory because their state
+  structures actually materialise. The 25-30× standard-vs-per-layer
+  gap is the new optimization frontier; previously it was invisible
+  because every engine was running the same kernel under different
+  labels.
 - **2026-05-17 evening — Phase-2 migration completed for the remaining
   three engines.** `unlimited_context`, `turbo_quant`, and `apollo` all
   override `*_via_executor` methods and honor the caller-supplied

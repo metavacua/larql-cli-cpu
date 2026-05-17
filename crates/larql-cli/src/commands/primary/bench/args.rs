@@ -100,18 +100,20 @@ pub struct BenchArgs {
 
     /// Route Q4K engine benches through the new `LayerExecutor` surface
     /// (`prefill_quant_via_executor` / `decode_step_quant_via_executor`)
-    /// instead of the legacy `prefill_quant` / `decode_step_quant` path.
+    /// instead of `prefill_quant` / `decode_step_quant`. For migrated
+    /// engines this honors the caller-supplied FFN backend — required
+    /// for `--ffn http://shard:8080` to actually route through the
+    /// remote shard. Unmigrated engines transparently fall through to
+    /// the non-executor path via the trait's default impl, so the flag
+    /// is safe to set globally.
     ///
-    /// For migrated engines (`markov-rs`, `markov-rs-codec`,
-    /// `boundary-per-layer`) this forces the per-layer walk path —
-    /// equivalent to setting `force_walk=true` in the engine spec but
-    /// via the executor surface. Honors the FFN parameter properly
-    /// (the legacy path ignores it). For unmigrated engines this
-    /// transparently falls through to the legacy path via the trait's
-    /// default impl, so the flag is safe to set globally.
-    ///
-    /// Off by default (legacy path keeps the Metal fast path on
-    /// Apple Silicon for production benches).
+    /// Note: as of the 2026-05-17 bypass-removal cut, every per-layer
+    /// engine (`markov-rs`, `markov-rs-codec`, `unlimited-context`,
+    /// `turbo-quant`, `apollo`, `boundary-per-layer`) always runs its
+    /// own state-policy code regardless of this flag. The fused fast
+    /// path is exclusive to `standard` / `boundary-kv`. This flag now
+    /// only controls FFN-backend honoring; it no longer toggles
+    /// "executor vs fused".
     #[arg(long)]
     pub via_executor: bool,
 

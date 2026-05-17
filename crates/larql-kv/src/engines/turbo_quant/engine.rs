@@ -299,11 +299,12 @@ impl KvEngine for TurboQuantEngine {
         self.layers.iter().map(|l| l.memory_bytes()).sum()
     }
 
-    /// Q4K path: use Metal full pipeline for compute (same as MarkovRS/UnlimitedContext),
-    /// giving ~97 tok/s. At window boundaries, compress K/V checkpoints with TurboQuant
-    /// (36 KB/window vs 278 KB for UnlimitedContext — 7.7× smaller boundary checkpoints).
-    ///
-    /// Falls back to CPU dequant path when Metal is unavailable.
+    /// Q4K path: always run the per-layer compression cycle (capture
+    /// K/V per layer, WHT+Lloyd-Max encode, decompress prior, etc.).
+    /// The whole point of this engine is the compressed K/V state; the
+    /// backend's fused fast path skips every compression step, so
+    /// bypassing to it would defeat the engine. Callers wanting the
+    /// fused speed select `StandardEngine` explicitly.
     fn prefill_quant(
         &mut self,
         weights: &mut ModelWeights,
@@ -312,13 +313,6 @@ impl KvEngine for TurboQuantEngine {
         token_ids: &[u32],
         backend: &dyn ComputeBackend,
     ) -> Option<Array2<f32>> {
-        use crate::engines::unlimited_context::engine::fused_prefill;
-        // Try Metal full pipeline first.
-        if let Some(h) = fused_prefill(weights, index, token_ids, backend) {
-            self.abs_position = token_ids.len();
-            return Some(h);
-        }
-        // CPU Q4K fallback with dequantised attention + WalkFfn FFN.
         self.prefill_kquant_cpu(weights, index, token_ids, backend)
     }
 
@@ -330,12 +324,6 @@ impl KvEngine for TurboQuantEngine {
         token_id: u32,
         backend: &dyn ComputeBackend,
     ) -> Option<Array2<f32>> {
-        use crate::engines::unlimited_context::engine::fused_decode_step;
-        if let Some(h) = fused_decode_step(weights, index, token_id, backend) {
-            self.abs_position += 1;
-            return Some(h);
-        }
-        // CPU Q4K fallback.
         self.decode_step_q4k_cpu(weights, index, token_id, backend)
     }
 

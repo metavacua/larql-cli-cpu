@@ -200,13 +200,17 @@ fn bench_q4k_vs_f32(c: &mut Criterion) {
     let f32_attn = std::fs::metadata(f32_dir.join("attn_weights.bin"))
         .unwrap()
         .len();
-    let q4k_attn = std::fs::metadata(q4k_dir.join("attn_weights_q4k.bin"))
-        .unwrap()
-        .len();
+    // K-quant writer renamed the output to `attn_weights_kquant.bin`
+    // (the old `attn_weights_q4k.bin` is kept as a legacy fallback for
+    // older vindexes). Use the canonical filename constant from the
+    // crate so this bench tracks future renames automatically.
+    let q4k_attn =
+        std::fs::metadata(q4k_dir.join(larql_vindex::format::filenames::ATTN_WEIGHTS_KQUANT_BIN))
+            .unwrap()
+            .len();
     eprintln!(
-        "\n  attn_weights.bin   {} bytes (f32)\n  attn_weights_q4k.bin {} bytes ({:.2}× smaller)\n",
-        f32_attn,
-        q4k_attn,
+        "\n  attn_weights.bin   {} bytes (f32)\n  attn_weights_kquant.bin {} bytes ({:.2}× smaller)\n",
+        f32_attn, q4k_attn,
         f32_attn as f64 / q4k_attn as f64,
     );
 
