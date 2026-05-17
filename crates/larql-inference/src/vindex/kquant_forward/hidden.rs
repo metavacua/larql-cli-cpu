@@ -311,4 +311,75 @@ mod tests {
             "Gemma 4 MoE hidden state must be finite"
         );
     }
+
+    /// `predict_kquant_hidden` with a `RemoteMoeBackend` provided drives
+    /// the `Some(remote)` branch inside `run_moe_layer_cpu` (lines 156-162).
+    /// The backend is disconnected (no shards), so `forward_moe_seq`
+    /// returns `Err`, exercising the eprintln-fallback path at line 160
+    /// while leaving `h2` at zero — the test asserts shape + finiteness,
+    /// not numerical correctness.
+    #[test]
+    fn predict_kquant_hidden_with_disconnected_remote_moe_backend_falls_back() {
+        use crate::ffn::RemoteMoeBackend;
+        use crate::test_utils::{make_test_gemma4_moe_weights, make_test_q4k_vindex};
+        let mut weights = make_test_gemma4_moe_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let remote = RemoteMoeBackend::new_disconnected();
+        let h = predict_kquant_hidden(&mut weights, &[0u32, 1], &index, Some(&remote));
+        assert_eq!(h.shape(), &[2, weights.hidden_size]);
+        assert!(
+            h.iter().all(|v| v.is_finite()),
+            "Gemma 4 MoE hidden state must be finite under remote fallback"
+        );
+    }
+
+    /// `predict_kquant_hidden` with both `LARQL_CPU_DUMP_LAYERS` and
+    /// `LARQL_CPU_STAGE_DUMP` set drives the dump branches inside the
+    /// main loop (lines 30-33, 78-84) and inside `run_moe_layer_cpu`
+    /// (lines 143-147, 190-194). Serialized via a local mutex because
+    /// `DumpConfig::get()` reads process-global env vars on every call.
+    #[test]
+    fn predict_kquant_hidden_writes_dumps_when_env_vars_set() {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _g = LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+
+        let layer_dir = tempfile::tempdir().expect("layer dump tempdir");
+        let stage_dir = tempfile::tempdir().expect("stage dump tempdir");
+        let prev_l = std::env::var("LARQL_CPU_DUMP_LAYERS").ok();
+        let prev_s = std::env::var("LARQL_CPU_STAGE_DUMP").ok();
+        // SAFETY: held lock serialises env reads/writes for this test.
+        unsafe {
+            std::env::set_var("LARQL_CPU_DUMP_LAYERS", layer_dir.path());
+            std::env::set_var("LARQL_CPU_STAGE_DUMP", stage_dir.path());
+        }
+
+        use crate::test_utils::{make_test_gemma4_moe_weights, make_test_q4k_vindex};
+        let mut weights = make_test_gemma4_moe_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let h = predict_kquant_hidden(&mut weights, &[0u32, 1], &index, None);
+        assert_eq!(h.shape(), &[2, weights.hidden_size]);
+
+        // Restore env (or remove if not previously set).
+        unsafe {
+            match prev_l {
+                Some(v) => std::env::set_var("LARQL_CPU_DUMP_LAYERS", v),
+                None => std::env::remove_var("LARQL_CPU_DUMP_LAYERS"),
+            }
+            match prev_s {
+                Some(v) => std::env::set_var("LARQL_CPU_STAGE_DUMP", v),
+                None => std::env::remove_var("LARQL_CPU_STAGE_DUMP"),
+            }
+        }
+
+        // Embed dump must exist (written at line 33 unconditionally when
+        // layer_dir is Some). Per-layer dumps land under cpu_layer_NN.f32.
+        assert!(
+            layer_dir.path().join("cpu_h_embed.f32").is_file(),
+            "embed dump must exist when LARQL_CPU_DUMP_LAYERS set"
+        );
+    }
 }

@@ -52,7 +52,7 @@ Live in [`src/thresholds.rs`](src/thresholds.rs), not the manifest:
 
 | `quant` | `dtype` | `cosine_min` | `max_diff` |
 |---|---|---|---|
-| `q4k` | (any) | 0.995 | 0.05 |
+| `q4k` / `kquant` | (any) | 0.995 | 0.05 |
 | `none` | `f16` | 0.9999 | 0.01 |
 | `none` | `f32` | 0.99999 | 0.001 |
 
@@ -72,7 +72,7 @@ library_name: larql
 tags:
   - vindex
   - vindex-v1
-  - vindex-q4k                 # mirrors quant value
+  - vindex-q4k                 # mirrors quant value (legacy alias `vindex-kquant` also accepted)
   - vindex-extract-inference   # mirrors extract_level
 vindex_spec_version: 1
 pipeline_tag: text-generation

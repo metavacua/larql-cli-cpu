@@ -535,6 +535,18 @@ pub struct FullPipelineLayer<'a> {
     /// production case for every model except E2B and similar future
     /// KV-shared archs.
     pub kv_shared_source: Option<usize>,
+
+    /// Granite-style residual-stream multiplier. The residual add inside
+    /// each transformer block becomes `h += residual_multiplier * x` where
+    /// `x` is the attention output (post-W_O) or FFN output (post-down).
+    /// Granite 4.1: 0.22 on 3B/8B, 0.175 on 30B (μP scaling). Every other
+    /// model: 1.0 (identity — keep the residual add unchanged).
+    ///
+    /// Plumbed through `encode_post_attn` / `encode_post_ffn` →
+    /// `encode_residual_add` → the `residual_add` Metal shader's `b_scale`
+    /// binding. The shader treats 1.0 as a no-op so non-Granite paths are
+    /// bit-identical to the pre-Granite implementation.
+    pub residual_multiplier: f32,
 }
 
 impl<'a> FullPipelineLayer<'a> {
@@ -714,6 +726,7 @@ impl Default for FullPipelineLayer<'_> {
             ple_projection: None,
             ple_post_norm: None,
             kv_shared_source: None,
+            residual_multiplier: 1.0,
         }
     }
 }

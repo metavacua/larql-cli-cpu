@@ -622,7 +622,9 @@ fn default_decode_stubs() {
         be.decode_token_split_profile(&layers, &x, 4, 8),
         (None, 0.0, 0.0, 0.0)
     );
-    assert!(be.prefill_kquant(&layers, &x, 4, 8, 1, false, 0.0).is_none());
+    assert!(be
+        .prefill_kquant(&layers, &x, 4, 8, 1, false, 0.0)
+        .is_none());
     assert!(be
         .full_pipeline_kquant_capture_pre_wo(&layers, &x, 4, 8, 1, false, 0.0, 0, 0,)
         .is_none());

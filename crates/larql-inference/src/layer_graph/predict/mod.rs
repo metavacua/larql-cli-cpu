@@ -281,6 +281,58 @@ mod tests {
         assert!(result.token_ids.len() <= 3);
     }
 
+    /// `predict_honest` against the synthetic Q4K vindex — drives the
+    /// GPU-path branch (`backend.supports_quant(Q4_K) == true`) because
+    /// `CpuBackend` advertises Q4_K matvec support. `decode_token` /
+    /// `full_pipeline_q4` aren't implemented on CPU so they return None,
+    /// pushing control into the `used_gpu = false` CPU fallback at the
+    /// end of the function. End-to-end body coverage in either case.
+    #[test]
+    fn predict_honest_seq1_decode_against_synthetic_q4k_fixture() {
+        use crate::test_utils::{make_test_q4k_vindex, make_test_q4k_weights, make_test_tokenizer};
+        let weights = make_test_q4k_weights();
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let index = make_test_q4k_vindex(&weights);
+        let cached = CachedLayerGraph::from_residuals(vec![]);
+        let num_layers = weights.num_layers;
+        let result = predict_honest(
+            &weights,
+            &tokenizer,
+            &[0u32],
+            3,
+            &index,
+            &CpuBackend,
+            &cached,
+            0..num_layers,
+        );
+        assert!(result.token_ids.len() <= 3);
+    }
+
+    /// `predict_honest` in prefill mode (seq_len > 1) against the
+    /// synthetic Q4K vindex — exercises the `seq_len > 1` branch of the
+    /// GPU pipeline (lines 122-152: pre-norm prefill path) and falls
+    /// through to CPU fallback when `prefill_kquant` returns None.
+    #[test]
+    fn predict_honest_prefill_against_synthetic_q4k_fixture() {
+        use crate::test_utils::{make_test_q4k_vindex, make_test_q4k_weights, make_test_tokenizer};
+        let weights = make_test_q4k_weights();
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let index = make_test_q4k_vindex(&weights);
+        let cached = CachedLayerGraph::from_residuals(vec![]);
+        let num_layers = weights.num_layers;
+        let result = predict_honest(
+            &weights,
+            &tokenizer,
+            &[0u32, 1, 2, 3],
+            5,
+            &index,
+            &CpuBackend,
+            &cached,
+            0..num_layers,
+        );
+        assert!(result.token_ids.len() <= 5);
+    }
+
     #[test]
     fn predict_honest_with_cached_layers() {
         let f = fx();

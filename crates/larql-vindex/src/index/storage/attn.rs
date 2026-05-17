@@ -94,7 +94,9 @@ impl VectorIndex {
         let file = std::fs::File::open(&path)?;
         let mmap = Arc::new(unsafe { mmap_optimized(&file)? });
 
-        let manifest_path = resolved.manifest.expect("attn weights resolver always pairs a manifest");
+        let manifest_path = resolved
+            .manifest
+            .expect("attn weights resolver always pairs a manifest");
         let manifest = if manifest_path.exists() {
             let json: Vec<serde_json::Value> = serde_json::from_str(
                 &std::fs::read_to_string(&manifest_path)
@@ -243,7 +245,10 @@ mod tests {
     /// Build a minimal vindex directory with the given attn_weights_q4k.bin
     /// payload + manifest. Returns a `tempfile::TempDir` whose path can be
     /// passed straight to `load_attn_kquant`.
-    fn make_vindex_with_attn_kquant(payload: &[u8], manifest: serde_json::Value) -> tempfile::TempDir {
+    fn make_vindex_with_attn_kquant(
+        payload: &[u8],
+        manifest: serde_json::Value,
+    ) -> tempfile::TempDir {
         let tmp = tempfile::tempdir().expect("tempdir");
         std::fs::write(tmp.path().join(ATTN_WEIGHTS_KQUANT_BIN), payload).unwrap();
         std::fs::write(

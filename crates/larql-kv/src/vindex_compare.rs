@@ -547,4 +547,98 @@ mod tests {
         // p95 on 5 elements → round((5-1)*0.95) = round(3.8) = 4 → sorted[4] = 0.5.
         assert_eq!(percentile(&sorted, 0.95), 0.5);
     }
+
+    /// `forward_to_logits` against synthetic weights + vindex.
+    /// Drives the layer loop body (lines 152-179) and the final
+    /// logits projection (181-184).
+    #[test]
+    fn forward_to_logits_runs_against_synthetic_weights() {
+        let weights = larql_inference::test_utils::make_test_weights();
+        let index = larql_inference::test_utils::make_test_vindex(&weights);
+        let config = ComparisonConfig::default();
+        let logits = forward_to_logits(&weights, &index, &[0u32, 1, 2], &config);
+        assert_eq!(logits.len(), weights.vocab_size);
+        assert!(logits.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn forward_to_logits_traced_returns_per_layer_dispatch_path() {
+        let weights = larql_inference::test_utils::make_test_weights();
+        let index = larql_inference::test_utils::make_test_vindex(&weights);
+        let config = ComparisonConfig::default();
+        let (logits, trace) = forward_to_logits_traced(&weights, &index, &[0u32, 1], &config);
+        assert_eq!(logits.len(), weights.vocab_size);
+        assert!(!trace.is_empty(), "trace should record at least one layer");
+        // Every layer entry pairs (layer, path); path string is non-empty.
+        for (layer, path) in &trace {
+            assert!(*layer < weights.num_layers);
+            assert!(!path.is_empty());
+        }
+    }
+
+    #[test]
+    fn forward_to_logits_max_layers_truncates() {
+        let weights = larql_inference::test_utils::make_test_weights();
+        let index = larql_inference::test_utils::make_test_vindex(&weights);
+        let config = ComparisonConfig {
+            max_layers: Some(1),
+            ..ComparisonConfig::default()
+        };
+        let (_logits, trace) = forward_to_logits_traced(&weights, &index, &[0u32], &config);
+        assert!(
+            trace.len() <= 1,
+            "max_layers=1 should bound trace, got {}",
+            trace.len()
+        );
+    }
+
+    #[test]
+    fn compare_prompt_against_self_gives_perfect_agreement() {
+        let weights = larql_inference::test_utils::make_test_weights();
+        let index = larql_inference::test_utils::make_test_vindex(&weights);
+        let config = ComparisonConfig::default();
+        let report = compare_prompt(&weights, &index, &index, "hello", &[0u32, 1], &config);
+        assert!(report.argmax_match);
+        assert!((report.logit_cos - 1.0).abs() < 1e-4);
+        assert!((report.top_k_jaccard - 1.0).abs() < 1e-9);
+        assert!(report.kl_symmetric < 1e-4);
+        assert_eq!(report.ref_top_token_id, report.cand_top_token_id);
+    }
+
+    #[test]
+    fn compare_many_against_self_aggregates_argmax_agreement() {
+        let weights = larql_inference::test_utils::make_test_weights();
+        let index = larql_inference::test_utils::make_test_vindex(&weights);
+        let config = ComparisonConfig::default();
+        let prompts: &[(&str, Vec<u32>)] = &[("a", vec![0u32, 1]), ("b", vec![1u32, 2])];
+        let agg = compare_many(&weights, &index, &index, prompts, "ref", "cand", &config);
+        assert_eq!(agg.n_prompts, 2);
+        assert!((agg.argmax_agreement - 1.0).abs() < 1e-9);
+        assert!((agg.top_k_agreement_mean - 1.0).abs() < 1e-9);
+        assert_eq!(agg.prompts.len(), 2);
+    }
+
+    #[test]
+    fn compare_many_respects_max_seq_len_truncation() {
+        let weights = larql_inference::test_utils::make_test_weights();
+        let index = larql_inference::test_utils::make_test_vindex(&weights);
+        let config = ComparisonConfig {
+            max_seq_len: Some(1),
+            ..ComparisonConfig::default()
+        };
+        let prompts: &[(&str, Vec<u32>)] = &[("long", vec![0u32, 1, 2, 3])];
+        let agg = compare_many(&weights, &index, &index, prompts, "ref", "cand", &config);
+        // The first (and only) prompt should report seq_len=1 because
+        // max_seq_len capped it to 1 token before forward_to_logits ran.
+        assert_eq!(agg.prompts[0].seq_len, 1);
+    }
+
+    #[test]
+    fn comparison_config_default_and_from_round_trip() {
+        let cfg = ComparisonConfig::default();
+        let summary: ComparisonConfigSerde = (&cfg).into();
+        assert_eq!(summary.top_k, cfg.top_k);
+        assert_eq!(summary.max_seq_len, cfg.max_seq_len);
+        assert_eq!(summary.max_layers, cfg.max_layers);
+    }
 }

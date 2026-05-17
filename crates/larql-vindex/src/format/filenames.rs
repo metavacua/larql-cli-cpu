@@ -191,11 +191,7 @@ pub fn resolve_lm_head_kquant(dir: &Path) -> ResolvedKquantPaths {
 
 /// Resolve `down_features_*.bin` + matching manifest.
 pub fn resolve_down_features_kquant(dir: &Path) -> ResolvedKquantPaths {
-    let (bin, is_legacy) = pick_bin(
-        dir,
-        DOWN_FEATURES_KQUANT_BIN,
-        LEGACY_DOWN_FEATURES_Q4K_BIN,
-    );
+    let (bin, is_legacy) = pick_bin(dir, DOWN_FEATURES_KQUANT_BIN, LEGACY_DOWN_FEATURES_Q4K_BIN);
     let manifest_name = if is_legacy {
         LEGACY_DOWN_FEATURES_Q4K_MANIFEST_JSON
     } else {
@@ -211,8 +207,7 @@ pub fn resolve_down_features_kquant(dir: &Path) -> ResolvedKquantPaths {
 /// Whether the directory contains a k-quant attention weights file
 /// under either the new or legacy name.
 pub fn has_kquant_attn_weights(dir: &Path) -> bool {
-    dir.join(ATTN_WEIGHTS_KQUANT_BIN).is_file()
-        || dir.join(LEGACY_ATTN_WEIGHTS_Q4K_BIN).is_file()
+    dir.join(ATTN_WEIGHTS_KQUANT_BIN).is_file() || dir.join(LEGACY_ATTN_WEIGHTS_Q4K_BIN).is_file()
 }
 
 /// Whether the directory contains an interleaved k-quant FFN file
@@ -230,8 +225,7 @@ pub fn has_kquant_lm_head(dir: &Path) -> bool {
 /// Whether the directory contains a feature-major down k-quant file
 /// under either the new or legacy name.
 pub fn has_kquant_down_features(dir: &Path) -> bool {
-    dir.join(DOWN_FEATURES_KQUANT_BIN).is_file()
-        || dir.join(LEGACY_DOWN_FEATURES_Q4K_BIN).is_file()
+    dir.join(DOWN_FEATURES_KQUANT_BIN).is_file() || dir.join(LEGACY_DOWN_FEATURES_Q4K_BIN).is_file()
 }
 
 // ── LM head ────────────────────────────────────────────────────────────
@@ -409,6 +403,66 @@ mod tests {
     }
 
     #[test]
+    fn resolve_lm_head_kquant_falls_back_to_legacy_q4() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(LEGACY_LM_HEAD_Q4_BIN), b"legacy").unwrap();
+        let r = resolve_lm_head_kquant(dir.path());
+        assert!(r.is_legacy);
+        assert!(r.bin.ends_with(LEGACY_LM_HEAD_Q4_BIN));
+        assert!(r.manifest.is_none());
+    }
+
+    #[test]
+    fn resolve_interleaved_kquant_dual_read() {
+        // New present → use new.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(INTERLEAVED_KQUANT_BIN), b"new").unwrap();
+        let r = resolve_interleaved_kquant(dir.path());
+        assert!(!r.is_legacy);
+        assert!(r.bin.ends_with(INTERLEAVED_KQUANT_BIN));
+        assert!(r
+            .manifest
+            .unwrap()
+            .ends_with(INTERLEAVED_KQUANT_MANIFEST_JSON));
+
+        // Only legacy present → use legacy.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(LEGACY_INTERLEAVED_Q4K_BIN), b"legacy").unwrap();
+        let r = resolve_interleaved_kquant(dir.path());
+        assert!(r.is_legacy);
+        assert!(r.bin.ends_with(LEGACY_INTERLEAVED_Q4K_BIN));
+        assert!(r
+            .manifest
+            .unwrap()
+            .ends_with(LEGACY_INTERLEAVED_Q4K_MANIFEST_JSON));
+    }
+
+    #[test]
+    fn resolve_down_features_kquant_dual_read() {
+        // New present → use new.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(DOWN_FEATURES_KQUANT_BIN), b"new").unwrap();
+        let r = resolve_down_features_kquant(dir.path());
+        assert!(!r.is_legacy);
+        assert!(r.bin.ends_with(DOWN_FEATURES_KQUANT_BIN));
+        assert!(r
+            .manifest
+            .unwrap()
+            .ends_with(DOWN_FEATURES_KQUANT_MANIFEST_JSON));
+
+        // Only legacy present → use legacy.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(LEGACY_DOWN_FEATURES_Q4K_BIN), b"legacy").unwrap();
+        let r = resolve_down_features_kquant(dir.path());
+        assert!(r.is_legacy);
+        assert!(r.bin.ends_with(LEGACY_DOWN_FEATURES_Q4K_BIN));
+        assert!(r
+            .manifest
+            .unwrap()
+            .ends_with(LEGACY_DOWN_FEATURES_Q4K_MANIFEST_JSON));
+    }
+
+    #[test]
     fn has_kquant_helpers_accept_either_filename() {
         let dir = tempfile::tempdir().unwrap();
         assert!(!has_kquant_attn_weights(dir.path()));
@@ -418,5 +472,38 @@ mod tests {
         assert!(!has_kquant_attn_weights(dir.path()));
         std::fs::write(dir.path().join(ATTN_WEIGHTS_KQUANT_BIN), b"x").unwrap();
         assert!(has_kquant_attn_weights(dir.path()));
+    }
+
+    #[test]
+    fn has_kquant_interleaved_accepts_either_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!has_kquant_interleaved(dir.path()));
+        std::fs::write(dir.path().join(LEGACY_INTERLEAVED_Q4K_BIN), b"x").unwrap();
+        assert!(has_kquant_interleaved(dir.path()));
+        std::fs::remove_file(dir.path().join(LEGACY_INTERLEAVED_Q4K_BIN)).unwrap();
+        std::fs::write(dir.path().join(INTERLEAVED_KQUANT_BIN), b"x").unwrap();
+        assert!(has_kquant_interleaved(dir.path()));
+    }
+
+    #[test]
+    fn has_kquant_lm_head_accepts_either_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!has_kquant_lm_head(dir.path()));
+        std::fs::write(dir.path().join(LEGACY_LM_HEAD_Q4_BIN), b"x").unwrap();
+        assert!(has_kquant_lm_head(dir.path()));
+        std::fs::remove_file(dir.path().join(LEGACY_LM_HEAD_Q4_BIN)).unwrap();
+        std::fs::write(dir.path().join(LM_HEAD_KQUANT_BIN), b"x").unwrap();
+        assert!(has_kquant_lm_head(dir.path()));
+    }
+
+    #[test]
+    fn has_kquant_down_features_accepts_either_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!has_kquant_down_features(dir.path()));
+        std::fs::write(dir.path().join(LEGACY_DOWN_FEATURES_Q4K_BIN), b"x").unwrap();
+        assert!(has_kquant_down_features(dir.path()));
+        std::fs::remove_file(dir.path().join(LEGACY_DOWN_FEATURES_Q4K_BIN)).unwrap();
+        std::fs::write(dir.path().join(DOWN_FEATURES_KQUANT_BIN), b"x").unwrap();
+        assert!(has_kquant_down_features(dir.path()));
     }
 }

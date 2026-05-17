@@ -19,14 +19,14 @@ mod capabilities;
 pub mod load;
 pub mod manifest;
 pub mod write_f32;
-pub mod write_layers;
 pub mod write_kquant;
+pub mod write_layers;
 
 pub(crate) use capabilities::ensure_extract_level_supported;
 
 pub use load::{
-    find_tokenizer_path, load_model_weights, load_model_weights_kquant, load_model_weights_kquant_shard,
-    load_model_weights_with_opts, LoadWeightsOptions,
+    find_tokenizer_path, load_model_weights, load_model_weights_kquant,
+    load_model_weights_kquant_shard, load_model_weights_with_opts, LoadWeightsOptions,
 };
 pub use manifest::Q4kManifestEntry;
 pub use write_f32::{

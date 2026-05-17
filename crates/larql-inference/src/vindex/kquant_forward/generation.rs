@@ -331,4 +331,47 @@ mod tests {
         );
         assert!(out.len() <= 2);
     }
+
+    /// `generate_kquant_cpu_remote` against a disconnected `RemoteMoeBackend`
+    /// on the Gemma 4 MoE fixture — drives the function body (lines 68-100)
+    /// end-to-end. The MoE dispatch falls back to zero contribution when
+    /// the remote returns Err (see hidden.rs's `Some(remote)` branch);
+    /// the generation loop still picks tokens off the dense path.
+    #[test]
+    fn generate_kquant_cpu_remote_runs_against_disconnected_backend() {
+        use crate::ffn::RemoteMoeBackend;
+        use crate::test_utils::{make_test_gemma4_moe_weights, make_test_q4k_vindex};
+        let mut weights = make_test_gemma4_moe_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let remote = RemoteMoeBackend::new_disconnected();
+        let out =
+            generate_kquant_cpu_remote(&mut weights, &tokenizer, &[0u32, 1], 2, &index, &remote);
+        assert!(out.len() <= 2);
+    }
+
+    /// `generate_kquant_cpu_constrained_streaming` wraps the sampled
+    /// variant with `SamplingConfig::greedy()`. Drives lines 133, 146-156
+    /// — the body just forwards to the sampled variant.
+    #[test]
+    fn generate_kquant_cpu_constrained_streaming_invokes_on_token() {
+        let mut weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let mut on_token_calls = 0;
+        let out = generate_kquant_cpu_constrained_streaming(
+            &mut weights,
+            &tokenizer,
+            &[0u32],
+            2,
+            &index,
+            |_ids, _logits| {},
+            |_id, _tok, _prob| {
+                on_token_calls += 1;
+            },
+        );
+        // streaming variant must call on_token for every emitted token.
+        assert_eq!(out.len(), on_token_calls);
+        assert!(out.len() <= 2);
+    }
 }

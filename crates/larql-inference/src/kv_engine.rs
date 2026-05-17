@@ -214,6 +214,68 @@ pub trait KvEngine: Send {
         let _ = (index, backend);
         self.decode_step(weights, ffn, token_id) // default: f32 fallback
     }
+
+    /// Prefill via a caller-supplied `LayerExecutor` (dense/f32 path).
+    /// See [`docs/specs/engine-state-vs-execution.md`].
+    ///
+    /// Sibling of [`prefill_quant_via_executor`] for engines that
+    /// don't have a quant path (no vindex needed). Default impl falls
+    /// through to [`prefill`].
+    fn prefill_via_executor(
+        &mut self,
+        weights: &ModelWeights,
+        executor: &dyn crate::layer_executor::LayerExecutor,
+        ffn: &dyn FfnBackend,
+        token_ids: &[u32],
+    ) -> Option<Array2<f32>> {
+        let _ = executor;
+        self.prefill(weights, ffn, token_ids)
+    }
+
+    /// One decode step via a caller-supplied `LayerExecutor` (dense/f32).
+    /// Sibling of [`decode_step_quant_via_executor`].
+    fn decode_step_via_executor(
+        &mut self,
+        weights: &ModelWeights,
+        executor: &dyn crate::layer_executor::LayerExecutor,
+        ffn: &dyn FfnBackend,
+        token_id: u32,
+    ) -> Option<Array2<f32>> {
+        let _ = executor;
+        self.decode_step(weights, ffn, token_id)
+    }
+
+    /// Prefill via a caller-supplied `LayerExecutor`. See
+    /// [`docs/specs/engine-state-vs-execution.md`].
+    ///
+    /// The default impl falls through to [`prefill_quant`] using
+    /// `executor.backend()` — engines that haven't migrated yet keep
+    /// working unchanged. Migrated engines override this method to
+    /// drive the layer loop through the executor and honor the FFN
+    /// parameter properly.
+    fn prefill_quant_via_executor(
+        &mut self,
+        weights: &mut ModelWeights,
+        executor: &dyn crate::layer_executor::LayerExecutor,
+        ffn: &dyn FfnBackend,
+        index: &larql_vindex::VectorIndex,
+        token_ids: &[u32],
+    ) -> Option<Array2<f32>> {
+        self.prefill_quant(weights, ffn, index, token_ids, executor.backend())
+    }
+
+    /// One decode step via a caller-supplied `LayerExecutor`. See
+    /// [`prefill_quant_via_executor`] for the migration contract.
+    fn decode_step_quant_via_executor(
+        &mut self,
+        weights: &mut ModelWeights,
+        executor: &dyn crate::layer_executor::LayerExecutor,
+        ffn: &dyn FfnBackend,
+        index: &larql_vindex::VectorIndex,
+        token_id: u32,
+    ) -> Option<Array2<f32>> {
+        self.decode_step_quant(weights, ffn, index, token_id, executor.backend())
+    }
 }
 
 #[cfg(test)]
@@ -355,6 +417,61 @@ mod tests {
         assert_eq!(engine.cold_bytes(), 0);
         assert!(engine.stage_summary().is_none());
         assert_eq!(engine.name(), "defaults-only");
+    }
+
+    /// All four `*_via_executor` default impls dispatch through to their
+    /// non-executor sibling, which on `DefaultsOnlyEngine` falls back to
+    /// `prefill` / `decode_step`. Covers the function bodies of
+    /// `prefill_via_executor` (224-233), `decode_step_via_executor`
+    /// (237-246), `prefill_quant_via_executor` (256-265),
+    /// `decode_step_quant_via_executor` (269-278).
+    #[test]
+    fn defaults_via_executor_methods_dispatch_to_non_executor_siblings() {
+        struct StubExecutor {
+            backend: larql_compute::CpuBackend,
+        }
+        impl crate::layer_executor::LayerExecutor for StubExecutor {
+            fn backend(&self) -> &dyn larql_compute::ComputeBackend {
+                &self.backend
+            }
+            fn dispatch_kind(&self) -> crate::layer_executor::ExecutorDispatchKind {
+                crate::layer_executor::ExecutorDispatchKind::PerLayer
+            }
+            fn name(&self) -> &str {
+                "stub"
+            }
+        }
+        let exec = StubExecutor {
+            backend: larql_compute::CpuBackend,
+        };
+        let weights = crate::test_utils::make_test_weights();
+        let index = crate::test_utils::make_test_vindex(&weights);
+        let ffn = crate::ffn::WeightFfn { weights: &weights };
+        let mut engine = DefaultsOnlyEngine {
+            prefill_calls: 0,
+            decode_calls: 0,
+        };
+
+        // prefill_via_executor → prefill
+        let out = engine.prefill_via_executor(&weights, &exec, &ffn, &[0, 1]);
+        assert!(out.is_some());
+        assert_eq!(engine.prefill_calls, 1);
+
+        // decode_step_via_executor → decode_step
+        let out = engine.decode_step_via_executor(&weights, &exec, &ffn, 2);
+        assert!(out.is_some());
+        assert_eq!(engine.decode_calls, 1);
+
+        // prefill_quant_via_executor → prefill_quant → prefill (default fallback)
+        let mut weights_q = crate::test_utils::make_test_weights();
+        let out = engine.prefill_quant_via_executor(&mut weights_q, &exec, &ffn, &index, &[0, 1]);
+        assert!(out.is_some());
+        assert_eq!(engine.prefill_calls, 2);
+
+        // decode_step_quant_via_executor → decode_step_quant → decode_step
+        let out = engine.decode_step_quant_via_executor(&mut weights_q, &exec, &ffn, &index, 3);
+        assert!(out.is_some());
+        assert_eq!(engine.decode_calls, 2);
     }
 
     #[test]

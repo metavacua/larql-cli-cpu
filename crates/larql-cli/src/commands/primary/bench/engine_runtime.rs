@@ -153,15 +153,31 @@ pub(super) fn run_engine_q4k(
         }};
     }
 
-    // Q4K engines currently dispatch FFN internally from `weights` and ignore
-    // this parameter. `NullFfn` satisfies the trait without taking a reference
-    // to `weights` (which is `&mut` here, so a `WeightFfn` would conflict).
+    // Legacy engines dispatch FFN internally from `weights` and ignore
+    // this parameter. Migrated engines on the `*_via_executor` path
+    // honor it. `NullFfn` works for both without conflicting with the
+    // `&mut weights` borrow.
     let ffn = larql_inference::ffn::NullFfn;
 
+    // Optional executor wrap: route through the new `LayerExecutor`
+    // surface. For migrated engines this exercises the per-layer walk
+    // path + FFN honoring; for unmigrated engines the trait's default
+    // impl transparently falls through to the legacy path.
+    let executor = if args.via_executor {
+        Some(larql_inference::layer_executor::LocalWalkExecutor::new(be))
+    } else {
+        None
+    };
+
     let t_pre = Instant::now();
-    let mut hidden = engine
-        .prefill_quant(weights, &ffn, index, token_ids, be)
-        .ok_or("Q4K engine prefill failed")?;
+    let mut hidden = match executor.as_ref() {
+        Some(exec) => engine
+            .prefill_quant_via_executor(weights, exec, &ffn, index, token_ids)
+            .ok_or("Q4K engine prefill (via executor) failed")?,
+        None => engine
+            .prefill_quant(weights, &ffn, index, token_ids, be)
+            .ok_or("Q4K engine prefill failed")?,
+    };
     let prefill_ms = t_pre.elapsed().as_secs_f64() * 1000.0;
 
     let max_steps = args.warmup + args.tokens;
@@ -170,9 +186,14 @@ pub(super) fn run_engine_q4k(
 
     for _ in 0..max_steps {
         let t = Instant::now();
-        hidden = engine
-            .decode_step_quant(weights, &ffn, index, last_token, be)
-            .ok_or("Q4K engine decode_step failed")?;
+        hidden = match executor.as_ref() {
+            Some(exec) => engine
+                .decode_step_quant_via_executor(weights, exec, &ffn, index, last_token)
+                .ok_or("Q4K engine decode_step (via executor) failed")?,
+            None => engine
+                .decode_step_quant(weights, &ffn, index, last_token, be)
+                .ok_or("Q4K engine decode_step failed")?,
+        };
         decode_ms_all.push(t.elapsed().as_secs_f64() * 1000.0);
         last_token = pick_next!(&hidden);
     }

@@ -2812,18 +2812,31 @@ fn streaming_extract_q4k_from_safetensors() {
     .unwrap();
 
     // ── File layout ──
-    assert!(output_dir.join("attn_weights_q4k.bin").exists());
-    assert!(output_dir.join("attn_weights_q4k_manifest.json").exists());
-    assert!(output_dir.join("interleaved_q4k.bin").exists());
-    assert!(output_dir.join("interleaved_q4k_manifest.json").exists());
+    //
+    // Writers emit the new kquant-canonical filenames. Legacy q4k-named
+    // files must NOT be written (they're read-only back-compat fallbacks).
+    assert!(output_dir.join("attn_weights_kquant.bin").exists());
+    assert!(output_dir
+        .join("attn_weights_kquant_manifest.json")
+        .exists());
+    assert!(output_dir.join("interleaved_kquant.bin").exists());
+    assert!(output_dir.join("interleaved_kquant_manifest.json").exists());
     assert!(output_dir.join("norms.bin").exists());
     assert!(output_dir.join("weight_manifest.json").exists());
     assert!(output_dir.join("index.json").exists());
+    assert!(
+        !output_dir.join("attn_weights_q4k.bin").exists(),
+        "writer must NOT emit the legacy q4k filename"
+    );
+    assert!(
+        !output_dir.join("interleaved_q4k.bin").exists(),
+        "writer must NOT emit the legacy q4k filename"
+    );
 
-    // Q4K path writes its own filenames; the non-Q4 names should be absent.
+    // k-quant path writes its own filenames; the non-quantised names should be absent.
     assert!(
         !output_dir.join("attn_weights.bin").exists(),
-        "Q4 path should not emit attn_weights.bin"
+        "k-quant path should not emit attn_weights.bin"
     );
 
     // ── Config schema ──
@@ -2837,7 +2850,7 @@ fn streaming_extract_q4k_from_safetensors() {
 
     // ── attn manifest ──
     let attn_manifest_json =
-        std::fs::read_to_string(output_dir.join("attn_weights_q4k_manifest.json")).unwrap();
+        std::fs::read_to_string(output_dir.join("attn_weights_kquant_manifest.json")).unwrap();
     let attn_entries: Vec<serde_json::Value> = serde_json::from_str(&attn_manifest_json).unwrap();
 
     // 4 tensors (Q, K, V, O) × num_layers
@@ -2867,7 +2880,7 @@ fn streaming_extract_q4k_from_safetensors() {
 
     // ── interleaved (FFN) manifest ──
     let ff_manifest_json =
-        std::fs::read_to_string(output_dir.join("interleaved_q4k_manifest.json")).unwrap();
+        std::fs::read_to_string(output_dir.join("interleaved_kquant_manifest.json")).unwrap();
     let ff_entries: Vec<serde_json::Value> = serde_json::from_str(&ff_manifest_json).unwrap();
 
     // 3 tensors (gate, up, down) × num_layers
@@ -2896,7 +2909,7 @@ fn streaming_extract_q4k_from_safetensors() {
     }
 
     // ── manifest byte counts match file sizes ──
-    let attn_bytes = std::fs::metadata(output_dir.join("attn_weights_q4k.bin"))
+    let attn_bytes = std::fs::metadata(output_dir.join("attn_weights_kquant.bin"))
         .unwrap()
         .len();
     let attn_manifest_total: u64 = attn_entries
@@ -2905,10 +2918,10 @@ fn streaming_extract_q4k_from_safetensors() {
         .sum();
     assert_eq!(
         attn_bytes, attn_manifest_total,
-        "attn_weights_q4k.bin size must equal sum of manifest lengths"
+        "attn_weights_kquant.bin size must equal sum of manifest lengths"
     );
 
-    let ff_bytes = std::fs::metadata(output_dir.join("interleaved_q4k.bin"))
+    let ff_bytes = std::fs::metadata(output_dir.join("interleaved_kquant.bin"))
         .unwrap()
         .len();
     let ff_manifest_total: u64 = ff_entries
@@ -4087,7 +4100,7 @@ fn streaming_extract_preserves_per_layer_intermediate_for_variable_ffn() {
     //     dequantising with the wrong width silently produced half-width
     //     weights on wide layers, so this assertion is the invariant. ──
     let ff_manifest_json =
-        std::fs::read_to_string(output_dir.join("interleaved_q4k_manifest.json")).unwrap();
+        std::fs::read_to_string(output_dir.join("interleaved_kquant_manifest.json")).unwrap();
     let ff_entries: Vec<serde_json::Value> = serde_json::from_str(&ff_manifest_json).unwrap();
     for (layer, &inter) in intermediates.iter().enumerate() {
         let base = layer * 3; // gate, up, down per layer

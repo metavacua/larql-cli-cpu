@@ -112,7 +112,23 @@ pub fn build_arch_params<'a>(
             larql_models::FfnType::Standard => larql_compute::FfnType::Standard,
             _ => larql_compute::FfnType::Gated,
         },
-        attn_scale: arch.attention_scale_for_layer(layer) as f32,
+        // Granite-family `attention_multiplier` (1/64 on 3B, 1/128 on
+        // 8B/30B) *replaces* `1/sqrt(head_dim)` — it is the trained-time
+        // attention score scale, not a factor multiplied on top of
+        // sqrt-scaling. The F32 attention path at
+        // `attention/gpu.rs::scale` follows the same convention; the
+        // Metal Q4K decode kernels (`decode/encode_attn.rs`,
+        // `ops/full_layer.rs`) read this `attn_scale` directly with no
+        // further adjustment, so failing to fold the multiplier in here
+        // leaves Granite's 0.015625 / 0.0078125 trained scale unused and
+        // the model degenerates to repeating high-frequency tokens
+        // ("ikea ikea ikea…") because every attention distribution
+        // peaks too sharply.
+        attn_scale: if arch.attention_multiplier() != 1.0 {
+            arch.attention_multiplier()
+        } else {
+            arch.attention_scale_for_layer(layer) as f32
+        },
         head_dim: layer_hd,
         num_q_heads: layer_nq,
         num_kv_heads: layer_nkv,
@@ -160,6 +176,13 @@ pub fn build_arch_params<'a>(
             .and_then(|k| weights.vectors.get(&k))
             .map(|v| v.as_slice()),
         kv_shared_source: arch.kv_shared_source_layer(layer),
+        // Granite-style residual scaling: HF `modeling_granite.py` does
+        // `hidden_states = residual + self.residual_multiplier * hidden_states`
+        // after both attention and FFN. Trait getter returns 1.0 for
+        // every non-Granite arch, so this default is bit-identical for
+        // them and the Metal `residual_add` shader's `b_scale` binding
+        // is a no-op (multiply by 1.0).
+        residual_multiplier: arch.residual_multiplier(),
     }
 }
 
@@ -1048,6 +1071,67 @@ mod tests {
         // (not per-layer `layers/{l}/{e}/{component}` keys).
         assert!(matches!(
             moe.expert_data_format,
+            larql_compute::QuantFormat::BF16
+        ));
+    }
+
+    /// `patch_pipeline_layers_for_remote_moe` early-returns when the arch
+    /// reports no hybrid-MoE (line 471). Drives the no-op path on the
+    /// TinyModel test arch (is_hybrid_moe = false).
+    #[test]
+    fn patch_pipeline_layers_for_remote_moe_noop_on_non_moe_arch() {
+        let w = weights();
+        let mut layers: Vec<FullPipelineLayer<'_>> = Vec::new();
+        patch_pipeline_layers_for_remote_moe(&mut layers, w);
+        // No panic; nothing to assert about the empty slice. The function
+        // bails at line 471 before touching the iterator.
+    }
+
+    /// `patch_pipeline_layers_for_remote_moe` on Gemma 4 MoE fixture: drives
+    /// the per-layer loop, the `layer.moe.is_some() ⇒ continue` branch, and
+    /// (after zeroing one layer's `moe` field) the `build_moe_stub`
+    /// injection path. Covers lines 472-525.
+    #[test]
+    fn patch_pipeline_layers_for_remote_moe_injects_stub_on_gemma4_when_moe_none() {
+        use crate::test_utils::{make_test_gemma4_moe_weights, make_test_q4k_vindex};
+        let w = make_test_gemma4_moe_weights();
+        let idx = make_test_q4k_vindex(&w);
+        // q4_ffn_mmap legacy stride payload — large enough that the
+        // per-layer offset (3 matrices × per_matrix) lands inside.
+        let per_matrix = 32;
+        let mmap: Vec<u8> = vec![0u8; per_matrix * 3 * w.num_layers];
+        let mut layers = build_pipeline_layers(
+            &w,
+            &idx,
+            0..w.num_layers,
+            &mmap,
+            per_matrix,
+            QuantFormat::Q4_K,
+        );
+        // Sanity: build_moe_weights populated `moe` for all layers on the
+        // Gemma 4 fixture (BF16 monolithic path).
+        assert!(layers.iter().all(|l| l.moe.is_some()));
+
+        // First call: every layer has moe=Some ⇒ patch hits the `continue`
+        // branch every iteration (line 475).
+        patch_pipeline_layers_for_remote_moe(&mut layers, &w);
+        assert!(layers.iter().all(|l| l.moe.is_some()));
+
+        // Zero one layer's moe field and re-run. The patch must invoke
+        // `build_moe_stub` for that one layer (lines 480, 484-525).
+        layers[0].moe = None;
+        patch_pipeline_layers_for_remote_moe(&mut layers, &w);
+        let stub = layers[0]
+            .moe
+            .as_ref()
+            .expect("patch must re-populate moe for hybrid arch when None");
+        assert!(stub.experts_gate_up.is_empty());
+        assert!(stub.experts_down.is_empty());
+        assert_eq!(stub.num_experts, w.arch.num_experts());
+        assert_eq!(stub.top_k, w.arch.num_experts_per_token());
+        assert_eq!(stub.intermediate_size, w.arch.moe_intermediate_size());
+        assert!(matches!(
+            stub.expert_data_format,
             larql_compute::QuantFormat::BF16
         ));
     }

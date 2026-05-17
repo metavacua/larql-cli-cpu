@@ -965,10 +965,10 @@ larql extract-index [MODEL] --output <OUTPUT> [OPTIONS]
 | `-o, --output <OUTPUT>` | Output path for the `.vindex` directory | — |
 | `--level <LEVEL>` | `browse` / `attention` / `inference` / `all` — strict increasing tiers. See below. | `inference` |
 | `--f32` | Opt out of f16 on side-channel tensors. Rarely wanted — doubles file sizes. | off (f16) |
-| `--quant <FORMAT>` | Inline-quantise forward-pass weights: `none` or `q4k`. `q4k` emits Q4_K/Q6_K Ollama-compatible blocks; implies `--level all` + f16 side-channels. | `none` |
+| `--quant <FORMAT>` | Inline-quantise forward-pass weights: `none`, `q4k`, or `kquant` (alias). The k-quant family emits Q4_K/Q6_K Ollama-compatible blocks; implies `--level all` + f16 side-channels. | `none` |
 | `--compact` | Skip `up_weights.bin` + `down_weights.bin`; FFN weights live only in feature-major files. `WalkFfn`-only. | off |
-| `--drop-gate-vectors` | Skip `gate_vectors.bin` entirely; loader rebuilds gate from `interleaved_q4k.bin` at load. Only with `--quant q4k`. | off |
-| `--down-q4k` | Quantise FFN down-proj as Q4_K instead of Q6_K. Saves ~1.8 GB on 31B, cuts down-matmul cost ~1.5–1.7× at decode. Introduces ~2.5× more probability-redistribution noise (top-1 + top-5 preserved). Validated by `walk_correctness`, which auto-relaxes its prob-delta gate from 0.02 to 0.035 when it detects Q4_K down. Only with `--quant q4k`. | off |
+| `--drop-gate-vectors` | Skip `gate_vectors.bin` entirely; loader rebuilds gate from `interleaved_kquant.bin` (or legacy `interleaved_q4k.bin`) at load. Only with `--quant q4k` / `kquant`. | off |
+| `--down-q4k` | Quantise FFN down-proj as Q4_K instead of Q6_K. Saves ~1.8 GB on 31B, cuts down-matmul cost ~1.5–1.7× at decode. Introduces ~2.5× more probability-redistribution noise (top-1 + top-5 preserved). Validated by `walk_correctness`, which auto-relaxes its prob-delta gate from 0.02 to 0.035 when it detects Q4_K down. Only with `--quant q4k` / `kquant`. | off |
 | `--from-vectors <PATH>` | Build from already-extracted NDJSON vector files instead of model weights | — |
 | `--down-top-k <N>` | Top-K tokens per feature in down metadata | 10 |
 | `--include-weights` | Alias for `--level all` (deprecated — use `--level` directly) | — |
@@ -1024,14 +1024,20 @@ larql extract -o gemma3-4b.vindex --from-vectors vectors/
 larql extract google/gemma-3-4b-it -o gemma3-4b.vindex --resume
 ```
 
-**`--quant q4k` details:**
+**`--quant q4k` (alias `--quant kquant`) details:**
 
 - Q/K/O + gate/up: Q4_K (148 bytes per 256 values)
 - V + down: Q6_K (210 bytes per 256 values), or Q4_K with `--down-q4k`
-- `--level browse` is implicitly promoted to `--level all` — the Q4_K
-  writer materialises all of attention, FFN, norms, and `lm_head` in
-  one pass, so a browse-only Q4_K vindex would be incoherent.
-- Side-channel tensors that Q4_K doesn't quantise — `gate_vectors.bin`
+- Writers emit `attn_weights_kquant.bin`, `interleaved_kquant.bin`,
+  `lm_head_kquant.bin` (plus matching `*_manifest.json` sidecars).
+  Readers also accept the legacy `*_q4k.bin` / `lm_head_q4.bin`
+  filenames so pre-rename vindexes keep loading. `index.json` records
+  `"quant": "q4k"` for v1 vindexes; readers accept `"kquant"` too.
+- `--level browse` is implicitly promoted to `--level all` — the
+  k-quant writer materialises all of attention, FFN, norms, and
+  `lm_head` in one pass, so a browse-only k-quant vindex would be
+  incoherent.
+- Side-channel tensors that k-quant doesn't quantise — `gate_vectors.bin`
   and `embeddings.bin` — are stored at f16 by default under `--quant q4k`.
   Leaving them at f32 pairs 4-bit main weights with 32-bit lookup
   tables, roughly doubling the vindex footprint for no accuracy gain.

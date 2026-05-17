@@ -109,8 +109,10 @@ pub struct VindexManifest {
     pub dtype: StorageDtype,
 
     /// Quant scheme for the FFN weight files. `None` = float storage
-    /// (controlled by `dtype`); `Q4K` = Q4_K/Q6_K blocks in
-    /// `interleaved_kquant.bin` / `attn_weights_q4k.bin`.
+    /// (controlled by `dtype`); `Q4K` (alias `Kquant`) = Q4_K/Q6_K
+    /// blocks in `interleaved_kquant.bin` / `attn_weights_kquant.bin`
+    /// (writers emit these new names; readers also accept the legacy
+    /// `interleaved_q4k.bin` / `attn_weights_q4k.bin`).
     pub quant: QuantFormat,
 
     /// Per-layer offset table. Each entry uses either single-file or
@@ -362,7 +364,7 @@ mod tests {
 
     fn sample_manifest() -> VindexManifest {
         let mut checksums = BTreeMap::new();
-        checksums.insert("interleaved_q4k.bin".into(), "a".repeat(64));
+        checksums.insert("interleaved_kquant.bin".into(), "a".repeat(64));
         VindexManifest {
             vindex_spec_version: VINDEX_SPEC_VERSION,
             version: 2,
@@ -389,7 +391,7 @@ mod tests {
             layers: vec![LayerEntry {
                 layer: 0,
                 num_features: 10240,
-                file: Some("interleaved_q4k.bin".into()),
+                file: Some("interleaved_kquant.bin".into()),
                 offset: Some(0),
                 length: Some(52_428_800),
                 shards: None,

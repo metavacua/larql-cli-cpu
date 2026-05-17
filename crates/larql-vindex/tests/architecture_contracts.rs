@@ -4,7 +4,9 @@ use larql_vindex::format::filenames::{
     ATTN_WEIGHTS_BIN, ATTN_WEIGHTS_KQUANT_BIN, INDEX_JSON, INTERLEAVED_KQUANT_BIN,
     LEGACY_ATTN_WEIGHTS_Q4K_BIN, LEGACY_INTERLEAVED_Q4K_BIN, WEIGHT_MANIFEST_JSON,
 };
-use larql_vindex::format::weights::{write_model_weights, write_model_weights_kquant, WeightSource};
+use larql_vindex::format::weights::{
+    write_model_weights, write_model_weights_kquant, WeightSource,
+};
 use larql_vindex::IndexBuildCallbacks;
 use tempfile::tempdir;
 

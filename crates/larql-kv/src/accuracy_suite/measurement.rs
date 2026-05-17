@@ -521,4 +521,73 @@ mod tests {
         assert!(s.contains("Standard KV"));
         assert!(s.contains("100.0%"));
     }
+
+    /// `format_accuracy_summary` over a mixed batch of results — drives
+    /// the kl mean (lines 329-338) and needles formatter (340-353) paths
+    /// that the single-result tests skip.
+    #[test]
+    fn format_accuracy_summary_renders_kl_and_needle_columns() {
+        let mut kl_result = AccuracyResult::token_match("MarkovRS", "match", "fact", false);
+        // Finite KL → exercises lines 329-337 (mean computation).
+        kl_result.kl_divergence = 0.25;
+        let needle_hit = AccuracyResult::needle("MarkovRS", "n0", "haystack", true, true);
+        let needle_miss = AccuracyResult::needle("MarkovRS", "n1", "haystack", false, false);
+        let s = format_accuracy_summary(&[kl_result, needle_hit, needle_miss]);
+        assert!(s.contains("MarkovRS"));
+        // Mean KL ≈ 0.25 — only the kl_result contributes (the needle
+        // results have NaN kl filtered out).
+        assert!(s.contains("0.25"));
+        // Needles 1/2 → one of two found.
+        assert!(s.contains("1/2"), "rendered:\n{s}");
+    }
+
+    /// `format_accuracy_summary` with results that have only NaN KL — the
+    /// `kl_values.is_empty()` branch (line 335) fires.
+    #[test]
+    fn format_accuracy_summary_handles_all_nan_kl() {
+        let r = AccuracyResult::needle("oracle", "n", "haystack", true, false);
+        let s = format_accuracy_summary(&[r]);
+        assert!(s.contains("oracle"));
+        // No finite KL → "NaN" rendered in the mean column.
+        assert!(s.contains("NaN") || s.contains("nan"));
+    }
+
+    /// `generate_haystack` builds a needle-in-haystack prompt with the
+    /// needle embedded near the requested position. Drives lines 190-210.
+    #[test]
+    fn generate_haystack_places_needle_in_context() {
+        let (context, needle) = generate_haystack(200, 30, "MAGIC_TOKEN");
+        assert_eq!(needle, "MAGIC_TOKEN");
+        assert!(context.contains("MAGIC_TOKEN"));
+        // Filler should appear both before and after the needle.
+        let idx = context.find("MAGIC_TOKEN").unwrap();
+        assert!(idx > 0, "needle should not be at position 0");
+        assert!(context[idx..].len() > "MAGIC_TOKEN".len() + 1);
+    }
+
+    /// `build_retention_conversation` produces facts (declarative) +
+    /// queries (interrogative). Drives lines 213-285.
+    #[test]
+    fn build_retention_conversation_produces_facts_and_queries() {
+        let turns = build_retention_conversation(15);
+        assert!(!turns.is_empty());
+        assert!(turns.len() <= 15);
+        // At least one declarative fact and at least one query.
+        let facts = turns.iter().filter(|t| !t.is_query).count();
+        let queries = turns.iter().filter(|t| t.is_query).count();
+        assert!(facts > 0, "expected at least one fact turn");
+        assert!(queries > 0, "expected at least one query turn");
+        // Every query carries an expected_fact for scoring.
+        for t in turns.iter().filter(|t| t.is_query) {
+            assert!(t.expected_fact.is_some());
+        }
+    }
+
+    /// Very small `num_turns` exercises the `turns.len() < num_turns` cap
+    /// in the query-emission loop (line 272).
+    #[test]
+    fn build_retention_conversation_caps_total_turns() {
+        let turns = build_retention_conversation(4);
+        assert!(turns.len() <= 4);
+    }
 }

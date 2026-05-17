@@ -400,6 +400,133 @@ impl KvEngine for UnlimitedContextEngine {
         self.process_q4k(weights, index, &[token_id], backend)?;
         self.last_hidden.clone()
     }
+
+    // ── Executor-aware migration (Phase 2 of engine-state-vs-execution spec) ──
+    //
+    // Drive the per-token layer loop through a caller-supplied `LayerExecutor`
+    // and honor the caller-supplied `FfnBackend`. The legacy `*_quant` methods
+    // construct their own `WalkFfn` and ignore the FFN parameter; remote-FFN
+    // deployments (`larql bench --ffn http://shard:8080`) need this path so
+    // the engine actually dispatches through the supplied backend.
+    //
+    // Window-close semantics (checkpoint + archive at window boundaries) are
+    // identical to `process_q4k` / `extend_current_q4k` — the executor only
+    // owns per-layer compute; window state is engine state.
+    fn prefill_quant_via_executor(
+        &mut self,
+        weights: &mut ModelWeights,
+        executor: &dyn larql_inference::layer_executor::LayerExecutor,
+        ffn: &dyn FfnBackend,
+        index: &VectorIndex,
+        token_ids: &[u32],
+    ) -> Option<Array2<f32>> {
+        use larql_inference::layer_executor::ExecutorDispatchKind;
+        // Spec §3.4: this engine's state policy (windowed checkpoints) is
+        // expressible against per-layer dispatch only. Transparent degrade
+        // on fused executors until the Phase 3 refusal contract lands.
+        if matches!(executor.dispatch_kind(), ExecutorDispatchKind::Fused) {
+            return self.prefill_quant(weights, ffn, index, token_ids, executor.backend());
+        }
+        ensure_attn_tensors_dequantised(weights, index);
+        self.process_via_executor(weights, executor, ffn, token_ids)?;
+        self.last_hidden.clone()
+    }
+
+    fn decode_step_quant_via_executor(
+        &mut self,
+        weights: &mut ModelWeights,
+        executor: &dyn larql_inference::layer_executor::LayerExecutor,
+        ffn: &dyn FfnBackend,
+        index: &VectorIndex,
+        token_id: u32,
+    ) -> Option<Array2<f32>> {
+        use larql_inference::layer_executor::ExecutorDispatchKind;
+        if matches!(executor.dispatch_kind(), ExecutorDispatchKind::Fused) {
+            return self.decode_step_quant(weights, ffn, index, token_id, executor.backend());
+        }
+        ensure_attn_tensors_dequantised(weights, index);
+        self.process_via_executor(weights, executor, ffn, &[token_id])?;
+        self.last_hidden.clone()
+    }
+}
+
+// ── Executor-driven window extension ─────────────────────────────────────────
+
+impl UnlimitedContextEngine {
+    /// Executor-aware analogue of `process_q4k`: feeds tokens into the
+    /// current window, auto-closes on fill, drives per-layer compute
+    /// through `executor` instead of constructing a local `WalkFfn`.
+    fn process_via_executor(
+        &mut self,
+        weights: &ModelWeights,
+        executor: &dyn larql_inference::layer_executor::LayerExecutor,
+        ffn: &dyn FfnBackend,
+        tokens: &[u32],
+    ) -> Option<()> {
+        let mut remaining = tokens;
+        while !remaining.is_empty() {
+            let free = self.window_size - self.current_window_tokens.len();
+            let take = remaining.len().min(free);
+            let (chunk, rest) = remaining.split_at(take);
+            self.extend_current_via_executor(weights, executor, ffn, chunk)?;
+            remaining = rest;
+            if self.current_window_tokens.len() >= self.window_size {
+                self.close_window();
+            }
+        }
+        Some(())
+    }
+
+    fn extend_current_via_executor(
+        &mut self,
+        weights: &ModelWeights,
+        executor: &dyn larql_inference::layer_executor::LayerExecutor,
+        ffn: &dyn FfnBackend,
+        chunk: &[u32],
+    ) -> Option<()> {
+        use larql_inference::forward::embed_tokens_pub;
+        if chunk.is_empty() {
+            return Some(());
+        }
+
+        let mut kv_cache: Vec<SharedKV> = if self.current_window_tokens.is_empty() {
+            if self.current_window_id > 0 && self.checkpoints.contains(self.current_window_id - 1) {
+                let (ckpt, _) = self.checkpoints.load(self.current_window_id - 1)?;
+                ckpt
+            } else {
+                super::extend::empty_prior(weights)
+            }
+        } else {
+            self.current_window_kv
+                .take()
+                .unwrap_or_else(|| super::extend::empty_prior(weights))
+        };
+
+        let num_layers = weights.num_layers;
+        if kv_cache.len() != num_layers {
+            return None;
+        }
+        let abs_start = self.abs_offset + self.current_window_tokens.len();
+        let mut last_hidden: Option<Array2<f32>> = None;
+
+        for (i, &token_id) in chunk.iter().enumerate() {
+            let abs_position = abs_start + i;
+            let mut h = embed_tokens_pub(weights, &[token_id]);
+
+            for (layer, kv_slot) in kv_cache.iter_mut().enumerate() {
+                let (h_out, new_kv) =
+                    executor.run_decode_layer(weights, layer, &h, kv_slot, abs_position, ffn)?;
+                h = h_out;
+                *kv_slot = new_kv;
+            }
+            last_hidden = Some(h);
+        }
+
+        self.last_hidden = last_hidden;
+        self.current_window_kv = Some(kv_cache);
+        self.current_window_tokens.extend_from_slice(chunk);
+        Some(())
+    }
 }
 
 // ─── Q4K / Metal helper fns ───────────────────────────────────────────────────
@@ -724,6 +851,128 @@ mod tests {
         assert!(
             abs_end < 4,
             "abs_end {abs_end} should be within the prefill"
+        );
+    }
+
+    // ── Phase 2: executor-driven path ─────────────────────────────────────
+
+    #[test]
+    fn prefill_quant_via_executor_runs_through_local_walk() {
+        use larql_inference::ffn::NullFfn;
+        use larql_inference::layer_executor::LocalWalkExecutor;
+        use larql_inference::test_utils::make_test_weights;
+        let mut weights = make_test_weights();
+        let index = larql_inference::test_utils::make_test_vindex(&weights);
+        let backend = larql_compute::cpu_backend();
+        let executor = LocalWalkExecutor::new(&*backend);
+        let ffn = NullFfn;
+        let mut engine = UnlimitedContextEngine::new(512);
+        let h = engine
+            .prefill_quant_via_executor(&mut weights, &executor, &ffn, &index, &[0u32, 1, 2])
+            .expect("executor prefill");
+        assert_eq!(h.shape(), &[1, weights.hidden_size]);
+        assert!(engine.memory_bytes() > 0);
+    }
+
+    #[test]
+    fn decode_step_quant_via_executor_extends_state() {
+        use larql_inference::ffn::NullFfn;
+        use larql_inference::layer_executor::LocalWalkExecutor;
+        use larql_inference::test_utils::make_test_weights;
+        let mut weights = make_test_weights();
+        let index = larql_inference::test_utils::make_test_vindex(&weights);
+        let backend = larql_compute::cpu_backend();
+        let executor = LocalWalkExecutor::new(&*backend);
+        let ffn = NullFfn;
+        let mut engine = UnlimitedContextEngine::new(512);
+        engine
+            .prefill_quant_via_executor(&mut weights, &executor, &ffn, &index, &[0u32, 1])
+            .expect("prefill");
+        let h = engine
+            .decode_step_quant_via_executor(&mut weights, &executor, &ffn, &index, 2)
+            .expect("decode");
+        assert_eq!(h.shape(), &[1, weights.hidden_size]);
+    }
+
+    /// Counting FFN that records every `forward` call. Proves the executor
+    /// path actually dispatches through the caller's `FfnBackend` instead
+    /// of constructing a local `WalkFfn` (the legacy coupling the migration
+    /// removes).
+    struct CountingFfn {
+        calls: std::sync::atomic::AtomicUsize,
+        hidden: usize,
+    }
+    impl larql_inference::ffn::FfnBackend for CountingFfn {
+        fn forward(&self, _layer: usize, x: &ndarray::Array2<f32>) -> ndarray::Array2<f32> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            ndarray::Array2::zeros((x.shape()[0], self.hidden))
+        }
+        fn forward_with_activation(
+            &self,
+            layer: usize,
+            x: &ndarray::Array2<f32>,
+        ) -> (ndarray::Array2<f32>, ndarray::Array2<f32>) {
+            let out = self.forward(layer, x);
+            (out.clone(), out)
+        }
+        fn name(&self) -> &str {
+            "counting"
+        }
+    }
+
+    #[test]
+    fn executor_path_honors_ffn_parameter() {
+        use larql_inference::layer_executor::LocalWalkExecutor;
+        use larql_inference::test_utils::make_test_weights;
+        let mut weights = make_test_weights();
+        let index = larql_inference::test_utils::make_test_vindex(&weights);
+        let backend = larql_compute::cpu_backend();
+        let executor = LocalWalkExecutor::new(&*backend);
+
+        let ffn = CountingFfn {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            hidden: weights.hidden_size,
+        };
+        let mut engine = UnlimitedContextEngine::new(512);
+        engine
+            .prefill_quant_via_executor(&mut weights, &executor, &ffn, &index, &[0u32, 1, 2])
+            .expect("prefill via executor");
+
+        let call_count = ffn.calls.load(std::sync::atomic::Ordering::SeqCst);
+        // 3 tokens × num_layers — one FFN dispatch per (token, layer)
+        // because the engine's per-token loop runs every layer through
+        // `run_decode_layer`, which in turn invokes the caller's FFN.
+        let expected = 3 * weights.num_layers;
+        assert_eq!(
+            call_count, expected,
+            "executor path should dispatch FFN through the supplied backend \
+             once per (token, layer); got {call_count} for {expected} \
+             expected — engine is likely constructing its own FFN internally",
+        );
+    }
+
+    #[test]
+    fn prefill_quant_via_executor_with_small_window_archives() {
+        use larql_inference::ffn::NullFfn;
+        use larql_inference::layer_executor::LocalWalkExecutor;
+        use larql_inference::test_utils::make_test_weights;
+        let mut weights = make_test_weights();
+        let index = larql_inference::test_utils::make_test_vindex(&weights);
+        let backend = larql_compute::cpu_backend();
+        let executor = LocalWalkExecutor::new(&*backend);
+        let ffn = NullFfn;
+        // window=2, 4 tokens → triggers two window-close cycles via
+        // `process_via_executor`. Exercises the prior-checkpoint-load
+        // branch in `extend_current_via_executor`.
+        let mut engine = UnlimitedContextEngine::new(2);
+        engine
+            .prefill_quant_via_executor(&mut weights, &executor, &ffn, &index, &[0u32, 1, 2, 3])
+            .expect("prefill 4 tokens through executor");
+        let stats = engine.stats(&weights);
+        assert!(
+            stats.archived_windows >= 1,
+            "expected at least 1 archived window, got {}",
+            stats.archived_windows
         );
     }
 }

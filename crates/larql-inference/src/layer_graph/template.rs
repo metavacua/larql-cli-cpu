@@ -582,18 +582,31 @@ mod tests {
         );
     }
 
-    /// With an interleaved-f32 vindex populated, the guided walk path
-    /// reaches the inner per-feature loop (lines 240-269): `up_layer_matrix`
-    /// + `down_layer_matrix` + `gate_scores_batch` all return Some, so the
-    ///   `gate_scores` accumulation runs across the supplied universe features
-    ///   for every position.
+    /// With both interleaved-f32 AND feature-major payloads attached to
+    /// the vindex, `up_layer_matrix` / `down_layer_matrix` /
+    /// `gate_scores_batch` all return Some, so `guided_walk_ffn` runs the
+    /// inner per-feature loop (lines 240-269) instead of bailing at the
+    /// up/down early-return guards.
+    ///
+    /// `InterleavedF32TestFixtures` alone only populates `interleaved_*`
+    /// storage, which serves `interleaved_up` / `interleaved_down` —
+    /// **not** `up_layer_matrix` (that one reads `up_features`).
+    /// So we also attach the feature-major payload before constructing
+    /// the GuidedWalkLayerGraph.
     #[test]
     fn guided_walk_with_interleaved_f32_runs_inner_accumulation_loop() {
-        use crate::test_utils::InterleavedF32TestFixtures;
-        let fx = InterleavedF32TestFixtures::build();
+        use crate::test_utils::{
+            attach_feature_major_f32_to_test_vindex, attach_interleaved_f32_to_test_vindex,
+            make_test_vindex, make_test_weights,
+        };
+        let w = make_test_weights();
+        let mut index = make_test_vindex(&w);
+        attach_interleaved_f32_to_test_vindex(&w, &mut index);
+        attach_feature_major_f32_to_test_vindex(&w, &mut index);
+
         // Supply a non-empty feature universe so the inner loop iterates.
         let mut features = std::collections::HashMap::new();
-        for layer in 0..fx.weights.num_layers {
+        for layer in 0..w.num_layers {
             // intermediate_size is small in the synthetic fixture, pick a few.
             features.insert(layer, vec![0usize, 3, 7]);
         }
@@ -602,16 +615,14 @@ mod tests {
             features,
         };
         let g = GuidedWalkLayerGraph {
-            weights: &fx.weights,
+            weights: &w,
             universe: &universe,
-            index: &fx.index,
+            index: &index,
         };
-        let h = input(2, fx.weights.hidden_size);
-        for layer in 0..fx.weights.num_layers {
-            let out = g
-                .forward_layer(&fx.weights, &h, layer)
-                .expect("layer must run");
-            assert_eq!(out.residual.shape(), &[2, fx.weights.hidden_size]);
+        let h = input(2, w.hidden_size);
+        for layer in 0..w.num_layers {
+            let out = g.forward_layer(&w, &h, layer).expect("layer must run");
+            assert_eq!(out.residual.shape(), &[2, w.hidden_size]);
             assert!(
                 out.residual.iter().all(|v| v.is_finite()),
                 "layer {layer} guided walk residual must be finite"

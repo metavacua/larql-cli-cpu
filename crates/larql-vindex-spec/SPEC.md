@@ -283,7 +283,9 @@ this crate; the validator's CI gate is the canary.
 - Streaming / partial-fetch protocols beyond what mmap + LFS sparse
   reads already give you.
 - bf16 storage. v1 covers `f32` and `f16` only.
-- Quant schemes beyond `q4k`. Adding one is a minor bump.
+- Quant schemes beyond the Q4_K / Q6_K family the `q4k` / `kquant`
+  tags both describe. Adding one (e.g. Q5_K, Q8_K, FP4) is a minor
+  bump.
 
 ## 15. Open questions (deferred)
 

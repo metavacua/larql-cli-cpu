@@ -269,7 +269,9 @@ mod tests {
         let mut index = VectorIndex::empty(1, hidden);
         assert_eq!(index.vocab_size, 0);
 
-        index.load_lm_head_kquant(tmp.path()).expect("load lm_head_q4");
+        index
+            .load_lm_head_kquant(tmp.path())
+            .expect("load lm_head_q4");
 
         assert_eq!(
             index.vocab_size, vocab,

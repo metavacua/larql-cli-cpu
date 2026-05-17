@@ -434,7 +434,9 @@ mod tests {
             other => panic!("expected Apollo{{layer=25,top_k=12}}, got {other:?}"),
         }
         match EngineKind::from_name("markov-rs:unknown=999") {
-            Some(EngineKind::MarkovResidual { window_size: None, .. }) => {}
+            Some(EngineKind::MarkovResidual {
+                window_size: None, ..
+            }) => {}
             other => panic!("expected MarkovResidual{{window=None}}, got {other:?}"),
         }
     }

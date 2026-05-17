@@ -742,6 +742,106 @@ mod dispatch_tests {
         assert_eq!(out.shape(), &[1, weights.hidden_size]);
     }
 
+    /// Variant of `MockGateIndex` that yields a `FeatureMeta` for every
+    /// `(layer, feature)` query. This is what `take_trace` needs to
+    /// promote a residual into a populated `WalkHit` — without it, the
+    /// `filter_map` collapses to empty (`feature_meta` returns `None`).
+    struct MockGateIndexWithMeta {
+        n_features: usize,
+    }
+
+    impl GateLookup for MockGateIndexWithMeta {
+        fn gate_knn(
+            &self,
+            _layer: usize,
+            _residual: &Array1<f32>,
+            top_k: usize,
+        ) -> Vec<(usize, f32)> {
+            (0..top_k.min(self.n_features))
+                .map(|i| (i, 1.0 / (i as f32 + 1.0)))
+                .collect()
+        }
+        fn feature_meta(&self, _layer: usize, feature: usize) -> Option<FeatureMeta> {
+            Some(FeatureMeta {
+                top_token: format!("tok{feature}"),
+                top_token_id: feature as u32,
+                c_score: 0.9,
+                top_k: Vec::new(),
+            })
+        }
+        fn num_features(&self, _layer: usize) -> usize {
+            self.n_features
+        }
+    }
+
+    impl PatchOverrides for MockGateIndexWithMeta {}
+    impl NativeFfnAccess for MockGateIndexWithMeta {}
+    impl QuantizedFfnAccess for MockGateIndexWithMeta {}
+    impl Fp4FfnAccess for MockGateIndexWithMeta {}
+
+    /// When `feature_meta` returns `Some`, `take_trace` builds a populated
+    /// `WalkHit` per (layer, feature) — covering the `Some(WalkHit { .. })`
+    /// arm of the `filter_map` (lines 235-238).
+    #[test]
+    fn walk_ffn_take_trace_populates_walk_hits_when_meta_present() {
+        let weights = shared_weights();
+        let idx = MockGateIndexWithMeta {
+            n_features: weights.intermediate_size,
+        };
+        let ffn = WalkFfn::new_with_trace(weights, &idx, 3);
+        let x = input(1, weights.hidden_size);
+        ffn.forward(0, &x);
+        let trace = ffn.take_trace();
+        assert_eq!(trace.layers.len(), 1);
+        let (layer, hits) = &trace.layers[0];
+        assert_eq!(*layer, 0);
+        assert!(
+            !hits.is_empty(),
+            "expected WalkHits when feature_meta returns Some"
+        );
+        for hit in hits {
+            assert_eq!(hit.layer, 0);
+            assert!(hit.gate_score.is_finite());
+            assert!(hit.meta.top_token.starts_with("tok"));
+        }
+    }
+
+    /// `walk_trace_env_enabled` caches the env-var lookup in a thread-local.
+    /// Spawn a fresh thread so the cell starts empty, set `LARQL_WALK_TRACE=1`
+    /// in that thread, then drive `forward` — `trace_path` reads the cache
+    /// (first call populates it as `Some(true)`) and emits to stderr
+    /// (line 145-147).
+    #[test]
+    fn walk_ffn_trace_path_honours_env_var_in_fresh_thread() {
+        let handle = std::thread::spawn(|| {
+            // SAFETY: thread-isolated env var. The whole point of running
+            // in a dedicated thread is that no other test sees this var
+            // mid-flight — and we wipe it before returning. Set + remove
+            // are bracketed within a single thread's lifetime.
+            unsafe {
+                std::env::set_var("LARQL_WALK_TRACE", "1");
+            }
+            let weights = make_test_weights();
+            let idx = MockGateIndex {
+                n_features: weights.intermediate_size,
+            };
+            let ffn = WalkFfn::new_unlimited(&weights, &idx);
+            let x = Array2::from_shape_vec(
+                (1, weights.hidden_size),
+                (0..weights.hidden_size)
+                    .map(|i| (i as f32 + 1.0) * 0.02)
+                    .collect(),
+            )
+            .unwrap();
+            // Drives trace_path, which checks walk_trace_env_enabled.
+            ffn.forward(0, &x);
+            unsafe {
+                std::env::remove_var("LARQL_WALK_TRACE");
+            }
+        });
+        handle.join().expect("env-var thread panicked");
+    }
+
     /// Forward against the Q4K test fixture routes through the native
     /// kquant path (priority 4 in the routing ladder, line 340-343),
     /// which fires when the vindex has interleaved_kquant data AND the

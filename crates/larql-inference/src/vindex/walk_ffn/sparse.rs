@@ -385,4 +385,45 @@ mod tests {
         let result = ffn.walk_ffn_sparse(0, &x(1, weights.hidden_size));
         assert!(result.is_none());
     }
+
+    /// Sparse walk against a StarCoder2-shaped arch (Standard FFN +
+    /// up_bias) on a feature-major f32 fixture drives the
+    /// `up_bias_for_layer = Some(...)` branch (lines 81-86) AND the
+    /// non-gated activation arm (lines 254-266).
+    #[test]
+    fn walk_ffn_sparse_non_gated_arch_uses_up_bias() {
+        use crate::test_utils::{
+            attach_feature_major_f32_to_test_vindex, make_starcoder2_test_weights,
+        };
+        let weights = make_starcoder2_test_weights();
+        let mut index = make_test_vindex(&weights);
+        attach_feature_major_f32_to_test_vindex(&weights, &mut index);
+        let cfg = WalkFfnConfig::sparse(weights.num_layers, 4);
+        let ffn = WalkFfn::from_config(&weights, &index, cfg);
+        let out = ffn
+            .walk_ffn_sparse(0, &x(1, weights.hidden_size))
+            .expect("starcoder2 + feature-major fixture should produce output");
+        assert_eq!(out.0.shape(), &[1, weights.hidden_size]);
+        assert!(out.0.iter().all(|v| v.is_finite()));
+    }
+
+    /// Sparse walk in full-K mode against the Q4K fixture (no native
+    /// up/down) drives the `kquant_matmul_transb` arms inside the
+    /// full-K gemv fast path (lines 99-131): up_scores via Q4K matmul,
+    /// then down via Q4K matmul again.
+    #[test]
+    fn walk_ffn_sparse_full_k_routes_through_kquant_matmul_on_q4k_fixture() {
+        let weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let cfg = WalkFfnConfig::dense(weights.num_layers);
+        let backend = larql_compute::cpu_backend();
+        let ffn = WalkFfn::from_config(&weights, &index, cfg).with_backend(&*backend);
+        let result = ffn.walk_ffn_sparse(0, &x(1, weights.hidden_size));
+        // Full-K + Q4K — either takes the fast path (Some) or falls through
+        // to the serial loop (also Some). Just exercise the wiring.
+        if let Some((out, _activation)) = result {
+            assert_eq!(out.shape(), &[1, weights.hidden_size]);
+            assert!(out.iter().all(|v| v.is_finite()));
+        }
+    }
 }

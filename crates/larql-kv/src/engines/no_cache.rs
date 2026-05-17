@@ -134,6 +134,41 @@ impl KvEngine for NoCacheEngine {
         self.decode_step(weights, &walk_ffn, token_id)
     }
 
+    // ── Phase 2 migration: executor-driven path ──────────────────────────
+    //
+    // NoCacheEngine re-runs the full forward pass per step (no K/V cache).
+    // Its `prefill` / `decode_step` already honor the caller's FFN backend
+    // properly; the legacy `prefill_quant` only substituted a WalkFfn
+    // because callers passed `NullFfn`. The executor-driven path skips
+    // the substitution and uses the caller's FFN directly.
+
+    fn prefill_quant_via_executor(
+        &mut self,
+        weights: &mut ModelWeights,
+        _executor: &dyn larql_inference::layer_executor::LayerExecutor,
+        ffn: &dyn FfnBackend,
+        index: &larql_inference::larql_vindex::VectorIndex,
+        token_ids: &[u32],
+    ) -> Option<Array2<f32>> {
+        // No K/V cache so we don't need to drive the per-layer loop
+        // through the executor; the existing prefill (which honors the
+        // FFN parameter) is the right path. Just dequant first.
+        larql_inference::vindex::ensure_attn_tensors_dequantised(weights, index);
+        self.prefill(weights, ffn, token_ids)
+    }
+
+    fn decode_step_quant_via_executor(
+        &mut self,
+        weights: &mut ModelWeights,
+        _executor: &dyn larql_inference::layer_executor::LayerExecutor,
+        ffn: &dyn FfnBackend,
+        index: &larql_inference::larql_vindex::VectorIndex,
+        token_id: u32,
+    ) -> Option<Array2<f32>> {
+        larql_inference::vindex::ensure_attn_tensors_dequantised(weights, index);
+        self.decode_step(weights, ffn, token_id)
+    }
+
     fn memory_bytes(&self) -> usize {
         // Only persistent state is the token-id list.
         self.tokens.len() * std::mem::size_of::<u32>()
@@ -310,5 +345,55 @@ mod tests {
             engine.memory_bytes() > mem_before,
             "no-cache memory should grow with each new token"
         );
+    }
+
+    /// `Default::default` is wired through `Self::new()` — covers the
+    /// `Default for NoCacheEngine` impl body (lines 40-42).
+    #[test]
+    fn default_returns_empty_engine() {
+        let engine = NoCacheEngine::default();
+        assert_eq!(engine.name(), "no-cache");
+        assert_eq!(engine.memory_bytes(), 0);
+        assert_eq!(engine.window_tokens(), 0);
+    }
+
+    // ── Phase 2 executor-driven path ──────────────────────────────────────
+
+    #[test]
+    fn prefill_quant_via_executor_dequants_and_runs_prefill() {
+        use larql_inference::ffn::NullFfn;
+        use larql_inference::layer_executor::LocalWalkExecutor;
+        let mut weights = make_test_weights();
+        let index = larql_inference::test_utils::make_test_vindex(&weights);
+        let backend = larql_compute::cpu_backend();
+        let executor = LocalWalkExecutor::new(&*backend);
+        let ffn = NullFfn;
+        let mut engine = NoCacheEngine::new();
+        let h = engine
+            .prefill_quant_via_executor(&mut weights, &executor, &ffn, &index, &[0u32, 1])
+            .expect("prefill via executor");
+        assert_eq!(h.shape(), &[1, weights.hidden_size]);
+        assert_eq!(engine.window_tokens(), 2);
+    }
+
+    #[test]
+    fn decode_step_quant_via_executor_appends_token() {
+        use larql_inference::ffn::NullFfn;
+        use larql_inference::layer_executor::LocalWalkExecutor;
+        let mut weights = make_test_weights();
+        let index = larql_inference::test_utils::make_test_vindex(&weights);
+        let backend = larql_compute::cpu_backend();
+        let executor = LocalWalkExecutor::new(&*backend);
+        let ffn = NullFfn;
+        let mut engine = NoCacheEngine::new();
+        engine
+            .prefill_quant_via_executor(&mut weights, &executor, &ffn, &index, &[0u32])
+            .expect("prefill");
+        let mem_before = engine.memory_bytes();
+        let h = engine
+            .decode_step_quant_via_executor(&mut weights, &executor, &ffn, &index, 1)
+            .expect("decode via executor");
+        assert_eq!(h.shape(), &[1, weights.hidden_size]);
+        assert!(engine.memory_bytes() > mem_before);
     }
 }

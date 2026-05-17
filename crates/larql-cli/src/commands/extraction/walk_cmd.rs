@@ -529,13 +529,34 @@ fn run_predict_q4k(
     }
 
     let result = if args.metal {
-        let backend = larql_compute::default_backend();
+        // `larql_compute::default_backend()` always returns CPU since
+        // the GPU-backend extraction (see its doc-comment). GPU
+        // selection is the caller's responsibility — mirror what
+        // `bench/local_runtime.rs::build_runtime` does and reach for
+        // `MetalBackend::new()` directly when `--metal` is set, so the
+        // fused Q4 prefill + KV-cached decode kernels actually fire
+        // here. The previous `default_backend()` call silently fell
+        // through to CPU's `generate_via_cpu_q4k` fallback which
+        // produces degenerate output ("ikea ikea ikea…"), masquerading
+        // as a Granite/Gemma forward-path regression.
+        let backend: Box<dyn larql_compute::ComputeBackend> = {
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            {
+                let b = larql_compute_metal::MetalBackend::new().ok_or(
+                    "Metal backend unavailable — rebuild with `--features metal` \
+                     on an M-series Mac.",
+                )?;
+                Box::new(b)
+            }
+            #[cfg(not(all(feature = "metal", target_os = "macos")))]
+            {
+                return Err("`--metal` requires the `metal` feature on macOS".into());
+            }
+        };
         if !backend.supports_quant(::larql_compute::QuantFormat::Q4_K) {
-            return Err(
-                "Metal backend unavailable — rebuild with `--features metal` \
-                and run on an M-series Mac."
-                    .into(),
-            );
+            return Err("Metal backend doesn't report Q4_K support — \
+                 check `larql diag <vindex>` for backend capabilities."
+                .into());
         }
         vlog!(
             verbose,

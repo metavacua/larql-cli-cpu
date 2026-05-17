@@ -98,6 +98,23 @@ pub struct BenchArgs {
     #[arg(long)]
     pub profile: bool,
 
+    /// Route Q4K engine benches through the new `LayerExecutor` surface
+    /// (`prefill_quant_via_executor` / `decode_step_quant_via_executor`)
+    /// instead of the legacy `prefill_quant` / `decode_step_quant` path.
+    ///
+    /// For migrated engines (`markov-rs`, `markov-rs-codec`,
+    /// `boundary-per-layer`) this forces the per-layer walk path —
+    /// equivalent to setting `force_walk=true` in the engine spec but
+    /// via the executor surface. Honors the FFN parameter properly
+    /// (the legacy path ignores it). For unmigrated engines this
+    /// transparently falls through to the legacy path via the trait's
+    /// default impl, so the flag is safe to set globally.
+    ///
+    /// Off by default (legacy path keeps the Metal fast path on
+    /// Apple Silicon for production benches).
+    #[arg(long)]
+    pub via_executor: bool,
+
     /// Comma-separated wire formats to compare end-to-end. Requires --ffn.
     /// Supported: f32, f16, i8.
     /// Example: --wire f32,f16,i8
