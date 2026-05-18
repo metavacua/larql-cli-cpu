@@ -36,5 +36,5 @@ pub use kquant_forward::{
 };
 pub use l1_cache::FfnL1Cache;
 pub use loader::{open_inference_vindex, ENV_VINDEX_PATH};
-pub use walk_config::WalkFfnConfig;
-pub use walk_ffn::WalkFfn;
+pub use walk_config::{FeatureSelector, WalkFfnConfig};
+pub use walk_ffn::{PhaseTimingsHandle, WalkFfn};

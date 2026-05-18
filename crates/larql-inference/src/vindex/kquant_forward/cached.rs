@@ -125,7 +125,8 @@ pub fn predict_kquant_prefill_with_state(
 
         // Snapshot pre-attention residual for this layer if engine wants it.
         if let Some(s) = state.as_deref_mut() {
-            s.h_in_per_layer.push(h.clone());
+            s.h_in_per_layer
+                .push(larql_compute::state_handle::CpuStateHandle::boxed(h.clone()));
         }
 
         // Attention with K/V capture. Backend stays None — we want the
@@ -142,8 +143,10 @@ pub fn predict_kquant_prefill_with_state(
 
         if let Some(s) = state.as_deref_mut() {
             // Prefill K/V for THIS layer = full seq_len × kv_dim.
-            s.k_new_per_layer.push(k_rope.clone());
-            s.v_new_per_layer.push(v_final.clone());
+            s.k_new_per_layer
+                .push(larql_compute::state_handle::CpuStateHandle::boxed(k_rope.clone()));
+            s.v_new_per_layer
+                .push(larql_compute::state_handle::CpuStateHandle::boxed(v_final.clone()));
         }
 
         let ffn = WeightFfn { weights };
@@ -914,7 +917,8 @@ pub fn predict_kquant_decode_step_direct_with_state(
 
     for layer in 0..num_layers {
         if let Some(s) = state.as_deref_mut() {
-            s.h_in_per_layer.push(h.clone());
+            s.h_in_per_layer
+                .push(larql_compute::state_handle::CpuStateHandle::boxed(h.clone()));
         }
         let kv_entry = cache[layer].as_ref();
         let (h_post_attn, new_kv) = attention_decode_step_native(
@@ -932,9 +936,13 @@ pub fn predict_kquant_decode_step_direct_with_state(
             // hot_kv, turbo_quant compressed) consume this row.
             let n = new_kv.0.shape()[0];
             s.k_new_per_layer
-                .push(new_kv.0.slice(s![n - 1..n, ..]).to_owned());
+                .push(larql_compute::state_handle::CpuStateHandle::boxed(
+                    new_kv.0.slice(s![n - 1..n, ..]).to_owned(),
+                ));
             s.v_new_per_layer
-                .push(new_kv.1.slice(s![n - 1..n, ..]).to_owned());
+                .push(larql_compute::state_handle::CpuStateHandle::boxed(
+                    new_kv.1.slice(s![n - 1..n, ..]).to_owned(),
+                ));
         }
         cache[layer] = Some(new_kv);
 

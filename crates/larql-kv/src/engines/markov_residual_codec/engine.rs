@@ -136,32 +136,59 @@ impl MarkovResidualCodecEngine {
         // See `markov_residual::engine` for the rationale.
         let prompt_len = token_ids.len();
         let initial_cap = window_capacity(prompt_len, self.window_size);
+        // W10 Phase A: consume each layer's handle into an owned
+        // Array2; CpuStateHandle moves without a copy.
         let stored: Vec<Array2<f32>> = state
             .h_in_per_layer
             .into_iter()
-            .map(|h_src| grow_capacity_2d(&h_src, prompt_len, initial_cap))
+            .map(|h| grow_capacity_2d(&h.into_array(), prompt_len, initial_cap))
             .collect();
         let hot_kv: Vec<larql_inference::attention::SharedKV> = state
             .k_new_per_layer
             .into_iter()
             .zip(state.v_new_per_layer)
-            .map(|(k_src, v_src)| {
+            .map(|(k, v)| {
                 (
-                    grow_capacity_2d(&k_src, prompt_len, initial_cap),
-                    grow_capacity_2d(&v_src, prompt_len, initial_cap),
+                    grow_capacity_2d(&k.into_array(), prompt_len, initial_cap),
+                    grow_capacity_2d(&v.into_array(), prompt_len, initial_cap),
                 )
             })
             .collect();
+        // W10 Phase B: when `LARQL_W10_HONLY=1`, drop the hot_kv
+        // shadow. Metal's kv cache becomes the K/V source of truth;
+        // markov_residual_codec treats hot K/V as derivative (the
+        // codec-encoded residuals are canonical, the cached K/V is
+        // derivable). See state-policy.md §2.2.
+        //
+        // W10 Phase C: when window_size is also None, no cold-tier
+        // eviction triggers and `rs.stored` is dead weight. Drop it;
+        // decode steps request None mask, skipping h_in capture too.
+        let drop_hot_kv_shadow = std::env::var("LARQL_W10_HONLY")
+            .ok()
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        let drop_stored_shadow = drop_hot_kv_shadow && self.window_size.is_none();
+        let stored = if drop_stored_shadow {
+            (0..num_layers)
+                .map(|_| ndarray::Array2::<f32>::zeros((0, hidden_size)))
+                .collect()
+        } else {
+            stored
+        };
         let mut rs = RsStoreCodec {
             stored,
             cold_encoded: None,
             cold_kv: None,
-            hot_kv: Some(hot_kv),
+            hot_kv: if drop_hot_kv_shadow {
+                None
+            } else {
+                Some(hot_kv)
+            },
             cold_abs_start: 0,
             next_position: prompt_len,
             max_window: self.window_size,
             codec: self.codec,
-            hot_len: prompt_len,
+            hot_len: if drop_stored_shadow { 0 } else { prompt_len },
         };
         // Clip on prefill — overflow encoded into the bf16 cold tier.
         let mut overflow_per_layer: Vec<ndarray::Array2<f32>> = Vec::with_capacity(num_layers);
@@ -204,30 +231,112 @@ impl MarkovResidualCodecEngine {
         let hidden_size = weights.hidden_size;
         let mut state = PerLayerDecodeState::with_capacity(num_layers);
         let handle = self.kv_handle.as_mut()?;
-        let hidden = self.backend.as_ref().coarse_decode_step_with_state(
+        // W10 Phase B/C: same mask selection as MarkovResidualEngine.
+        // None when both shadows dropped (windowless), HOnly when only
+        // hot_kv dropped, Full otherwise.
+        let env_on = std::env::var("LARQL_W10_HONLY")
+            .ok()
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        let drop_hot_kv = self
+            .store
+            .as_ref()
+            .map(|s| s.hot_kv.is_none())
+            .unwrap_or(false)
+            && env_on;
+        let drop_stored = self
+            .store
+            .as_ref()
+            .map(|s| s.stored.first().map(|a| a.shape()[0] == 0).unwrap_or(false))
+            .unwrap_or(false)
+            && env_on;
+        let mask = if drop_stored && drop_hot_kv {
+            larql_compute::StateDumpMask::None
+        } else if drop_hot_kv {
+            larql_compute::StateDumpMask::HOnly
+        } else {
+            larql_compute::StateDumpMask::Full
+        };
+        // W10 instrumentation: state_capture wraps the backend call.
+        let t_capture = std::time::Instant::now();
+        let hidden = self.backend.as_ref().coarse_decode_step_with_state_masked(
             weights,
             token_id,
             Some(index),
             handle,
             self.abs_position,
             Some(&mut state),
+            mask,
         )?;
-        if !state.is_complete_for(num_layers) {
+        if self.profiling {
+            self.profile.state_capture.record(t_capture);
+        }
+        if !state.is_complete_under(num_layers, mask) {
             self.kv_handle = None;
             return None;
         }
         let mut rs = self.store.take()?;
         // W8.2: append in-place into pre-allocated buffers; doubling
         // happens inside `append_row` only on cap overflow.
+        // W10 Phase A: consume handles via into_array() — zero-copy
+        // move on the CPU happy path.
+        // W10 Phase B: under HOnly the K/V handle vecs are empty;
+        // only h_in is consumed. Under None all are empty.
         let len = rs.hot_len;
-        for layer in 0..num_layers {
-            append_row(&mut rs.stored[layer], &state.h_in_per_layer[layer], len);
-            if let Some(hot_kv) = rs.hot_kv.as_mut() {
-                append_row(&mut hot_kv[layer].0, &state.k_new_per_layer[layer], len);
-                append_row(&mut hot_kv[layer].1, &state.v_new_per_layer[layer], len);
+        let h_handles = std::mem::take(&mut state.h_in_per_layer);
+        let k_handles = std::mem::take(&mut state.k_new_per_layer);
+        let v_handles = std::mem::take(&mut state.v_new_per_layer);
+        let did_append = !matches!(mask, larql_compute::StateDumpMask::None);
+        if matches!(mask, larql_compute::StateDumpMask::None) {
+            // hot_len deliberately stays 0; see markov_residual.
+            drop((h_handles, k_handles, v_handles));
+        } else if matches!(mask, larql_compute::StateDumpMask::HOnly) {
+            drop((k_handles, v_handles));
+            for (layer, h) in h_handles.into_iter().enumerate() {
+                let t_mat = std::time::Instant::now();
+                let h_arr = h.into_array();
+                if self.profiling {
+                    self.profile.state_materialise.record(t_mat);
+                }
+                let t_app = std::time::Instant::now();
+                append_row(&mut rs.stored[layer], &h_arr, len);
+                if self.profiling {
+                    self.profile.state_append.record(t_app);
+                }
+            }
+        } else {
+            for (layer, ((h, k), v)) in h_handles
+                .into_iter()
+                .zip(k_handles)
+                .zip(v_handles)
+                .enumerate()
+            {
+                let t_mat = std::time::Instant::now();
+                let h_arr = h.into_array();
+                let kv_arrs = if rs.hot_kv.is_some() {
+                    Some((k.into_array(), v.into_array()))
+                } else {
+                    None
+                };
+                if self.profiling {
+                    self.profile.state_materialise.record(t_mat);
+                }
+                let t_app = std::time::Instant::now();
+                append_row(&mut rs.stored[layer], &h_arr, len);
+                if let Some(hot_kv) = rs.hot_kv.as_mut() {
+                    if let Some((k_arr, v_arr)) = kv_arrs {
+                        append_row(&mut hot_kv[layer].0, &k_arr, len);
+                        append_row(&mut hot_kv[layer].1, &v_arr, len);
+                    }
+                }
+                if self.profiling {
+                    self.profile.state_append.record(t_app);
+                }
             }
         }
-        rs.hot_len = len + 1;
+        if did_append {
+            rs.hot_len = len + 1;
+        }
         // Clip + bf16-encode the overflow.
         let mut overflow_per_layer: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
         for layer in 0..num_layers {

@@ -744,7 +744,7 @@ The full surface is documented in `crates/larql-inference/ROADMAP.md` §
 
 | Platform | Compiles | GPU | BLAS |
 |----------|----------|-----|------|
-| macOS arm64 (M-series) | ✓ | Metal (`--features metal`) | Accelerate |
+| macOS arm64 (M-series) | ✓ | Metal (`--features gpu`) | Accelerate |
 | Linux arm64 / x86_64 | ✓ | — (CPU fallback) | OpenBLAS |
 | Windows arm64 / x86_64 | ✓ | — (CPU fallback) | OpenBLAS |
 
@@ -754,11 +754,11 @@ macOS gets Metal GPU acceleration. Linux and Windows run the same CPU path (BLAS
 
 ```bash
 cargo build --release                    # optimised build
-cargo build --release --features metal   # with Metal GPU backend (macOS only)
+cargo build --release --features gpu     # with GPU backend (Metal on macOS today; Vulkan/CUDA later)
 cargo test                               # all tests across all crates
 .venv/bin/python scripts/diagnose_models.py    # cross-engine correctness sweep — see below
 cargo test -p larql-inference            # inference engine tests (109 tests)
-cargo test -p larql-inference --features metal  # + Metal GPU tests (115 tests)
+cargo test -p larql-inference --features gpu    # + GPU tests (115 tests)
 cargo test -p larql-lql                  # LQL parser + executor tests (272 tests)
 cargo test -p larql-vindex               # vindex storage + patch tests (525 tests as of 2026-05-08)
 
@@ -776,8 +776,8 @@ make larql-vindex-coverage-html          # HTML report plus the same policy gate
 cargo run --release -p larql-inference --example attention_demo    # fused attention demo
 cargo run --release -p larql-inference --example mech_interp_demo  # capture / lens / ablate / steer / patch (synthetic — no vindex)
 cargo run --release -p larql-inference --example bench_attention   # attention benchmarks
-cargo run --release -p larql-inference --example backend_demo --features metal   # backend demo
-cargo run --release -p larql-inference --example bench_backend --features metal  # backend benchmarks
+cargo run --release -p larql-inference --example backend_demo --features gpu   # backend demo
+cargo run --release -p larql-inference --example bench_backend --features gpu  # backend benchmarks
 cargo run --release -p larql-inference --example bench_inference   # full inference benchmarks
 
 # Vindex tools (build once, enables mmap walk)

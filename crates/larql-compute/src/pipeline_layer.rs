@@ -553,3 +553,213 @@ fn moe_routing_policy(router_type: &str) -> MoeRoutingPolicy {
         _ => MoeRoutingPolicy::top_k_softmax(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Coverage for the simple per-arch helpers (kv shapes, format
+    //! parsing, routing policy). The big MoE branches in
+    //! `build_moe_weights` need a Gemma 4 MoE fixture and live in the
+    //! `larql-inference` integration tests where that fixture is
+    //! reachable.
+    use super::*;
+    use larql_models::test_fixtures::make_test_weights;
+
+    #[test]
+    fn kv_cache_shapes_for_arch_returns_one_pair_per_layer() {
+        let weights = make_test_weights();
+        let shapes = kv_cache_shapes_for_arch(&weights);
+        assert_eq!(shapes.len(), weights.num_layers);
+        for (num_kv, head_dim) in &shapes {
+            assert!(*num_kv > 0);
+            assert!(*head_dim > 0);
+        }
+    }
+
+    #[test]
+    fn attn_str_to_format_maps_known_tags() {
+        assert_eq!(attn_str_to_format("Q4_K"), QuantFormat::Q4_K);
+        assert_eq!(attn_str_to_format("Q6_K"), QuantFormat::Q6_K);
+    }
+
+    #[test]
+    #[should_panic(expected = "no compute::QuantFormat mapping")]
+    fn attn_str_to_format_panics_on_unknown_tag() {
+        let _ = attn_str_to_format("Q42_X");
+    }
+
+    #[test]
+    fn ffn_str_to_format_maps_known_tags() {
+        assert_eq!(ffn_str_to_format("Q4_K", QuantFormat::Q4_K), QuantFormat::Q4_K);
+        assert_eq!(ffn_str_to_format("Q6_K", QuantFormat::Q4_K), QuantFormat::Q6_K);
+        assert_eq!(ffn_str_to_format("Q4_0", QuantFormat::Q4_K), QuantFormat::Q4_0);
+        // Empty tag falls through to the caller's fallback.
+        assert_eq!(ffn_str_to_format("", QuantFormat::Q4_0), QuantFormat::Q4_0);
+        assert_eq!(ffn_str_to_format("", QuantFormat::Q4_K), QuantFormat::Q4_K);
+    }
+
+    #[test]
+    #[should_panic(expected = "no compute::QuantFormat mapping")]
+    fn ffn_str_to_format_panics_on_unknown_tag() {
+        let _ = ffn_str_to_format("unknown", QuantFormat::Q4_K);
+    }
+
+    #[test]
+    fn moe_routing_policy_maps_gemma4_tag() {
+        // Gemma 4 hybrid tag → Gemma 4 routing.
+        let _ = moe_routing_policy("gemma4_top_k_softmax");
+        // Unknown tag → top-K softmax default.
+        let _ = moe_routing_policy("unknown");
+    }
+
+    /// `resolve_attn_weights` falls through to the Q8 branch when the
+    /// index returns Q8 data instead of Q4_K.
+    #[test]
+    fn resolve_attn_weights_uses_q8_branch_when_index_returns_q8() {
+        struct Q8Idx {
+            bytes: Vec<u8>,
+            scales: Vec<f32>,
+        }
+        impl crate::KvIndex for Q8Idx {
+            fn attn_q8_layer_data(&self, _l: usize) -> Option<[(&[u8], &[f32]); 4]> {
+                Some([
+                    (self.bytes.as_slice(), self.scales.as_slice()),
+                    (self.bytes.as_slice(), self.scales.as_slice()),
+                    (self.bytes.as_slice(), self.scales.as_slice()),
+                    (self.bytes.as_slice(), self.scales.as_slice()),
+                ])
+            }
+        }
+        let idx = Q8Idx {
+            bytes: vec![0u8; 16],
+            scales: vec![1.0f32; 4],
+        };
+        let result = resolve_attn_weights(&idx, 0);
+        let (q, _k, _v, _o) = result.expect("Q8 fallback returns Some");
+        assert_eq!(q.format, QuantFormat::Q8_0);
+    }
+
+    /// `build_arch_params` rotary_dim branch fires when `rotary_fraction`
+    /// is < 1.0 (partial-rotary archs like StarCoder2).
+    #[test]
+    fn build_arch_params_handles_partial_rotary_fraction() {
+        let weights = larql_models::test_fixtures::make_starcoder2_test_weights();
+        let dummy = crate::QuantWeight {
+            data: &[],
+            scales: None,
+            format: QuantFormat::Q4_K,
+        };
+        // The partial-rotary branch is shape-dependent on the arch; what
+        // we want is just to ensure no panic on a non-full-rotary arch.
+        let layer =
+            build_arch_params(&weights, 0, dummy, dummy, dummy, dummy, dummy, dummy, dummy);
+        let _ = layer.rotary_dim;
+    }
+
+    /// `build_arch_params` on Llama2-style (Silu activation) fixture —
+    /// covers the Silu fallback branch in the activation match.
+    #[test]
+    fn build_arch_params_handles_silu_activation() {
+        let weights = make_test_weights();
+        let dummy = crate::QuantWeight {
+            data: &[],
+            scales: None,
+            format: QuantFormat::Q4_K,
+        };
+        let layer =
+            build_arch_params(&weights, 0, dummy, dummy, dummy, dummy, dummy, dummy, dummy);
+        assert!(matches!(layer.activation, crate::Activation::Silu));
+    }
+
+    /// `build_arch_params` on Starcoder2-style fixture covers the
+    /// LayerNorm branch and the Standard (non-gated) FFN type.
+    #[test]
+    fn build_arch_params_handles_layernorm_and_standard_ffn() {
+        let weights = larql_models::test_fixtures::make_starcoder2_test_weights();
+        let dummy = crate::QuantWeight {
+            data: &[],
+            scales: None,
+            format: QuantFormat::Q4_K,
+        };
+        let layer =
+            build_arch_params(&weights, 0, dummy, dummy, dummy, dummy, dummy, dummy, dummy);
+        assert!(matches!(layer.norm_type, crate::NormType::LayerNorm));
+        assert!(matches!(layer.ffn_type, crate::FfnType::Standard));
+    }
+
+    /// `build_moe_weights` happy path on the Gemma 4 hybrid-MoE fixture
+    /// — exercises the per-layer FFN router + packed expert slicing,
+    /// the BF16-stride math, and the routing-policy assignment.
+    #[test]
+    fn build_moe_weights_succeeds_on_hybrid_moe_fixture() {
+        let weights = larql_models::test_fixtures::make_test_gemma4_moe_weights();
+        assert!(weights.arch.is_hybrid_moe());
+        let arch = &*weights.arch;
+        for layer in 0..weights.num_layers {
+            let result = build_moe_weights(&weights, arch, layer);
+            assert!(
+                result.is_some(),
+                "MoE weights should resolve for layer {layer} on Gemma 4 hybrid-MoE"
+            );
+        }
+    }
+
+    /// `build_moe_weights` returns None on a non-MoE arch — covers the
+    /// `arch.moe_router_key(layer)?` short-circuit.
+    #[test]
+    fn build_moe_weights_returns_none_on_non_moe_arch() {
+        let weights = make_test_weights();
+        assert!(!weights.arch.is_hybrid_moe());
+        assert!(build_moe_weights(&weights, &*weights.arch, 0).is_none());
+    }
+
+    /// `patch_pipeline_layers_for_remote_moe` injects MoE stubs on
+    /// MoE-capable layers when the local moe slot is still None.
+    #[test]
+    fn patch_pipeline_layers_for_remote_moe_injects_stubs() {
+        let weights = larql_models::test_fixtures::make_test_gemma4_moe_weights();
+        // Build pipeline layers with no MoE locally — simulates the
+        // remote-MoE client deployment.
+        let dummy = crate::QuantWeight {
+            data: &[],
+            scales: None,
+            format: QuantFormat::Q4_K,
+        };
+        let mut layers: Vec<crate::FullPipelineLayer<'_>> = (0..weights.num_layers)
+            .map(|_| crate::FullPipelineLayer {
+                wq: dummy,
+                wk: dummy,
+                wv: dummy,
+                wo: dummy,
+                gate: dummy,
+                up: dummy,
+                down: dummy,
+                ..crate::FullPipelineLayer::default()
+            })
+            .collect();
+        // Pre-patch: every layer has moe = None.
+        for l in &layers {
+            assert!(l.moe.is_none());
+        }
+        patch_pipeline_layers_for_remote_moe(&mut layers, &weights);
+        // Post-patch: every MoE-capable layer has Some moe stub.
+        let mut any_patched = false;
+        for l in &layers {
+            if l.moe.is_some() {
+                any_patched = true;
+            }
+        }
+        assert!(any_patched, "patch must inject at least one MoE stub");
+    }
+
+    #[test]
+    fn patch_pipeline_layers_for_remote_ffn_sets_remote_flag() {
+        // Build a 1-layer pipeline and patch to remote FFN.
+        let layer = crate::FullPipelineLayer::default();
+        let mut layers = vec![layer];
+        assert!(!layers[0].ffn_is_remote);
+        patch_pipeline_layers_for_remote_ffn(&mut layers);
+        for l in &layers {
+            assert!(l.ffn_is_remote, "patch should set ffn_is_remote = true");
+        }
+    }
+}

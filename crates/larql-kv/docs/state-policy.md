@@ -124,6 +124,28 @@ can't change outputs).
 This is the kind of distinction that gets lost when engines are
 classified by "which KV strategy" alone.
 
+### 3.1 W10 (2026-05-18) — derivative-state elision worked example
+
+W10 makes the rule operational: engines that declare K/V derivative
+can elide the GPU→CPU state bridge on Metal by passing
+`StateDumpMask::HOnly` (or `None`, when the residual store is also
+dead weight) to the backend's masked decode entry point. The Metal
+kv cache remains the canonical K/V source of truth on the dispatch
+hot path; the engine simply doesn't shadow it.
+
+| Engine | Canonical | Derivative dropped under W10 | New tok/s ceiling |
+|---|---|---|---:|
+| `MarkovResidualEngine` | residual stream | `hot_kv`; (`rs.stored` too when `window=None`) | 106.8 (None) |
+| `MarkovResidualCodecEngine` | codec residuals | same | 98.5 (None) |
+| `UnlimitedContextEngine` | KV within window | `current_window_kv` (CPU shadow of the Metal cache) | 92.8 (HOnly) |
+| `TurboQuantEngine` | compressed K/V (destructive) | nothing — K/V IS canonical | — |
+| `StandardEngine` | KV tensors | n/a — backend-managed already | (reference, ~100) |
+
+Three engines now match or exceed `standard`'s fused-kernel speed
+while dropping their CPU state shadows to 0 MB. The cut held:
+declaring K/V derivative *enabled* the optimisation; no contract
+weakening was required.
+
 ---
 
 ## 4. The proposed `StatePolicy` trait
@@ -285,6 +307,12 @@ test catches it.
   the *execution* side.
 - [`kv-engine-unification.md`](../../larql-inference/docs/specs/kv-engine-unification.md)
   — where the `KvEngine` trait lives and how dispatch routes.
+- [`layer-engine.md`](../../larql-inference/docs/specs/layer-engine.md)
+  — composition seam that produces a new engine from per-layer
+  `(KvEngine_L, FfnBackend_L, Dispatcher_L)` triples. §4 of that spec
+  inherits the canonical-vs-derivative cut from §2.1 / §2.2 here;
+  §4.2's `permits_no_append_at(L)` is a dynamic query that
+  complements [`SlabRole`] in the handle surface (see below).
 - [`markov-residual-engine.md`](../../larql-inference/docs/specs/markov-residual-engine.md)
   — the engine that motivated the canonical-vs-derivative split.
 - [`boundary-per-layer-engine.md`](../../larql-inference/docs/specs/boundary-per-layer-engine.md)
@@ -292,3 +320,11 @@ test catches it.
 - [`apollo-engine.md`](../../larql-inference/docs/specs/apollo-engine.md)
   — the engine that motivated `task_level_retrieval` as a
   first-class contract.
+- `larql_compute::state_handle` — Rust trait surface (W10 Phase A,
+  2026-05-18) that lets engine slabs carry their `SlabRole`
+  (`Canonical` / `Derivative`) and `RowLocation` (`LocalCpu` /
+  `LocalGpu` / `Remote`) alongside the bytes. Lets §3's rule be
+  enforced at an API boundary instead of by convention, and prepares
+  the engines for grid deployment without changing their contracts.
+
+[`SlabRole`]: ../../larql-compute/src/state_handle.rs

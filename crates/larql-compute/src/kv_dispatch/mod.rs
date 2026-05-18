@@ -493,6 +493,51 @@ pub trait KvDispatch {
         self.coarse_decode_step(weights, token_id, index, handle, abs_position)
     }
 
+    /// Mask-aware variant of [`Self::coarse_decode_step_with_state`].
+    ///
+    /// Engines that treat K/V as **derivative** state can pass
+    /// [`crate::StateDumpMask::HOnly`] to request only the h_in
+    /// capture, skipping the K/V staging buffer alloc + GPU→CPU
+    /// readback on backends that support it. The default impl
+    /// ignores the mask and falls back to the full-capture path —
+    /// correct on every backend, only Metal gains the perf saving
+    /// today. See `crates/larql-kv/docs/state-policy.md` for the
+    /// canonical vs derivative cut.
+    fn coarse_decode_step_with_state_masked(
+        &self,
+        weights: &mut ModelWeights,
+        token_id: u32,
+        index: Option<&dyn crate::KvIndex>,
+        handle: &mut KvHandle,
+        abs_position: usize,
+        state: Option<&mut PerLayerDecodeState>,
+        mask: crate::StateDumpMask,
+    ) -> Option<Array2<f32>> {
+        let _ = mask;
+        self.coarse_decode_step_with_state(weights, token_id, index, handle, abs_position, state)
+    }
+
+    /// Read K/V at `pos` for `layer` from the backend's internal kv
+    /// cache. Returns `(k_row, v_row)` as flat `Vec<f32>` of length
+    /// `kv_dim_for_layer`. Used by engines running under
+    /// [`crate::StateDumpMask::HOnly`] that need to snapshot specific
+    /// K/V positions on demand (e.g. `UnlimitedContextEngine`'s
+    /// `close_window` checkpoint emission).
+    ///
+    /// Default returns `None` — backends without an internal kv cache
+    /// (CPU) or without the readback affordance (early-stage Metal)
+    /// don't support it, and the engine falls back to its own shadow.
+    /// `MetalBackend` overrides to read from `KVCache.layers[layer]`.
+    fn read_kv_row_at(
+        &self,
+        handle: &KvHandle,
+        layer: usize,
+        pos: usize,
+    ) -> Option<(Vec<f32>, Vec<f32>)> {
+        let _ = (handle, layer, pos);
+        None
+    }
+
     // ── Norm + residual primitives ──────────────────────────────────
 
     /// Fused `residual_add + rmsnorm` for the post-attention or
@@ -848,5 +893,124 @@ mod tests {
         let backend = crate::CpuBackend;
         let as_engine: &dyn EngineBackend = &backend;
         let _: &dyn crate::ComputeBackend = as_engine.as_compute();
+    }
+
+    // ── Coarse-fused defaults ─────────────────────────────────────────
+    //
+    // The 4 coarse_* methods + `read_kv_row_at` are trait defaults that
+    // return None / fall through to the simpler-coarse variant. Engines
+    // probe via Option-return; pinning the default `None` shape keeps
+    // the contract documented and the lines covered.
+
+    use larql_models::test_fixtures::make_test_weights;
+
+    #[test]
+    fn default_coarse_prefill_returns_none() {
+        let mut weights = make_test_weights();
+        let backend = StubKvBackend;
+        let result = backend.coarse_prefill(&mut weights, &[0u32, 1], None);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn default_coarse_decode_step_returns_none() {
+        let mut weights = make_test_weights();
+        let backend = StubKvBackend;
+        let mut handle = KvHandle::new(StubKvInner {
+            len: 0,
+            dim: weights.hidden_size,
+        });
+        let result = backend.coarse_decode_step(&mut weights, 0, None, &mut handle, 0);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn default_coarse_prefill_with_state_delegates_to_coarse_prefill() {
+        let mut weights = make_test_weights();
+        let backend = StubKvBackend;
+        let mut state = PerLayerDecodeState::with_capacity(weights.num_layers);
+        let result =
+            backend.coarse_prefill_with_state(&mut weights, &[0u32, 1], None, Some(&mut state));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn default_coarse_decode_step_with_state_delegates() {
+        let mut weights = make_test_weights();
+        let backend = StubKvBackend;
+        let mut handle = KvHandle::new(StubKvInner {
+            len: 0,
+            dim: weights.hidden_size,
+        });
+        let mut state = PerLayerDecodeState::with_capacity(weights.num_layers);
+        let result = backend.coarse_decode_step_with_state(
+            &mut weights,
+            0,
+            None,
+            &mut handle,
+            0,
+            Some(&mut state),
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn default_coarse_decode_step_with_state_masked_delegates() {
+        let mut weights = make_test_weights();
+        let backend = StubKvBackend;
+        let mut handle = KvHandle::new(StubKvInner {
+            len: 0,
+            dim: weights.hidden_size,
+        });
+        for mask in [
+            crate::StateDumpMask::Full,
+            crate::StateDumpMask::HOnly,
+            crate::StateDumpMask::None,
+        ] {
+            let mut state = PerLayerDecodeState::with_capacity(weights.num_layers);
+            let result = backend.coarse_decode_step_with_state_masked(
+                &mut weights,
+                0,
+                None,
+                &mut handle,
+                0,
+                Some(&mut state),
+                mask,
+            );
+            assert!(result.is_none(), "mask {mask:?} should produce None");
+        }
+    }
+
+    #[test]
+    fn default_read_kv_row_at_returns_none() {
+        let backend = StubKvBackend;
+        let handle = KvHandle::new(StubKvInner { len: 0, dim: 4 });
+        assert!(backend.read_kv_row_at(&handle, 0, 0).is_none());
+    }
+
+    // ── Inner handle as_any / as_any_mut surface ─────────────────────
+
+    #[test]
+    fn stub_kv_inner_exposes_as_any_round_trip() {
+        let mut inner = StubKvInner { len: 3, dim: 4 };
+        // immutable side
+        {
+            let any: &dyn std::any::Any = inner.as_any();
+            assert!(any.downcast_ref::<StubKvInner>().is_some());
+        }
+        // mutable side
+        {
+            let any_mut: &mut dyn std::any::Any = inner.as_any_mut();
+            assert!(any_mut.downcast_mut::<StubKvInner>().is_some());
+        }
+    }
+
+    #[test]
+    fn stub_residual_inner_exposes_as_any() {
+        let inner = StubResidualInner { shape: (2, 4) };
+        let any: &dyn std::any::Any = inner.as_any();
+        assert!(any.downcast_ref::<StubResidualInner>().is_some());
+        assert_eq!(inner.shape(), (2, 4));
+        assert_eq!(inner.backend_name(), "stub");
     }
 }

@@ -52,6 +52,112 @@ impl DecodeStateDump {
             && self.k_new_per_layer.len() == num_layers
             && self.v_new_per_layer.len() == num_layers
     }
+
+    /// `is_complete_for` variant that respects the capture mask.
+    /// Under `HOnly`, only `h_in_per_layer` is required to be
+    /// populated; under `None`, the state dump is intentionally empty
+    /// and the check trivially holds.
+    pub fn is_complete_under(&self, num_layers: usize, mask: StateDumpMask) -> bool {
+        match mask {
+            StateDumpMask::Full => self.is_complete_for(num_layers),
+            StateDumpMask::HOnly => self.h_in_per_layer.len() == num_layers,
+            StateDumpMask::None => true,
+        }
+    }
+}
+
+/// Capture mask for [`DecodeBackend::decode_token_with_state_dump_masked`].
+///
+/// Engines that treat K/V as **derivative** state (see
+/// `crates/larql-kv/docs/state-policy.md`) can request `HOnly` to
+/// skip the GPU → CPU readback of K/V. The kernel does not blit K/V
+/// to staging buffers under `HOnly`, eliminating both the transfer
+/// and the bridge-layer wrap. The engine relies on the backend's own
+/// kv cache for attention; on eviction it re-projects K/V from
+/// canonical residual state (`MarkovResidualEngine::recompute_kv`).
+///
+/// Engines that treat K/V as **canonical** (e.g. `TurboQuantEngine`'s
+/// compressed K/V, `UnlimitedContextEngine`'s in-window K/V) must
+/// use `Full`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StateDumpMask {
+    /// Capture h_in, k_new, v_new for every layer (today's default).
+    Full,
+    /// Capture h_in only. Skip the K/V staging buffer alloc, blit,
+    /// and GPU → CPU readback. Backends without an optimised
+    /// h-only path fall through to `Full` via the trait's default
+    /// impl — engines get correct behavior, just no perf saving.
+    HOnly,
+    /// Capture nothing. Both h_in AND K/V skip staging + readback.
+    /// W10 Phase C: only valid when the engine has no use for h_in
+    /// on the dispatch path — e.g. `MarkovResidualEngine` configured
+    /// with `window_size = None`, where `rs.stored` is never read
+    /// after prefill (no cold-tier eviction, no recompute_kv). On
+    /// backends without an optimised path, falls through to `Full`
+    /// via the default trait impl — correct, no perf saving.
+    None,
+}
+
+impl Default for StateDumpMask {
+    fn default() -> Self {
+        Self::Full
+    }
+}
+
+/// Per-stage wall-clock decode timings in milliseconds.
+///
+/// Filled by a backend's `decode_token_split_profile` path when the
+/// caller sets `LARQL_PROFILE_SPLIT=1`. The shape is backend-agnostic
+/// — Metal records GPU command-buffer timestamps, future Vulkan/CUDA
+/// backends record their own equivalents. Engines read these back via
+/// [`crate::ComputeBackend::take_split_timings`] after each decode call.
+///
+/// Granularity today (set by Metal) is **attention vs full FFN block**:
+/// - `attn_ms` — Steps 1.5–5: QK-norm + RoPE + V-norm + KV append/attend
+///   + O proj + post-attn residual + ffn-input norm.
+/// - `gate_up_ms` — the **entire FFN block**: gate + up + activation
+///   (GEGLU/SiLU) + down + post-FFN residual.
+/// - `down_ms` — reserved for the next-finer split that breaks
+///   `encode_ffn_step` into separate `gate_up` and `down` phases.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ProfileTimings {
+    /// Wall time for the attention side of the layer:
+    /// input norm → QKV proj → QK-norm → RoPE → KV-attend → O proj.
+    pub attn_ms: f64,
+    /// Wall time for the FFN gate + up + activation.
+    pub gate_up_ms: f64,
+    /// Wall time for the FFN down projection + post-FFN residual + scalar.
+    pub down_ms: f64,
+}
+
+impl ProfileTimings {
+    /// Sum across the three buckets — the whole-token cost.
+    pub fn total_ms(&self) -> f64 {
+        self.attn_ms + self.gate_up_ms + self.down_ms
+    }
+
+    /// Format a `[profile-split] …` line for stderr instrumentation.
+    pub fn format_summary(&self, num_layers: usize) -> String {
+        let total = self.total_ms();
+        let pct = |v: f64| if total > 0.0 { v / total * 100.0 } else { 0.0 };
+        let per_layer = if num_layers > 0 {
+            total / num_layers as f64
+        } else {
+            0.0
+        };
+        format!(
+            "[profile-split] {num_layers} layers — \
+             attn={:.2}ms ({:.0}%)  gate+up={:.2}ms ({:.0}%)  \
+             down={:.2}ms ({:.0}%)  total={:.2}ms ({per_layer:.3}ms/layer)",
+            self.attn_ms,
+            pct(self.attn_ms),
+            self.gate_up_ms,
+            pct(self.gate_up_ms),
+            self.down_ms,
+            pct(self.down_ms),
+            total,
+        )
+    }
 }
 
 /// KV-cached generation primitives.
@@ -195,6 +301,27 @@ pub trait DecodeBackend {
         self.decode_token(layers, x, hidden, inter)
     }
 
+    /// [`decode_token_with_state_dump`] variant that respects a
+    /// capture [`StateDumpMask`].
+    ///
+    /// Under `StateDumpMask::HOnly`, backends with an optimised
+    /// h-only path skip the K/V staging buffer alloc, blit, and
+    /// readback. The default impl ignores the mask and falls through
+    /// to the full-capture path — correct for any backend, no perf
+    /// saving. `MetalBackend` overrides to take the optimised path.
+    fn decode_token_with_state_dump_masked(
+        &self,
+        layers: &[crate::FullPipelineLayer<'_>],
+        x: &[f32],
+        hidden: usize,
+        inter: usize,
+        state: Option<&mut DecodeStateDump>,
+        mask: StateDumpMask,
+    ) -> Option<Vec<f32>> {
+        let _ = mask;
+        self.decode_token_with_state_dump(layers, x, hidden, inter, state)
+    }
+
     /// Like `decode_token` but calls `moe_fn(layer, h_post_attn)` for
     /// MoE layers (enables remote expert dispatch). Default delegates
     /// to `decode_token` and ignores the hook.
@@ -326,5 +453,278 @@ pub trait DecodeBackend {
     ) -> Option<Vec<f32>> {
         let _ = (target_layer, target_head, replacement_delta);
         self.prefill_kquant(layers, x, hidden, inter, seq_len, use_qk_norm, softcap)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_total_ms_sums_buckets() {
+        let p = ProfileTimings {
+            attn_ms: 1.5,
+            gate_up_ms: 2.5,
+            down_ms: 1.0,
+        };
+        assert!((p.total_ms() - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn profile_format_summary_handles_zero_total() {
+        let p = ProfileTimings::default();
+        let s = p.format_summary(34);
+        // No NaN-percent panics, total prints as 0.00.
+        assert!(s.contains("total=0.00ms"));
+        assert!(s.contains("34 layers"));
+    }
+
+    #[test]
+    fn profile_format_summary_includes_per_layer_average() {
+        let p = ProfileTimings {
+            attn_ms: 6.0,
+            gate_up_ms: 3.0,
+            down_ms: 1.0,
+        };
+        let s = p.format_summary(10);
+        assert!(s.contains("total=10.00ms"));
+        assert!(s.contains("1.000ms/layer"));
+    }
+
+    /// `format_summary(0)` takes the `else` branch (per_layer = 0.0).
+    #[test]
+    fn profile_format_summary_zero_layers_uses_zero_per_layer() {
+        let p = ProfileTimings {
+            attn_ms: 1.0,
+            gate_up_ms: 1.0,
+            down_ms: 1.0,
+        };
+        let s = p.format_summary(0);
+        assert!(s.contains("0 layers"));
+        assert!(s.contains("0.000ms/layer"));
+    }
+
+    // ── DecodeStateDump ────────────────────────────────────────────
+
+    #[test]
+    fn state_dump_with_capacity_preallocates_three_slots() {
+        let dump = DecodeStateDump::with_capacity(8);
+        assert_eq!(dump.h_in_per_layer.capacity(), 8);
+        assert_eq!(dump.k_new_per_layer.capacity(), 8);
+        assert_eq!(dump.v_new_per_layer.capacity(), 8);
+        // The buffers are empty until the backend fills them.
+        assert!(dump.h_in_per_layer.is_empty());
+    }
+
+    #[test]
+    fn state_dump_is_complete_for_requires_every_layer_populated() {
+        let mut dump = DecodeStateDump::with_capacity(2);
+        assert!(!dump.is_complete_for(2));
+        dump.h_in_per_layer.push(vec![0.0; 4]);
+        dump.k_new_per_layer.push(vec![0.0; 4]);
+        dump.v_new_per_layer.push(vec![0.0; 4]);
+        assert!(!dump.is_complete_for(2)); // only 1 layer
+        dump.h_in_per_layer.push(vec![0.0; 4]);
+        dump.k_new_per_layer.push(vec![0.0; 4]);
+        dump.v_new_per_layer.push(vec![0.0; 4]);
+        assert!(dump.is_complete_for(2));
+    }
+
+    #[test]
+    fn state_dump_is_complete_under_full_matches_is_complete_for() {
+        let mut dump = DecodeStateDump::with_capacity(1);
+        dump.h_in_per_layer.push(vec![0.0; 4]);
+        // Under Full: K/V also required.
+        assert!(!dump.is_complete_under(1, StateDumpMask::Full));
+        dump.k_new_per_layer.push(vec![0.0; 4]);
+        dump.v_new_per_layer.push(vec![0.0; 4]);
+        assert!(dump.is_complete_under(1, StateDumpMask::Full));
+    }
+
+    #[test]
+    fn state_dump_is_complete_under_h_only_ignores_kv() {
+        let mut dump = DecodeStateDump::with_capacity(1);
+        dump.h_in_per_layer.push(vec![0.0; 4]);
+        // K/V never populated, but HOnly is satisfied by h_in alone.
+        assert!(dump.is_complete_under(1, StateDumpMask::HOnly));
+        // But still not Full.
+        assert!(!dump.is_complete_under(1, StateDumpMask::Full));
+    }
+
+    #[test]
+    fn state_dump_is_complete_under_none_is_trivially_true() {
+        let dump = DecodeStateDump::default();
+        // Nothing populated; None mask doesn't require anything.
+        assert!(dump.is_complete_under(8, StateDumpMask::None));
+    }
+
+    #[test]
+    fn state_dump_mask_default_is_full() {
+        assert_eq!(StateDumpMask::default(), StateDumpMask::Full);
+    }
+
+    // ── DecodeBackend trait defaults ──────────────────────────────────
+    //
+    // A minimal stub that uses every default. Covers the trait's
+    // default bodies — `None` returns, no-op writes, the delegating
+    // defaults (e.g. `full_pipeline_q4_with_head_replacement` →
+    // `full_pipeline_q4`).
+
+    struct StubDecode;
+    impl DecodeBackend for StubDecode {}
+
+    fn stub_layers() -> Vec<crate::FullPipelineLayer<'static>> {
+        vec![crate::FullPipelineLayer::default()]
+    }
+
+    #[test]
+    fn default_full_pipeline_q4_returns_none() {
+        let b = StubDecode;
+        let layers = stub_layers();
+        let r = b.full_pipeline_q4(&layers, &[0.0; 4], 4, 4, 1, false, 0.0);
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn default_full_pipeline_q4_with_head_replacement_delegates_to_no_intervention() {
+        let b = StubDecode;
+        let layers = stub_layers();
+        // Default delegates to `full_pipeline_q4` (which is `None`).
+        let r = b.full_pipeline_q4_with_head_replacement(
+            &layers, &[0.0; 4], 4, 4, 1, false, 0.0, 0, 0, &[0.0; 2],
+        );
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn default_multi_layer_q4_ffn_returns_none() {
+        let b = StubDecode;
+        let r = b.multi_layer_q4_ffn(&[], &[0.0; 4], 4, 4);
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn default_has_kv_cache_returns_false() {
+        let b = StubDecode;
+        assert!(!b.has_kv_cache());
+    }
+
+    #[test]
+    fn default_kv_cache_helpers_are_no_ops() {
+        let b = StubDecode;
+        // None of these should panic; nothing observable changes.
+        b.populate_kv_layer(0, &[0.0; 4], &[0.0; 4], 1, 2, 2);
+        b.reset_kv_cache();
+        b.truncate_kv_cache(0);
+        b.preallocate_kv_cache_per_layer(&[(2, 4)], 16);
+        assert_eq!(b.kv_cache_len(), 0);
+    }
+
+    #[test]
+    fn default_decode_token_returns_none() {
+        let b = StubDecode;
+        let layers = stub_layers();
+        let r = b.decode_token(&layers, &[0.0; 4], 4, 4);
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn default_decode_token_with_state_dump_delegates_to_decode_token() {
+        let b = StubDecode;
+        let layers = stub_layers();
+        let mut dump = DecodeStateDump::default();
+        let r = b.decode_token_with_state_dump(&layers, &[0.0; 4], 4, 4, Some(&mut dump));
+        assert!(r.is_none());
+        // Default doesn't populate the dump.
+        assert!(dump.h_in_per_layer.is_empty());
+    }
+
+    #[test]
+    fn default_decode_token_with_state_dump_masked_delegates_through() {
+        let b = StubDecode;
+        let layers = stub_layers();
+        for mask in [StateDumpMask::Full, StateDumpMask::HOnly, StateDumpMask::None] {
+            let r = b.decode_token_with_state_dump_masked(
+                &layers, &[0.0; 4], 4, 4, None, mask,
+            );
+            assert!(r.is_none(), "mask {mask:?} should produce None");
+        }
+    }
+
+    #[test]
+    fn default_decode_token_with_moe_ignores_hook() {
+        let b = StubDecode;
+        let layers = stub_layers();
+        let mut hook_called = 0;
+        let mut moe_fn = |_l: usize, _h: &[f32]| {
+            hook_called += 1;
+            vec![0.0; 4]
+        };
+        let r = b.decode_token_with_moe(&layers, &[0.0; 4], 4, 4, &mut moe_fn);
+        assert!(r.is_none());
+        // Default delegates to `decode_token` (None) before reaching layers,
+        // so the MoE hook is never called.
+        assert_eq!(hook_called, 0);
+    }
+
+    #[test]
+    fn default_decode_token_q4k_moe_returns_none() {
+        let b = StubDecode;
+        let layers = stub_layers();
+        let get_expert = |_l: usize, _e: usize| -> Option<(&[u8], &[u8])> { None };
+        let r = b.decode_token_q4k_moe(&layers, &[0.0; 4], 4, 4, 1e-6, &get_expert);
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn default_decode_token_with_moe_split_combines_pair() {
+        let b = StubDecode;
+        let layers = stub_layers();
+        let mut fire = |_l: usize, _h: &[f32]| {};
+        let mut collect = |_l: usize| vec![0.0; 4];
+        let r = b.decode_token_with_moe_split(
+            &layers, &[0.0; 4], 4, 4, &mut fire, &mut collect,
+        );
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn default_decode_token_split_profile_returns_zero_timings() {
+        let b = StubDecode;
+        let layers = stub_layers();
+        let (r, attn, gu, dn) = b.decode_token_split_profile(&layers, &[0.0; 4], 4, 4);
+        assert!(r.is_none());
+        assert_eq!(attn, 0.0);
+        assert_eq!(gu, 0.0);
+        assert_eq!(dn, 0.0);
+    }
+
+    #[test]
+    fn default_prefill_kquant_returns_none() {
+        let b = StubDecode;
+        let layers = stub_layers();
+        let r = b.prefill_kquant(&layers, &[0.0; 4], 4, 4, 1, false, 0.0);
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn default_full_pipeline_kquant_capture_pre_wo_returns_none() {
+        let b = StubDecode;
+        let layers = stub_layers();
+        let r = b.full_pipeline_kquant_capture_pre_wo(
+            &layers, &[0.0; 4], 4, 4, 1, false, 0.0, 0, 0,
+        );
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn default_prefill_kquant_with_head_replacement_delegates_to_no_intervention() {
+        let b = StubDecode;
+        let layers = stub_layers();
+        let r = b.prefill_kquant_with_head_replacement(
+            &layers, &[0.0; 4], 4, 4, 1, false, 0.0, 0, 0, &[0.0; 2],
+        );
+        // Default delegates to `prefill_kquant` (None).
+        assert!(r.is_none());
     }
 }

@@ -460,3 +460,23 @@ becomes "the simple 2× cold-saver" — a worthwhile addition, but
 narrower than the engine's design surface implies. That is the
 expected outcome and the spec is written to be defensible at that
 outcome.
+
+---
+
+## 14. W10 (2026-05-18) — state-bridge mask cascade (opt-in)
+
+Same as
+[`markov-residual-engine.md` §14](./markov-residual-engine.md#14-w10-2026-05-18--state-bridge-mask-cascade-opt-in):
+hot K/V is derivative state (the codec-encoded residual is the
+canonical cold tier; hot K/V is reprojectable). Under
+`LARQL_W10_HONLY=1`:
+
+| `window_size` | Mask | Engine shadow drops |
+|---|---|---|
+| `Some(N)` | `HOnly` | `hot_kv` |
+| `None` | `None` | `hot_kv` AND `rs.stored` |
+
+Preserves the `bounded_KL(ε)` contract — only the kernel→engine
+transfer path changes; the codec round-trip on the cold tier is
+unchanged. Measured: 88.3 → 98.5 tok/s under `None`, hot memory
+54.4 MB → 0 MB.

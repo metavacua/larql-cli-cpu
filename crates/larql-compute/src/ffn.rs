@@ -216,5 +216,13 @@ mod tests {
         let ffn = StubFfn;
         let h = Array2::<f32>::zeros((1, 4));
         assert!(ffn.forward_moe_full_layer(0, &h).is_none());
+        // Exercise the stub's required-method surface so the coverage
+        // report reflects the trait-shape footprint, not just the
+        // default-method probe above.
+        assert_eq!(ffn.forward(0, &h).shape(), &[1, 4]);
+        let (act_pre, act_post) = ffn.forward_with_activation(0, &h);
+        assert_eq!(act_pre.shape(), &[1, 4]);
+        assert_eq!(act_post.shape(), &[1, 4]);
+        assert_eq!(ffn.name(), "stub");
     }
 }

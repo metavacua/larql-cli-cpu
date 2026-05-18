@@ -62,8 +62,8 @@ its own crate, implements the same trait surface, owns its kernels. Inference
 factories (`default_engine_backend()`, `default_async_engine_backend()`,
 `default_compute_backend()` in `larql-inference/src/lib.rs`) compose Metal +
 CPU fallback explicitly; engine-level orchestration in `layer_graph/` still
-branches on `#[cfg(feature = "metal", target_os = "macos")]` where the
-hybrid + GPU prefill paths take Metal-specific actions.
+branches on `#[cfg(feature = "gpu", target_os = "macos")]` where the
+hybrid + GPU prefill paths take backend-specific actions.
 
 **`model-compute` never imports `larql-*`.** Dependency flow is one-way:
 LARQL may consume it (e.g. for compile-time `sum(1..100)` resolution); it
@@ -82,10 +82,10 @@ LQL parser and executor are split symmetrically: [crates/larql-lql/src/parser/](
 
 ```bash
 cargo build --release                             # optimised build
-cargo build --release --features metal            # Metal GPU backend (Apple Silicon)
+cargo build --release --features gpu              # GPU backend (Metal today; Vulkan/CUDA later)
 cargo test                                        # entire workspace
 cargo test -p larql-lql                           # single crate (272 tests)
-cargo test -p larql-inference --features metal    # +Metal GPU tests
+cargo test -p larql-inference --features gpu      # +GPU tests (Metal on Apple Silicon)
 cargo test -p <crate> <test_name>                 # single test
 make ci                                           # fmt-check + clippy -D warnings + test
 make fmt                                          # cargo fmt --all

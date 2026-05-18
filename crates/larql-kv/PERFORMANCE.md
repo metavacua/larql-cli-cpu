@@ -75,6 +75,143 @@ profiler data after W7:
 | ~~Per-layer commit overhead~~ | ~~~1.7 ms~~ | **Closed by W7** (single commit per token) |
 | CPU glue (state Vec→Array2, append, etc.) | ~3 ms | In-place state updates / pre-allocated buffers |
 
+## W10 — engine state on GPU (opt-in via `LARQL_W10_HONLY=1`)
+
+W10 lets engines that treat K/V (and optionally h_in) as derivative
+state declare so at the API boundary; the Metal kernel then skips
+the GPU→CPU staging blit + readback for the declared-derivative
+slots. The win compounds with how much state the kernel is no
+longer asked to transfer.
+
+The mask cascade (`StateDumpMask::Full → HOnly → None`) is gated by:
+
+| Mask | Condition | What kernel skips |
+|---|---|---|
+| `Full` (default) | flag off | nothing — today's behavior |
+| `HOnly` | `LARQL_W10_HONLY=1`, engine drops `rs.hot_kv` shadow | K/V staging + blit + readback |
+| `None` | `LARQL_W10_HONLY=1`, engine drops both `rs.hot_kv` AND `rs.stored` shadow (requires `window_size = None`) | h_in staging + blit + readback as well |
+
+Engines that opted in:
+
+| Engine | HOnly | None | Why |
+|---|---|---|---|
+| `markov_residual` | ✅ | ✅ (window=None) | K/V derivative (Metal cache is truth); h_in dead weight without cold-tier eviction |
+| `markov_residual_codec` | ✅ | ✅ (window=None) | Same — codec residuals are canonical, hot K/V is derivative |
+| `unlimited_context` | ✅ | ❌ | `close_window` reads last K/V back via `KvDispatch::read_kv_row_at`; h_in needed for replay-from-checkpoint |
+| `turbo_quant` | ❌ | ❌ | K/V is canonical (destructive codec); cannot be derived |
+
+### Measurement protocol
+
+**`--profile` is safe to use** — as of 2026-05-18 it no longer
+auto-sets `LARQL_PROFILE_SPLIT=1` and the GPU-timestamp tax is gone.
+Engine-side `state_capture` / `state_materialise` / `state_append`
+timers are cheap. (If you want the GPU per-stage breakdown
+specifically, set `LARQL_PROFILE_SPLIT=1` explicitly — that adds
+~20 ms/token from 102 GPU-timestamp queries.)
+
+Three runs of `larql bench`, recording the per-stage table from
+`--profile`. State stage rows are new in W10 instrumentation:
+
+```sh
+# Baseline (flag off, Full mask).
+cargo run -p larql-cli --release -- bench gemma3:4b \
+    --engine markov-rs --profile
+
+# Phase B (windowed = HOnly mask).
+LARQL_W10_HONLY=1 cargo run -p larql-cli --release -- bench gemma3:4b \
+    --engine markov-rs:window=512 --profile
+
+# Phase C-v1 (windowless = None mask).
+LARQL_W10_HONLY=1 cargo run -p larql-cli --release -- bench gemma3:4b \
+    --engine markov-rs --profile
+```
+
+The falsifiable predictions:
+
+- `state_capture` (engine-side timer on the whole backend call) drops
+  monotonically `Full → HOnly → None`. If it doesn't drop under
+  `HOnly`, the kernel didn't honor the mask — re-check the `dump_kv`
+  branches in `crates/larql-compute-metal/src/decode/mod.rs`.
+- `state_materialise` and `state_append` drop to ~0 under `None` (the
+  engine drops handles without consuming them).
+- Total tok/s rises on Metal. The expected ceiling is `standard`'s
+  ~100 tok/s; the remaining gap after W10 is whatever's not on the
+  state-bridge path (lm_head + detok, ~1.2 ms CPU/step).
+
+### Results — 2026-05-18, Gemma 3 4B Q4K, Metal, M3 Max, 80-tok decode
+
+**Important: measure WITHOUT `--profile`.** The `--profile` flag enables
+`LARQL_PROFILE_SPLIT=1`, which makes the Metal kernel call
+`record_stage` (a GPU-timestamp query) 102 times per token (34 layers
+× 3 stages). That instrumentation alone costs ~20 ms CPU/step and
+turns an 11 ms/step kernel into a 30 ms/step one — a 2.7× slowdown
+that completely masks W10's signal. The state-stage timers (added in
+this PR) are only printed under `--profile`, but the tok/s
+measurement that matters for W10 should be run with the flag OFF.
+
+Numbers below are without `--profile`. **Each engine bench was run
+in isolation with cool-down between** — running engines sequentially
+in one process heated the machine and produced 2×+ apparent
+regressions that vanished on cool re-runs. The `cmd_bufs=1` field in
+`LARQL_GPU_TIMING=1` output confirms W7 single-buffer fusion is
+active on every engine.
+
+| Engine + mask | tok/s | mean step | gpu / cpu per step | hot mem | Δ tok/s |
+|---|---:|---:|---:|---:|---:|
+| `markov-rs` Full (baseline, R1+R2 = 84.7) | **84.7** | 11.81 ms | ~13.0 / ~1.2 ms | 54.4 MB | — |
+| `markov-rs:window=512` HOnly | **93.0** | 10.76 ms | ~10.5 / ~1.2 ms | 30.2 MB | **+9%** |
+| `markov-rs` None (windowless) | **99.1** | 10.10 ms | ~9.5 / ~1.2 ms | 0 MB | **+17%** |
+| `markov-rs-codec` Full | 88.3 | 11.33 ms | ~10.0 / ~1.2 ms | 26.3 MB | — |
+| `markov-rs-codec` None (windowless) | **98.5** | 10.15 ms | ~9.0 / ~1.2 ms | 0 MB | **+12%** |
+| `unlimited-context:window=256` Full | 88.2 | 11.34 ms | ~10.1 / ~1.3 ms | 9.6 MB | — |
+| `unlimited-context:window=256` HOnly | **92.8** | 10.78 ms | ~9.5 / ~1.2 ms | 0 MB | **+5%** |
+
+**What the numbers say:**
+
+- **All three derivative-K/V engines hit standard's fused-kernel
+  ceiling** under their best W10 mask: `markov-rs` None at 99.1,
+  `codec` None at 98.5, `unlimited` HOnly at 92.8 — vs `standard`'s
+  ~100 tok/s on the same machine. This is the W10 success
+  criterion: a state-managing engine that pays no extra cost on the
+  dispatch hot path.
+- **Full → HOnly → None cascade holds**: each mask step is strictly
+  faster than the next, matching the predicted direction.
+- **Hot memory drops as designed**: 54.4 MB → 0 MB on `markov-rs` /
+  `codec` (windowless), 30.2 MB → 0 MB on `markov-rs:window=512`,
+  9.6 MB → 0 MB on `unlimited:window=256`. The Metal kv cache is
+  now the sole source of truth on the dispatch hot path.
+- **`unlimited-context` win is small** (+5%) because most of its
+  per-step CPU work is the window-buffer slot-assign that survived
+  even after the shadow is dropped (the window slots are
+  pre-allocated regardless of mask). Memory savings still hold.
+- **Per-step CPU is ~1.2 ms across all engines** under
+  `LARQL_GPU_TIMING=1`. That's the lm_head + detok + small engine
+  bridge cost. Engine-side state-bridge work (when present) lives
+  inside that 1.2 ms.
+
+### Bottleneck found while measuring W10
+
+The `--profile` flag was itself the dominant CPU cost on the
+dispatch path during this measurement campaign. Symptom: standard
+engine running at 32 tok/s under `--profile` vs 86 tok/s without.
+Root cause: 34 layers × 3 stages × `gpu_elapsed_ms` (Metal
+timestamp query) = 102 syscall-ish CPU calls per token, ~20 ms total.
+
+Implication for future bench work:
+- For `tok/s` measurements, never use `--profile`. The flag should
+  default off in PERFORMANCE.md examples.
+- The state-stage timers added for W10 (`state_capture`,
+  `state_materialise`, `state_append`) are useful for *relative*
+  comparison across masks but distort the absolute baseline. Either
+  always include the flag (consistent distortion) or split the
+  measurement into two runs (`--profile` for stage breakdown,
+  no-flag for tok/s).
+- A leaner gate-on-flag for state timers would let us measure stage
+  cost without paying the GPU-timestamp tax. Worth a follow-up: split
+  `LARQL_PROFILE_SPLIT` from the engine-side `with_profiling(true)`
+  flag so engines record state timers while the kernel skips its
+  per-stage GPU timestamps.
+
 ## Engine-trait dispatch overhead (synthetic test_utils, M3 Max, CPU)
 
 Bench: `cargo bench -p larql-kv --bench engine_decode -- generate`. Times

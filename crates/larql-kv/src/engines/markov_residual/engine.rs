@@ -150,31 +150,65 @@ impl MarkovResidualEngine {
         // prompt_len, 64)`. The hot path doubles capacity on overflow.
         let prompt_len = token_ids.len();
         let initial_cap = window_capacity(prompt_len, self.window_size);
+        // W10 Phase A: consume each layer's handle into an owned
+        // Array2; CpuStateHandle moves without a copy.
         let stored: Vec<Array2<f32>> = state
             .h_in_per_layer
             .into_iter()
-            .map(|h_src| grow_capacity_2d(&h_src, prompt_len, initial_cap))
+            .map(|h| grow_capacity_2d(&h.into_array(), prompt_len, initial_cap))
             .collect();
         let hot_kv: Vec<larql_inference::attention::SharedKV> = state
             .k_new_per_layer
             .into_iter()
             .zip(state.v_new_per_layer)
-            .map(|(k_src, v_src)| {
+            .map(|(k, v)| {
                 (
-                    grow_capacity_2d(&k_src, prompt_len, initial_cap),
-                    grow_capacity_2d(&v_src, prompt_len, initial_cap),
+                    grow_capacity_2d(&k.into_array(), prompt_len, initial_cap),
+                    grow_capacity_2d(&v.into_array(), prompt_len, initial_cap),
                 )
             })
             .collect();
+        // W10 Phase B: when `LARQL_W10_HONLY=1`, drop the hot_kv
+        // shadow. Metal's own kv cache is the source of truth for K/V
+        // on this engine (markov_residual treats K/V as derivative —
+        // see crates/larql-kv/docs/state-policy.md §2.2). Decode steps
+        // can then request the HOnly capture mask, skipping the K/V
+        // staging buffer alloc + GPU→CPU readback.
+        //
+        // W10 Phase C: when window_size is also None (no cold-tier
+        // eviction can ever fire), `rs.stored` is dead weight too —
+        // nothing reads it after prefill. Drop it; decode steps can
+        // then request the None mask, eliminating the h_in staging
+        // and readback alongside K/V.
+        let drop_hot_kv_shadow = std::env::var("LARQL_W10_HONLY")
+            .ok()
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        let drop_stored_shadow = drop_hot_kv_shadow && self.window_size.is_none();
+        let stored = if drop_stored_shadow {
+            // Empty per-layer placeholders — memory_bytes() honestly
+            // reports ~0 and recompute_kv is unreachable (no window
+            // → no cold-tier eviction → no replay).
+            let hidden_size = weights.hidden_size;
+            (0..num_layers)
+                .map(|_| Array2::<f32>::zeros((0, hidden_size)))
+                .collect()
+        } else {
+            stored
+        };
         let mut rs = RsStore {
             stored,
             cold_residuals: None,
             cold_kv: None,
-            hot_kv: Some(hot_kv),
+            hot_kv: if drop_hot_kv_shadow {
+                None
+            } else {
+                Some(hot_kv)
+            },
             cold_abs_start: 0,
             next_position: prompt_len,
             max_window: self.window_size,
-            hot_len: prompt_len,
+            hot_len: if drop_stored_shadow { 0 } else { prompt_len },
         };
         // Clip window on prefill — overflow goes into cold tier using
         // the snapshot helper (already-computed K/V from the dispatch).
@@ -220,20 +254,66 @@ impl MarkovResidualEngine {
         index: &VectorIndex,
         token_id: u32,
     ) -> Option<Array2<f32>> {
+        // W10 instrumentation: decode_total wraps the whole step so
+        // stage_summary returns Some on the dispatch hot path (the
+        // legacy walk path records it separately at the bottom of
+        // rs_decode_step_profiled).
+        let t_total = std::time::Instant::now();
         use larql_inference::PerLayerDecodeState;
         use ndarray::{s, Array2};
         let num_layers = weights.num_layers;
         let mut state = PerLayerDecodeState::with_capacity(num_layers);
         let handle = self.kv_handle.as_mut()?;
-        let hidden = self.backend.as_ref().coarse_decode_step_with_state(
+        // W10 Phase B/C: select capture mask. When `LARQL_W10_HONLY=1`:
+        //   - hot_kv shadow dropped → HOnly (skip K/V readback)
+        //   - hot_kv shadow dropped AND `rs.stored` empty (window=None)
+        //     → None (skip h_in readback too — nothing CPU-side will
+        //     read it)
+        // Backends without optimised paths fall through to Full via
+        // the trait default; correct everywhere, perf-positive on
+        // Metal.
+        let env_on = std::env::var("LARQL_W10_HONLY")
+            .ok()
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        let drop_hot_kv = self
+            .store
+            .as_ref()
+            .map(|s| s.hot_kv.is_none())
+            .unwrap_or(false)
+            && env_on;
+        let drop_stored = self
+            .store
+            .as_ref()
+            .map(|s| s.stored.first().map(|a| a.shape()[0] == 0).unwrap_or(false))
+            .unwrap_or(false)
+            && env_on;
+        let mask = if drop_stored && drop_hot_kv {
+            larql_compute::StateDumpMask::None
+        } else if drop_hot_kv {
+            larql_compute::StateDumpMask::HOnly
+        } else {
+            larql_compute::StateDumpMask::Full
+        };
+        // W10 instrumentation: state_capture = whole backend call
+        // including kernel + state-dump readback. Under HOnly the K/V
+        // readback is skipped; under None all readbacks are skipped.
+        // Comparing this number across mask choices gives the
+        // falsifiable measurement of the kernel-side saving.
+        let t_capture = std::time::Instant::now();
+        let hidden = self.backend.as_ref().coarse_decode_step_with_state_masked(
             weights,
             token_id,
             Some(index),
             handle,
             self.abs_position,
             Some(&mut state),
+            mask,
         )?;
-        if !state.is_complete_for(num_layers) {
+        if self.profiling {
+            self.profile.state_capture.record(t_capture);
+        }
+        if !state.is_complete_under(num_layers, mask) {
             // Backend ran the decode but didn't dump state — engine
             // can't update its store. Treat as a contract violation;
             // fall back so the engine's residual store stays
@@ -248,16 +328,72 @@ impl MarkovResidualEngine {
         // growth gives amortised O(1) per token. Replaces the per-step
         // `Array2::zeros((n+1, dim)) + slice-copy + slice-copy` pattern
         // that was 58% of decode CPU at 1000 tokens.
+        // W10 Phase A: consume the per-layer handles. CpuStateHandle's
+        // `into_array` moves the inner Array2 out without a copy, so
+        // total memcpy count is unchanged vs pre-W10.
+        // W10 Phase B/C: under HOnly the K/V handle vecs are empty —
+        // we only consume h_in. Under None both are empty — engine
+        // skips append entirely. K/V state lives in Metal's kv cache.
         let len = rs.hot_len;
-        for layer in 0..num_layers {
-            append_row(&mut rs.stored[layer], &state.h_in_per_layer[layer], len);
-
-            if let Some(hot_kv) = rs.hot_kv.as_mut() {
-                append_row(&mut hot_kv[layer].0, &state.k_new_per_layer[layer], len);
-                append_row(&mut hot_kv[layer].1, &state.v_new_per_layer[layer], len);
+        let h_handles = std::mem::take(&mut state.h_in_per_layer);
+        let k_handles = std::mem::take(&mut state.k_new_per_layer);
+        let v_handles = std::mem::take(&mut state.v_new_per_layer);
+        let did_append = !matches!(mask, larql_compute::StateDumpMask::None);
+        if matches!(mask, larql_compute::StateDumpMask::None) {
+            // Nothing to append on either side; abs_position is the
+            // only piece of canonical state that needs to advance.
+            // `rs.hot_len` deliberately stays at 0 to preserve the
+            // invariant `hot_len == stored[0].shape()[0]`; otherwise
+            // `memory_bytes()` and `window_tokens()` would lie.
+            drop((h_handles, k_handles, v_handles));
+        } else if matches!(mask, larql_compute::StateDumpMask::HOnly) {
+            // Drop K/V handles (vecs are empty under HOnly anyway).
+            drop((k_handles, v_handles));
+            for (layer, h) in h_handles.into_iter().enumerate() {
+                let t_mat = std::time::Instant::now();
+                let h_arr = h.into_array();
+                if self.profiling {
+                    self.profile.state_materialise.record(t_mat);
+                }
+                let t_app = std::time::Instant::now();
+                append_row(&mut rs.stored[layer], &h_arr, len);
+                if self.profiling {
+                    self.profile.state_append.record(t_app);
+                }
+            }
+        } else {
+            for (layer, ((h, k), v)) in h_handles
+                .into_iter()
+                .zip(k_handles)
+                .zip(v_handles)
+                .enumerate()
+            {
+                let t_mat = std::time::Instant::now();
+                let h_arr = h.into_array();
+                let k_arr_opt = if rs.hot_kv.is_some() {
+                    Some((k.into_array(), v.into_array()))
+                } else {
+                    None
+                };
+                if self.profiling {
+                    self.profile.state_materialise.record(t_mat);
+                }
+                let t_app = std::time::Instant::now();
+                append_row(&mut rs.stored[layer], &h_arr, len);
+                if let Some(hot_kv) = rs.hot_kv.as_mut() {
+                    if let Some((k_arr, v_arr)) = k_arr_opt {
+                        append_row(&mut hot_kv[layer].0, &k_arr, len);
+                        append_row(&mut hot_kv[layer].1, &v_arr, len);
+                    }
+                }
+                if self.profiling {
+                    self.profile.state_append.record(t_app);
+                }
             }
         }
-        rs.hot_len = len + 1;
+        if did_append {
+            rs.hot_len = len + 1;
+        }
         // Window clip — same snapshot-evicted-into-cold flow as W2.
         // W8.2: use `rs.hot_len`, not `stored[l].shape()[0]` — with
         // pre-allocation the latter is the doubling capacity.
@@ -325,6 +461,9 @@ impl MarkovResidualEngine {
         }
         self.store = Some(rs);
         self.abs_position += 1;
+        if self.profiling {
+            self.profile.decode_total.record(t_total);
+        }
         Some(hidden)
     }
 }

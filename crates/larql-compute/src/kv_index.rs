@@ -235,4 +235,53 @@ mod tests {
         assert_eq!(dyn_idx.num_features(0), 32);
         assert_eq!(dyn_idx.vocab_size(), 128);
     }
+
+    /// Minimal `KvIndex` that overrides nothing — exercises every trait
+    /// default. `EmptyKvIndex` above overrides each method explicitly;
+    /// this stub uses the trait bodies themselves so they show as
+    /// covered in the report.
+    struct DefaultKvIndex;
+    impl KvIndex for DefaultKvIndex {}
+
+    #[test]
+    fn kv_index_trait_defaults_all_return_none_or_zero() {
+        let idx: &dyn KvIndex = &DefaultKvIndex;
+        assert_eq!(idx.num_features(0), 0);
+        assert_eq!(idx.num_features(42), 0);
+        assert!(idx.attn_kquant_layer_data(0).is_none());
+        assert!(idx.attn_q8_layer_data(0).is_none());
+        assert!(idx.interleaved_kquant_layer_data(0).is_none());
+        assert!(idx.interleaved_kquant_mmap_ref().is_none());
+        assert!(idx.interleaved_q4_mmap_ref().is_none());
+        assert!(idx.kquant_ffn_layer_once(0, 0).is_none());
+        assert!(idx.kquant_ffn_layer_once(3, 2).is_none());
+        assert_eq!(idx.vocab_size(), 0);
+    }
+
+    /// `EmptyKvIndex::attn_q8_layer_data` / `interleaved_q4_mmap_ref`
+    /// stay covered (they were already declared override stubs but the
+    /// callers in this test module had only exercised the kquant
+    /// accessors). Pinning them here keeps the override surface live.
+    #[test]
+    fn empty_kv_index_overrides_q8_and_legacy_q4_to_none() {
+        let idx = EmptyKvIndex;
+        let dyn_idx: &dyn KvIndex = &idx;
+        assert!(dyn_idx.attn_q8_layer_data(0).is_none());
+        assert!(dyn_idx.interleaved_q4_mmap_ref().is_none());
+    }
+
+    /// Same for `CannedKvIndex`'s `attn_q8_layer_data` /
+    /// `interleaved_q4_mmap_ref` — they're declared overrides returning
+    /// None but weren't exercised by the round-trip test above.
+    #[test]
+    fn canned_kv_index_q8_and_legacy_q4_paths_return_none() {
+        let idx = CannedKvIndex {
+            attn: vec![0u8; 16],
+            ffn: vec![1u8; 16],
+            ffn_cache: Arc::new(vec![0.5f32; 8]),
+        };
+        let dyn_idx: &dyn KvIndex = &idx;
+        assert!(dyn_idx.attn_q8_layer_data(0).is_none());
+        assert!(dyn_idx.interleaved_q4_mmap_ref().is_none());
+    }
 }

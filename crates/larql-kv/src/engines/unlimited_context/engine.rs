@@ -328,24 +328,64 @@ impl UnlimitedContextEngine {
     }
 
     fn close_window(&mut self) {
-        let kv = match self.current_window_kv.take() {
-            Some(kv) => kv,
-            None => return,
-        };
-        // W8: use the logical length counter; buffers may be
-        // pre-allocated `[window_size, kv_dim]` with only the first
-        // `current_window_kv_len` rows valid.
+        // W10 Phase B: under HOnly the engine-side window shadow is
+        // None; pull the last position's K/V back from the backend
+        // (Metal kv cache) via KvDispatch::read_kv_row_at. Without
+        // HOnly this branch never fires (kv is always Some) and we
+        // slice the engine-side shadow as before.
         let n = self.current_window_kv_len;
-        let last_kv: Vec<SharedKV> = if n == 0 {
-            Vec::new()
-        } else {
-            kv.iter()
-                .map(|(k, v)| {
-                    let last_k = k.slice(ndarray::s![n - 1..n, ..]).to_owned();
-                    let last_v = v.slice(ndarray::s![n - 1..n, ..]).to_owned();
-                    (last_k, last_v)
-                })
-                .collect()
+        let last_kv: Vec<SharedKV> = match self.current_window_kv.take() {
+            Some(kv) => {
+                if n == 0 {
+                    Vec::new()
+                } else {
+                    kv.iter()
+                        .map(|(k, v)| {
+                            let last_k = k.slice(ndarray::s![n - 1..n, ..]).to_owned();
+                            let last_v = v.slice(ndarray::s![n - 1..n, ..]).to_owned();
+                            (last_k, last_v)
+                        })
+                        .collect()
+                }
+            }
+            None => {
+                // No CPU shadow — engine ran under HOnly. Read the
+                // last position's K/V back from the backend's kv cache
+                // for the checkpoint. If the backend doesn't support
+                // this path (older Metal builds, CPU), we have to
+                // emit an empty checkpoint; the engine's continuation
+                // will need to re-run prefill from the archived tokens
+                // rather than the K/V checkpoint. This is the cost of
+                // running HOnly without a backend-side snapshot
+                // affordance.
+                if n == 0 {
+                    Vec::new()
+                } else if let Some(handle) = self.kv_handle.as_ref() {
+                    let last_pos = n - 1;
+                    let mut rows = Vec::with_capacity(self.last_hidden.as_ref().map_or(0, |h| {
+                        // num_layers proxy: ModelWeights isn't in scope
+                        // here, so we use the existing per-layer count
+                        // exposed by the backend on the first lookup.
+                        let _ = h;
+                        0
+                    }));
+                    let mut layer = 0;
+                    while let Some((k_row, v_row)) =
+                        self.backend.as_ref().read_kv_row_at(handle, layer, last_pos)
+                    {
+                        let kv_dim = k_row.len();
+                        let k = Array2::from_shape_vec((1, kv_dim), k_row)
+                            .expect("read_kv_row_at returned mismatched length");
+                        let v = Array2::from_shape_vec((1, kv_dim), v_row)
+                            .expect("read_kv_row_at returned mismatched length");
+                        rows.push((k, v));
+                        layer += 1;
+                    }
+                    rows
+                } else {
+                    return;
+                }
+            }
         };
         self.current_window_kv_len = 0;
 
@@ -403,22 +443,42 @@ impl UnlimitedContextEngine {
         // across the whole window.
         let prompt_len = token_ids.len();
         let window_cap = self.window_size.max(prompt_len);
-        let kv: Vec<SharedKV> = state
-            .k_new_per_layer
-            .into_iter()
-            .zip(state.v_new_per_layer)
-            .map(|(k_src, v_src)| {
-                let kv_dim = k_src.shape()[1];
-                let mut k_buf = Array2::<f32>::zeros((window_cap, kv_dim));
-                let mut v_buf = Array2::<f32>::zeros((window_cap, kv_dim));
-                if prompt_len > 0 {
-                    k_buf.slice_mut(s![..prompt_len, ..]).assign(&k_src);
-                    v_buf.slice_mut(s![..prompt_len, ..]).assign(&v_src);
-                }
-                (k_buf, v_buf)
-            })
-            .collect();
-        self.current_window_kv = Some(kv);
+        // W10 Phase B: when LARQL_W10_HONLY=1, drop the engine-side
+        // current_window_kv shadow on Metal. Metal's own kv cache is
+        // the K/V source of truth within the window; close_window()
+        // pulls the last position back from the kv cache via
+        // KvDispatch::read_kv_row_at when this Vec is None.
+        let drop_window_kv_shadow = std::env::var("LARQL_W10_HONLY")
+            .ok()
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        if drop_window_kv_shadow {
+            // Don't allocate the window_cap-sized shadow; drain incoming
+            // handles to satisfy the contract but discard the bytes.
+            drop((state.k_new_per_layer, state.v_new_per_layer));
+            self.current_window_kv = None;
+        } else {
+            // W10 Phase A: consume each layer's K/V handle into an owned
+            // Array2; CpuStateHandle moves without a copy.
+            let kv: Vec<SharedKV> = state
+                .k_new_per_layer
+                .into_iter()
+                .zip(state.v_new_per_layer)
+                .map(|(k_h, v_h)| {
+                    let k_src = k_h.into_array();
+                    let v_src = v_h.into_array();
+                    let kv_dim = k_src.shape()[1];
+                    let mut k_buf = Array2::<f32>::zeros((window_cap, kv_dim));
+                    let mut v_buf = Array2::<f32>::zeros((window_cap, kv_dim));
+                    if prompt_len > 0 {
+                        k_buf.slice_mut(s![..prompt_len, ..]).assign(&k_src);
+                        v_buf.slice_mut(s![..prompt_len, ..]).assign(&v_src);
+                    }
+                    (k_buf, v_buf)
+                })
+                .collect();
+            self.current_window_kv = Some(kv);
+        }
         self.current_window_kv_len = prompt_len;
         self.current_window_tokens = token_ids.to_vec();
         self.last_hidden = Some(hidden.clone());
@@ -443,15 +503,29 @@ impl UnlimitedContextEngine {
         let mut state = PerLayerDecodeState::with_capacity(num_layers);
         let abs_position = self.abs_offset + self.current_window_tokens.len();
         let handle = self.kv_handle.as_mut()?;
-        let hidden = self.backend.as_ref().coarse_decode_step_with_state(
+        // W10 Phase B: HOnly when the window shadow was dropped at
+        // prefill (env-gated). close_window() reads back K/V from the
+        // Metal kv cache via KvDispatch::read_kv_row_at when needed.
+        let want_h_only = self.current_window_kv.is_none()
+            && std::env::var("LARQL_W10_HONLY")
+                .ok()
+                .map(|v| v == "1")
+                .unwrap_or(false);
+        let mask = if want_h_only {
+            larql_compute::StateDumpMask::HOnly
+        } else {
+            larql_compute::StateDumpMask::Full
+        };
+        let hidden = self.backend.as_ref().coarse_decode_step_with_state_masked(
             weights,
             token_id,
             Some(index),
             handle,
             abs_position,
             Some(&mut state),
+            mask,
         )?;
-        if !state.is_complete_for(num_layers) {
+        if !state.is_complete_under(num_layers, mask) {
             self.kv_handle = None;
             return None;
         }
@@ -462,24 +536,34 @@ impl UnlimitedContextEngine {
         // CPU (`__bzero` + `zip_mut_with_same_shape` + `madvise`); this
         // path does a single `slice_mut(s![pos..pos+1, ..]).assign(row)`
         // per layer per side instead.
+        // W10 Phase B: under HOnly the engine-side window K/V shadow
+        // was dropped at prefill; the kernel populated Metal's kv
+        // cache directly. No CPU work here for K/V.
         let pos = self.current_window_kv_len;
-        let window_kv = self
-            .current_window_kv
-            .as_mut()
-            .expect("dispatch decode without prefill — kv_handle invariant violated");
-        debug_assert!(
-            pos < window_kv[0].0.shape()[0],
-            "current_window_kv_len {pos} >= buffer capacity {} — \
-             window auto-close should have fired before this",
-            window_kv[0].0.shape()[0]
-        );
-        for (slot, (k_new_row, v_new_row)) in window_kv
-            .iter_mut()
-            .zip(state.k_new_per_layer.iter().zip(state.v_new_per_layer.iter()))
-            .take(num_layers)
-        {
-            slot.0.slice_mut(s![pos..pos + 1, ..]).assign(k_new_row);
-            slot.1.slice_mut(s![pos..pos + 1, ..]).assign(v_new_row);
+        if !matches!(mask, larql_compute::StateDumpMask::HOnly) {
+            let window_kv = self
+                .current_window_kv
+                .as_mut()
+                .expect("dispatch decode without prefill — kv_handle invariant violated");
+            debug_assert!(
+                pos < window_kv[0].0.shape()[0],
+                "current_window_kv_len {pos} >= buffer capacity {} — \
+                 window auto-close should have fired before this",
+                window_kv[0].0.shape()[0]
+            );
+            // W10 Phase A: consume the K/V handles via into_array().
+            let k_handles = std::mem::take(&mut state.k_new_per_layer);
+            let v_handles = std::mem::take(&mut state.v_new_per_layer);
+            for (slot, (k_handle, v_handle)) in window_kv
+                .iter_mut()
+                .zip(k_handles.into_iter().zip(v_handles))
+                .take(num_layers)
+            {
+                let k_new_row = k_handle.into_array();
+                let v_new_row = v_handle.into_array();
+                slot.0.slice_mut(s![pos..pos + 1, ..]).assign(&k_new_row);
+                slot.1.slice_mut(s![pos..pos + 1, ..]).assign(&v_new_row);
+            }
         }
         self.current_window_kv_len = pos + 1;
         self.current_window_tokens.push(token_id);

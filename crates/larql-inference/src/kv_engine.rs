@@ -65,6 +65,21 @@ pub struct DecodeStageSummary {
     pub avg_attention_us: f64,
     pub avg_ffn_us: f64,
     pub avg_total_decode_us: f64,
+    /// W10 instrumentation: time spent inside the backend's
+    /// `coarse_decode_step_with_state_masked` call — kernel run +
+    /// state-dump readback (skipped under HOnly / None). Zero on
+    /// non-dispatch paths and on engines that don't capture state.
+    pub avg_state_capture_us: f64,
+    /// W10 instrumentation: cumulative time inside per-layer handle
+    /// materialise calls (`StateHandle::into_array`). Tracks the
+    /// CPU bridge cost from the captured dump to engine-owned
+    /// `Array2`s. Zero under None mask (engine drops handles
+    /// without materialising).
+    pub avg_state_materialise_us: f64,
+    /// W10 instrumentation: cumulative time appending materialised
+    /// state into engine slabs (`append_row` calls). Tracks
+    /// `rs.stored` / `rs.hot_kv` growth. Zero under None mask.
+    pub avg_state_append_us: f64,
 }
 
 impl DecodeStageSummary {
@@ -115,6 +130,30 @@ impl DecodeStageSummary {
             self.avg_ffn_us,
             pct(self.avg_ffn_us)
         );
+        // W10 instrumentation: only print state lines when populated
+        // (avoids noise on engines that don't capture state).
+        let state_total =
+            self.avg_state_capture_us + self.avg_state_materialise_us + self.avg_state_append_us;
+        if state_total > 0.0 {
+            println!(
+                "  {:<25} {:>8.1}  {:>5.1}%",
+                "state_capture",
+                self.avg_state_capture_us,
+                pct(self.avg_state_capture_us)
+            );
+            println!(
+                "  {:<25} {:>8.1}  {:>5.1}%",
+                "state_materialise",
+                self.avg_state_materialise_us,
+                pct(self.avg_state_materialise_us)
+            );
+            println!(
+                "  {:<25} {:>8.1}  {:>5.1}%",
+                "state_append",
+                self.avg_state_append_us,
+                pct(self.avg_state_append_us)
+            );
+        }
         println!("  {}", "-".repeat(45));
         println!(
             "  {:<25} {:>8.1}  {:>5.1}%",
@@ -320,6 +359,9 @@ mod tests {
             avg_attention_us: 4.0,
             avg_ffn_us: 5.0,
             avg_total_decode_us: 15.0,
+            avg_state_capture_us: 0.0,
+            avg_state_materialise_us: 0.0,
+            avg_state_append_us: 0.0,
         };
         assert_eq!(s.avg_recompute_total_us(), 5.0);
     }
@@ -339,6 +381,9 @@ mod tests {
             avg_attention_us: 1500.0,
             avg_ffn_us: 800.0,
             avg_total_decode_us: 3200.0,
+            avg_state_capture_us: 0.0,
+            avg_state_materialise_us: 0.0,
+            avg_state_append_us: 0.0,
         };
         s.print();
     }
@@ -358,6 +403,9 @@ mod tests {
             avg_attention_us: 0.0,
             avg_ffn_us: 0.0,
             avg_total_decode_us: 0.0,
+            avg_state_capture_us: 0.0,
+            avg_state_materialise_us: 0.0,
+            avg_state_append_us: 0.0,
         };
         s.print();
     }

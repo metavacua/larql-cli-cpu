@@ -76,6 +76,12 @@ pub mod per_layer_decode_state;
 pub mod pipeline;
 pub mod pipeline_layer;
 pub mod residual;
+pub mod state_handle;
+
+/// Synthetic test fixtures (Q4K `KvIndex` builder). Behind the
+/// `test-utils` feature — production builds never see it.
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_fixtures;
 
 pub use kv_index::{KvIndex, FFN_COMPONENTS_PER_LAYER};
 pub use per_layer_decode_state::PerLayerDecodeState;
@@ -94,7 +100,7 @@ pub use pipeline::{
 
 pub use backend::{
     dot_proj_gpu, matmul_gpu, Capability, ComputeBackend, DecodeBackend, DecodeStateDump, MatMul,
-    MatMulOp, QuantMatVec,
+    MatMulOp, ProfileTimings, QuantMatVec, StateDumpMask,
 };
 
 /// Bring every backend sub-trait into scope at once.

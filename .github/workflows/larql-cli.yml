@@ -101,7 +101,7 @@ jobs:
         if: runner.os != 'macOS'
         run: cargo check -p larql-cli --bins --tests --no-default-features
 
-      - name: Check (default features incl. metal) on macOS
+      - name: Check (default features incl. gpu) on macOS
         if: runner.os == 'macOS'
         run: cargo check -p larql-cli --bins --tests
 

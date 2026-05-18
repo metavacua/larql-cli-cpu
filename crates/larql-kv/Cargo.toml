@@ -41,7 +41,7 @@ openblas-src = { version = "0.10", features = ["system"] }
 
 [features]
 default = []
-metal = ["dep:larql-compute-metal", "larql-inference/metal"]
+gpu = ["dep:larql-compute-metal", "larql-inference/gpu"]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

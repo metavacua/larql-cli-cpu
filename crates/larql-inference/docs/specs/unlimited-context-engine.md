@@ -158,3 +158,31 @@ their window.
 - **Page-aligned KV slabs.** The current `CheckpointStore` uses
   owned `Vec<f32>` per layer per checkpoint; a hugepage-backed slab
   would cut allocation churn during 370K-token replays.
+
+---
+
+## 8. W10 (2026-05-18) — state-bridge mask cascade (opt-in)
+
+Under `LARQL_W10_HONLY=1`, the engine drops its `current_window_kv`
+shadow on Metal and requests the `HOnly` capture mask — Metal's own
+kv cache becomes the K/V source of truth within the window. The
+shadow only existed to satisfy `close_window`'s checkpoint
+emission, which now pulls the last position's K/V back from the
+Metal cache on demand via `KvDispatch::read_kv_row_at`.
+
+| Path | Mask | Engine shadow |
+|---|---|---|
+| `LARQL_W10_HONLY=0` (default) | `Full` | `current_window_kv` pre-allocated |
+| `LARQL_W10_HONLY=1` | `HOnly` | `current_window_kv = None`; close_window reads back from Metal |
+
+Preserves the **exact within window** contract — the kv cache
+Metal maintains for attention is the same one we'd otherwise have
+shadowed on CPU. Measured: 88.2 → 92.8 tok/s under `HOnly`, hot
+memory 9.6 MB → 0 MB (window=256).
+
+The `None` mask is **not** applied here because h_in is still
+needed for cold-tier replay across windows (the engine's
+canonical state extends beyond the current window via the
+checkpoint chain). A future Phase C-v2 with a Metal-side residual
+cache would unlock `None` for unlimited too; deferred until the
+~hidden_size × max_seq GPU memory cost justifies it.

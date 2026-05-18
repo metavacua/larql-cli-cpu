@@ -361,4 +361,102 @@ mod tests {
         let recorded = record.post_layer.get(&0).unwrap();
         assert_eq!(recorded.row(0).to_vec(), vec![6.0, 6.0]);
     }
+
+    /// `NoopHook` accepts every callback as a no-op; pin the trait
+    /// surface so a future signature drift would break compile.
+    #[test]
+    fn noop_hook_accepts_every_callback() {
+        let mut hook = NoopHook;
+        let mut h: Array2<f32> = array![[0.0, 0.0]];
+        let attn_weights = AttentionWeights {
+            heads: vec![vec![1.0, 0.0]],
+        };
+        let gate: Array2<f32> = array![[0.1, 0.2]];
+        hook.on_pre_layer(0, &h);
+        hook.on_post_attention(0, &mut h);
+        hook.on_attention_weights(0, &attn_weights);
+        hook.on_ffn_activation(0, &gate);
+        hook.on_post_layer(0, &mut h);
+    }
+
+    /// `RecordHook` records every callback at matching layers — drives
+    /// the `on_post_attention`, `on_attention_weights`, `on_ffn_activation`
+    /// paths in addition to the pre/post layer ones already covered.
+    #[test]
+    fn record_hook_records_every_callback_kind() {
+        let mut record = RecordHook::for_layers([0, 1]);
+        let mut h: Array2<f32> = array![[0.0, 0.0]];
+        let attn = AttentionWeights {
+            heads: vec![vec![0.5, 0.5]],
+        };
+        let gate: Array2<f32> = array![[0.1, 0.2]];
+
+        // Layer 0 in scope — every callback records.
+        record.on_post_attention(0, &mut h);
+        record.on_attention_weights(0, &attn);
+        record.on_ffn_activation(0, &gate);
+        assert!(record.post_attention.contains_key(&0));
+        assert!(record.attention_weights.contains_key(&0));
+        assert!(record.ffn_activation.contains_key(&0));
+
+        // Layer 5 NOT in scope — none recorded.
+        record.on_post_attention(5, &mut h);
+        record.on_attention_weights(5, &attn);
+        record.on_ffn_activation(5, &gate);
+        assert!(!record.post_attention.contains_key(&5));
+        assert!(!record.attention_weights.contains_key(&5));
+        assert!(!record.ffn_activation.contains_key(&5));
+    }
+
+    /// `CompositeHook` forwards every callback kind to every member.
+    #[test]
+    fn composite_hook_forwards_every_callback_kind() {
+        let mut record_a = RecordHook::for_layers([0]);
+        let mut record_b = RecordHook::for_layers([0]);
+        {
+            let mut comp = CompositeHook::new(vec![&mut record_a, &mut record_b]);
+            let mut h: Array2<f32> = array![[0.0, 0.0]];
+            let attn = AttentionWeights {
+                heads: vec![vec![0.5, 0.5]],
+            };
+            let gate: Array2<f32> = array![[0.1, 0.2]];
+            comp.on_pre_layer(0, &h);
+            comp.on_post_attention(0, &mut h);
+            comp.on_attention_weights(0, &attn);
+            comp.on_ffn_activation(0, &gate);
+            comp.on_post_layer(0, &mut h);
+        }
+        // Both members received every callback.
+        assert!(record_a.pre_layer.contains_key(&0));
+        assert!(record_a.post_attention.contains_key(&0));
+        assert!(record_a.attention_weights.contains_key(&0));
+        assert!(record_a.ffn_activation.contains_key(&0));
+        assert!(record_a.post_layer.contains_key(&0));
+        assert!(record_b.attention_weights.contains_key(&0));
+    }
+
+    /// `SteerHook::default()` calls `new()` — pin the default impl.
+    #[test]
+    fn steer_hook_default_is_empty() {
+        let hook = SteerHook::default();
+        assert!(hook.steers.is_empty());
+    }
+
+    /// `SteerHook::on_post_layer` early-returns when h has zero rows or
+    /// the vector width doesn't match — pin both guards.
+    #[test]
+    fn steer_hook_handles_shape_mismatch_gracefully() {
+        let mut steer = SteerHook::new().add(0, array![1.0, 1.0, 1.0], 1.0);
+        // Wrong width: vector is 3, h cols is 2 → no-op.
+        let mut h: Array2<f32> = array![[5.0, 5.0]];
+        steer.on_post_layer(0, &mut h);
+        assert_eq!(h.row(0).to_vec(), vec![5.0, 5.0]);
+        // Zero rows: no-op.
+        let mut h0: Array2<f32> = Array2::zeros((0, 3));
+        steer.on_post_layer(0, &mut h0);
+        // No matching layer: no-op.
+        let mut h_other: Array2<f32> = array![[5.0, 5.0, 5.0]];
+        steer.on_post_layer(99, &mut h_other);
+        assert_eq!(h_other.row(0).to_vec(), vec![5.0, 5.0, 5.0]);
+    }
 }

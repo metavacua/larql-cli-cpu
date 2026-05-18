@@ -124,7 +124,8 @@ pub fn predict_kquant_prefill_with_state(
 
         // Snapshot pre-attention residual for this layer if engine wants it.
         if let Some(s) = state.as_deref_mut() {
-            s.h_in_per_layer.push(h.clone());
+            s.h_in_per_layer
+                .push(crate::state_handle::CpuStateHandle::boxed(h.clone()));
         }
 
         // Attention with K/V capture. Backend stays None — we want the
@@ -141,8 +142,10 @@ pub fn predict_kquant_prefill_with_state(
 
         if let Some(s) = state.as_deref_mut() {
             // Prefill K/V for THIS layer = full seq_len × kv_dim.
-            s.k_new_per_layer.push(k_rope.clone());
-            s.v_new_per_layer.push(v_final.clone());
+            s.k_new_per_layer
+                .push(crate::state_handle::CpuStateHandle::boxed(k_rope.clone()));
+            s.v_new_per_layer
+                .push(crate::state_handle::CpuStateHandle::boxed(v_final.clone()));
         }
 
         let ffn = WeightFfn { weights };
@@ -417,7 +420,7 @@ pub fn fused_decode_step(
     token_id: u32,
     backend: &dyn crate::ComputeBackend,
 ) -> Option<Array2<f32>> {
-    fused_decode_step_inner(weights, index, token_id, backend, None)
+    fused_decode_step_inner(weights, index, token_id, backend, None, crate::StateDumpMask::Full)
 }
 
 /// Variant of [`fused_decode_step`] that also captures per-layer state
@@ -429,7 +432,21 @@ pub fn fused_decode_step_with_state(
     backend: &dyn crate::ComputeBackend,
     state: &mut crate::DecodeStateDump,
 ) -> Option<Array2<f32>> {
-    fused_decode_step_inner(weights, index, token_id, backend, Some(state))
+    fused_decode_step_inner(weights, index, token_id, backend, Some(state), crate::StateDumpMask::Full)
+}
+
+/// Mask-aware variant of [`fused_decode_step_with_state`]. Lets engines
+/// that treat K/V as derivative state request
+/// [`crate::StateDumpMask::HOnly`] to skip the K/V staging + readback.
+pub fn fused_decode_step_with_state_masked(
+    weights: &ModelWeights,
+    index: &dyn crate::KvIndex,
+    token_id: u32,
+    backend: &dyn crate::ComputeBackend,
+    state: &mut crate::DecodeStateDump,
+    mask: crate::StateDumpMask,
+) -> Option<Array2<f32>> {
+    fused_decode_step_inner(weights, index, token_id, backend, Some(state), mask)
 }
 
 fn fused_decode_step_inner(
@@ -438,6 +455,7 @@ fn fused_decode_step_inner(
     token_id: u32,
     backend: &dyn crate::ComputeBackend,
     state: Option<&mut crate::DecodeStateDump>,
+    mask: crate::StateDumpMask,
 ) -> Option<Array2<f32>> {
     let (q4_ffn_mmap, ffn_is_q4k) = if let Some(m) = index.interleaved_kquant_mmap_ref() {
         (m, true)
@@ -470,8 +488,8 @@ fn fused_decode_step_inner(
     let h_tok = crate::forward::embed_tokens_pub(weights, &[token_id]);
     let x_dec: Vec<f32> = h_tok.row(0).to_vec();
 
-    let h_vec =
-        backend.decode_token_with_state_dump(&layers, &x_dec, hidden, intermediate, state)?;
+    let h_vec = backend
+        .decode_token_with_state_dump_masked(&layers, &x_dec, hidden, intermediate, state, mask)?;
     Array2::from_shape_vec((1, hidden), h_vec).ok()
 }
 
@@ -895,7 +913,8 @@ pub fn predict_kquant_decode_step_direct_with_state(
 
     for layer in 0..num_layers {
         if let Some(s) = state.as_deref_mut() {
-            s.h_in_per_layer.push(h.clone());
+            s.h_in_per_layer
+                .push(crate::state_handle::CpuStateHandle::boxed(h.clone()));
         }
         let kv_entry = cache[layer].as_ref();
         let (h_post_attn, new_kv) = attention_decode_step_native(
@@ -913,9 +932,13 @@ pub fn predict_kquant_decode_step_direct_with_state(
             // hot_kv, turbo_quant compressed) consume this row.
             let n = new_kv.0.shape()[0];
             s.k_new_per_layer
-                .push(new_kv.0.slice(s![n - 1..n, ..]).to_owned());
+                .push(crate::state_handle::CpuStateHandle::boxed(
+                    new_kv.0.slice(s![n - 1..n, ..]).to_owned(),
+                ));
             s.v_new_per_layer
-                .push(new_kv.1.slice(s![n - 1..n, ..]).to_owned());
+                .push(crate::state_handle::CpuStateHandle::boxed(
+                    new_kv.1.slice(s![n - 1..n, ..]).to_owned(),
+                ));
         }
         cache[layer] = Some(new_kv);
 

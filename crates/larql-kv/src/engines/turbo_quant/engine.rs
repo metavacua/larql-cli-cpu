@@ -246,12 +246,16 @@ impl TurboQuantEngine {
         // round-trip via `CompressedLayer::compress` is the engine's
         // contract — the user picked turbo_quant for the K/V
         // compression, so we honor it on the GPU-state path too.
+        // W10 Phase A: drain the handle vecs and consume each layer's
+        // K/V via into_array() — zero-copy move on the CPU happy path.
         self.layers.clear();
-        for layer in 0..num_layers {
-            let k = state.k_new_per_layer[layer].clone();
-            let v = state.v_new_per_layer[layer].clone();
+        let k_handles = std::mem::take(&mut state.k_new_per_layer);
+        let v_handles = std::mem::take(&mut state.v_new_per_layer);
+        for (k, v) in k_handles.into_iter().zip(v_handles) {
+            let k_arr = k.into_array();
+            let v_arr = v.into_array();
             self.layers
-                .push(CompressedLayer::compress(&(k, v), &self.tq));
+                .push(CompressedLayer::compress(&(k_arr, v_arr), &self.tq));
         }
         self.kv_handle = Some(handle);
         self.abs_position = token_ids.len();
@@ -288,10 +292,15 @@ impl TurboQuantEngine {
         // This is the same compression cycle the legacy path runs in
         // `decode_step_quant_cpu` — just driven by state.k_new/v_new
         // instead of an `attention_decode_step_native` call.
-        for layer in 0..num_layers {
+        // W10 Phase A: consume handles via into_array().
+        let k_handles = std::mem::take(&mut state.k_new_per_layer);
+        let v_handles = std::mem::take(&mut state.v_new_per_layer);
+        for (layer, (k_handle, v_handle)) in
+            k_handles.into_iter().zip(v_handles).enumerate()
+        {
             let prior_kv = self.layers[layer].decompress(&self.tq);
-            let k_new_row = &state.k_new_per_layer[layer];
-            let v_new_row = &state.v_new_per_layer[layer];
+            let k_new_row = k_handle.into_array();
+            let v_new_row = v_handle.into_array();
             let arch = &*weights.arch;
             let kv_dim = arch.num_kv_heads_for_layer(layer) * arch.head_dim_for_layer(layer);
             let head_dim = detect_head_dim(kv_dim);
@@ -299,10 +308,10 @@ impl TurboQuantEngine {
             let prior_rows = prior_kv.0.shape()[0];
             let mut k_full = ndarray::Array2::<f32>::zeros((prior_rows + 1, kv_dim));
             k_full.slice_mut(s![..prior_rows, ..]).assign(&prior_kv.0);
-            k_full.slice_mut(s![prior_rows.., ..]).assign(k_new_row);
+            k_full.slice_mut(s![prior_rows.., ..]).assign(&k_new_row);
             let mut v_full = ndarray::Array2::<f32>::zeros((prior_rows + 1, kv_dim));
             v_full.slice_mut(s![..prior_rows, ..]).assign(&prior_kv.1);
-            v_full.slice_mut(s![prior_rows.., ..]).assign(v_new_row);
+            v_full.slice_mut(s![prior_rows.., ..]).assign(&v_new_row);
             self.layers[layer] = CompressedLayer {
                 compressed_k: compress_matrix(&k_full, &self.tq, head_dim),
                 compressed_v: compress_matrix(&v_full, &self.tq, head_dim),
