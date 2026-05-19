@@ -39,7 +39,7 @@ pub(super) fn prefill_for_streaming(
     x: &[f32],
     qk_norm_val: bool,
     softcap_val: f32,
-    upload_ple: Option<&dyn Fn(u32, &[f32])>,
+    upload_ple: Option<super::UploadPleFn>,
 ) -> Result<Vec<f32>, GenerateError> {
     let seq_len = token_ids.len();
 

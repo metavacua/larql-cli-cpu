@@ -16,9 +16,10 @@
 ///
 /// This enum lets the walk rank features by quantities other than gate
 /// score alone, to test the selection-vs-coverage hypothesis at low K.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FeatureSelector {
     /// Top-K by `|gate_score|`. Default; matches existing behaviour.
+    #[default]
     GateOnly,
     /// Top-K by `|gate_score × ‖down_row‖|`. Importance-weighted by the
     /// down-projection's row norm — a static quantity known at index
@@ -44,12 +45,6 @@ pub enum FeatureSelector {
     /// Top-K random. Control — tells us how much *any* informed
     /// selection beats no selection.
     Random,
-}
-
-impl Default for FeatureSelector {
-    fn default() -> Self {
-        FeatureSelector::GateOnly
-    }
 }
 
 #[derive(Debug, Clone)]

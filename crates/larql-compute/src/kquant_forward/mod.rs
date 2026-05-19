@@ -275,14 +275,8 @@ mod tests {
     #[test]
     fn cached_timings_add_accumulates_dequant_ms() {
         let mut acc = CachedTimings::default();
-        let a = CachedTimings {
-            dequant_ms: 1.0,
-            ..Default::default()
-        };
-        let b = CachedTimings {
-            dequant_ms: 2.5,
-            ..Default::default()
-        };
+        let a = CachedTimings { dequant_ms: 1.0 };
+        let b = CachedTimings { dequant_ms: 2.5 };
         acc.add(a);
         acc.add(b);
         assert!((acc.dequant_ms - 3.5).abs() < 1e-9);

@@ -59,7 +59,7 @@ pub(super) fn run_decode_loop<F>(
     generated_ids: &mut Vec<u32>,
     mut current_token_id: u32,
     max_tokens: usize,
-    upload_ple: Option<&dyn Fn(u32, &[f32])>,
+    upload_ple: Option<super::UploadPleFn>,
     on_token: &mut F,
 ) -> DecodeLoopOutcome
 where

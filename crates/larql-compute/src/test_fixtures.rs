@@ -24,6 +24,11 @@ use larql_models::ModelWeights;
 use crate::cpu::ops::q4_common::{dequantize_q4_k, quantize_q4_k};
 use crate::kv_index::{KvIndex, FFN_COMPONENTS_PER_LAYER};
 
+/// Per-(layer, component) dequantised FFN block — lazily populated on first
+/// request through `kquant_ffn_layer_once`. Aliased here only to keep the
+/// containing struct under clippy's `type_complexity` threshold.
+type FfnDequantCache = std::sync::Mutex<HashMap<(usize, usize), Arc<Vec<f32>>>>;
+
 /// `KvIndex` backed by Q4_K-quantized weight tensors held in
 /// in-process memory. Drives `kquant_forward::fused_*` and the
 /// `coarse_*` paths on `KvDispatch` impls end-to-end without
@@ -49,7 +54,7 @@ pub struct Q4kFixtureIndex {
     attn_offsets: Vec<[(usize, usize); 4]>,
     /// Per-(layer, component) dequantised FFN cache populated lazily
     /// on first request through `kquant_ffn_layer_once`.
-    ffn_cache: std::sync::Mutex<HashMap<(usize, usize), Arc<Vec<f32>>>>,
+    ffn_cache: FfnDequantCache,
     /// Intermediate dimension — `num_features` returns this.
     intermediate: usize,
     /// Vocabulary size — `vocab_size` returns this.
@@ -186,7 +191,6 @@ impl KvIndex for Q4kFixtureIndex {
 pub fn make_q4k_fixture_index(weights: &ModelWeights) -> Q4kFixtureIndex {
     let num_layers = weights.num_layers;
     let arch = &*weights.arch;
-    let hidden = weights.hidden_size;
     let intermediate = weights.intermediate_size;
     let vocab_size = weights.vocab_size;
 

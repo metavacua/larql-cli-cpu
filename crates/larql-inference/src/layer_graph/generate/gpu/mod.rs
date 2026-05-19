@@ -14,6 +14,13 @@ mod sampling_step;
 
 pub use forced_logits::{stream_forced_full_logits, ForcedLogitsResult};
 
+/// PLE upload callback — invoked once per token before the per-token GPU
+/// forward pass on per-layer-embedding models (e.g. Gemma 4 E2B). `None`
+/// elsewhere. See [`crate::forward::ple`] for the per-layer-input
+/// precompute that feeds this. Aliased to keep clippy's
+/// `type_complexity` lint happy at the call sites.
+pub(super) type UploadPleFn<'a> = &'a dyn Fn(u32, &[f32]);
+
 use super::cpu::{backend_supports_fused_q4_pipeline, generate_via_cpu_q4k};
 use super::detok::Detokenizer;
 use super::eos::EosConfig;
@@ -278,7 +285,7 @@ where
         }
         backend.prepare_ple_inputs(&flat, num_layers, ple_dim);
     };
-    let upload_ple: Option<&dyn Fn(u32, &[f32])> = if use_ple {
+    let upload_ple: Option<UploadPleFn> = if use_ple {
         Some(&upload_ple_closure)
     } else {
         None
