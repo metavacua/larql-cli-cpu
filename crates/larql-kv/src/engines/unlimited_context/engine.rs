@@ -17,7 +17,7 @@
 use larql_compute::ComputeBackend;
 use larql_inference::{cpu_engine_backend, EngineBackend};
 use larql_vindex::VectorIndex;
-use ndarray::{s, Array2};
+use ndarray::Array2;
 use serde::Serialize;
 
 use super::checkpoint_store::CheckpointStore;
@@ -62,8 +62,8 @@ pub struct UnlimitedContextEngine {
     pub checkpoints: CheckpointStore,
     pub archive: TokenArchive,
 
-    current_window_id: usize,
-    current_window_tokens: Vec<u32>,
+    pub(super) current_window_id: usize,
+    pub(super) current_window_tokens: Vec<u32>,
     /// Per-layer K/V for the current (partial) window.
     ///
     /// Two layouts coexist:
@@ -80,19 +80,19 @@ pub struct UnlimitedContextEngine {
     ///
     /// Readers that need the logical length **must** use
     /// `current_window_kv_len`, not `k.shape()[0]`.
-    current_window_kv: Option<Vec<SharedKV>>,
+    pub(super) current_window_kv: Option<Vec<SharedKV>>,
     /// Logical row count for `current_window_kv`. See field doc above.
-    current_window_kv_len: usize,
-    abs_offset: usize,
+    pub(super) current_window_kv_len: usize,
+    pub(super) abs_offset: usize,
     /// Hidden state at the last processed token; set by `process()`.
-    last_hidden: Option<Array2<f32>>,
-    backend: Box<dyn EngineBackend>,
-    profiling: bool,
-    profile: crate::profiler::EngineProfiler,
+    pub(super) last_hidden: Option<Array2<f32>>,
+    pub(super) backend: Box<dyn EngineBackend>,
+    pub(super) profiling: bool,
+    pub(super) profile: crate::profiler::EngineProfiler,
     /// W1-GPU: handle into the backend's K/V cache, populated when
     /// prefill routes through `coarse_prefill_with_state`. `None` =
     /// legacy CPU walk path.
-    kv_handle: Option<larql_inference::KvHandle>,
+    pub(super) kv_handle: Option<larql_inference::KvHandle>,
 }
 
 impl UnlimitedContextEngine {
@@ -327,7 +327,7 @@ impl UnlimitedContextEngine {
         Some(())
     }
 
-    fn close_window(&mut self) {
+    pub(super) fn close_window(&mut self) {
         // W10 Phase B: under HOnly the engine-side window shadow is
         // None; pull the last position's K/V back from the backend
         // (Metal kv cache) via KvDispatch::read_kv_row_at. Without
@@ -403,179 +403,6 @@ impl UnlimitedContextEngine {
         );
         self.abs_offset += window_len;
         self.current_window_id += 1;
-    }
-
-    /// W1-GPU step 4: prefill via `coarse_prefill_with_state`.
-    /// Captured per-layer K/V populates `current_window_kv` directly.
-    /// Window-overflow handling (auto-close, archive, checkpoint) is
-    /// still driven by the engine's token-list tracking — the
-    /// `process_via_dispatch` helper threads tokens through
-    /// `decode_step_via_dispatch` per-token to keep window state
-    /// consistent.
-    fn try_prefill_via_dispatch(
-        &mut self,
-        weights: &mut ModelWeights,
-        index: &VectorIndex,
-        token_ids: &[u32],
-    ) -> Option<Array2<f32>> {
-        use larql_inference::PerLayerDecodeState;
-        if !larql_inference::vindex::supports_cached_decode(weights)
-            || !larql_inference::vindex::supports_direct_matvec_decode(weights, index)
-        {
-            return None;
-        }
-        let num_layers = weights.num_layers;
-        let mut state = PerLayerDecodeState::with_capacity(num_layers);
-        let (hidden, handle) = self.backend.as_ref().coarse_prefill_with_state(
-            weights,
-            token_ids,
-            Some(index),
-            Some(&mut state),
-        )?;
-        if !state.is_complete_for(num_layers) {
-            return None;
-        }
-        // Build current_window_kv from captured prefill K/V into
-        // **pre-allocated** [window_size, kv_dim] buffers so subsequent
-        // decode steps can append a single row in-place rather than
-        // allocating a fresh Array2 each call (W8 — 58% of post-W7
-        // decode CPU was `__bzero` + `zip_mut_with_same_shape` +
-        // `madvise` from the `Array2::zeros((n+1, kv_dim))` pattern).
-        // Prefill is one-shot, so the alloc cost here is amortised
-        // across the whole window.
-        let prompt_len = token_ids.len();
-        let window_cap = self.window_size.max(prompt_len);
-        // W10 Phase B: when LARQL_W10_HONLY=1, drop the engine-side
-        // current_window_kv shadow on Metal. Metal's own kv cache is
-        // the K/V source of truth within the window; close_window()
-        // pulls the last position back from the kv cache via
-        // KvDispatch::read_kv_row_at when this Vec is None.
-        let drop_window_kv_shadow = std::env::var("LARQL_W10_HONLY")
-            .ok()
-            .map(|v| v == "1")
-            .unwrap_or(false);
-        if drop_window_kv_shadow {
-            // Don't allocate the window_cap-sized shadow; drain incoming
-            // handles to satisfy the contract but discard the bytes.
-            drop((state.k_new_per_layer, state.v_new_per_layer));
-            self.current_window_kv = None;
-        } else {
-            // W10 Phase A: consume each layer's K/V handle into an owned
-            // Array2; CpuStateHandle moves without a copy.
-            let kv: Vec<SharedKV> = state
-                .k_new_per_layer
-                .into_iter()
-                .zip(state.v_new_per_layer)
-                .map(|(k_h, v_h)| {
-                    let k_src = k_h.into_array();
-                    let v_src = v_h.into_array();
-                    let kv_dim = k_src.shape()[1];
-                    let mut k_buf = Array2::<f32>::zeros((window_cap, kv_dim));
-                    let mut v_buf = Array2::<f32>::zeros((window_cap, kv_dim));
-                    if prompt_len > 0 {
-                        k_buf.slice_mut(s![..prompt_len, ..]).assign(&k_src);
-                        v_buf.slice_mut(s![..prompt_len, ..]).assign(&v_src);
-                    }
-                    (k_buf, v_buf)
-                })
-                .collect();
-            self.current_window_kv = Some(kv);
-        }
-        self.current_window_kv_len = prompt_len;
-        self.current_window_tokens = token_ids.to_vec();
-        self.last_hidden = Some(hidden.clone());
-        self.kv_handle = Some(handle);
-        Some(hidden)
-    }
-
-    /// W1-GPU step 4: decode through dispatch. State capture gives
-    /// us the new K/V row per layer; we append to `current_window_kv`
-    /// and emit a window checkpoint when token count crosses
-    /// `window_size`. The legacy `close_window` flow uses the
-    /// engine-stored K/V for checkpoint emission, so this dispatch
-    /// path preserves the engine's contract.
-    fn decode_step_via_dispatch(
-        &mut self,
-        weights: &mut ModelWeights,
-        index: &VectorIndex,
-        token_id: u32,
-    ) -> Option<Array2<f32>> {
-        use larql_inference::PerLayerDecodeState;
-        let num_layers = weights.num_layers;
-        let mut state = PerLayerDecodeState::with_capacity(num_layers);
-        let abs_position = self.abs_offset + self.current_window_tokens.len();
-        let handle = self.kv_handle.as_mut()?;
-        // W10 Phase B: HOnly when the window shadow was dropped at
-        // prefill (env-gated). close_window() reads back K/V from the
-        // Metal kv cache via KvDispatch::read_kv_row_at when needed.
-        let want_h_only = self.current_window_kv.is_none()
-            && std::env::var("LARQL_W10_HONLY")
-                .ok()
-                .map(|v| v == "1")
-                .unwrap_or(false);
-        let mask = if want_h_only {
-            larql_compute::StateDumpMask::HOnly
-        } else {
-            larql_compute::StateDumpMask::Full
-        };
-        let hidden = self.backend.as_ref().coarse_decode_step_with_state_masked(
-            weights,
-            token_id,
-            Some(index),
-            handle,
-            abs_position,
-            Some(&mut state),
-            mask,
-        )?;
-        if !state.is_complete_under(num_layers, mask) {
-            self.kv_handle = None;
-            return None;
-        }
-        // W8: append one K/V row per layer **in place** into the
-        // pre-allocated `[window_size, kv_dim]` buffers seeded by
-        // `try_prefill_via_dispatch`. The previous `Array2::zeros((n+1,
-        // kv_dim)) + slice-copy` pattern was 58% of post-W7 decode
-        // CPU (`__bzero` + `zip_mut_with_same_shape` + `madvise`); this
-        // path does a single `slice_mut(s![pos..pos+1, ..]).assign(row)`
-        // per layer per side instead.
-        // W10 Phase B: under HOnly the engine-side window K/V shadow
-        // was dropped at prefill; the kernel populated Metal's kv
-        // cache directly. No CPU work here for K/V.
-        let pos = self.current_window_kv_len;
-        if !matches!(mask, larql_compute::StateDumpMask::HOnly) {
-            let window_kv = self
-                .current_window_kv
-                .as_mut()
-                .expect("dispatch decode without prefill — kv_handle invariant violated");
-            debug_assert!(
-                pos < window_kv[0].0.shape()[0],
-                "current_window_kv_len {pos} >= buffer capacity {} — \
-                 window auto-close should have fired before this",
-                window_kv[0].0.shape()[0]
-            );
-            // W10 Phase A: consume the K/V handles via into_array().
-            let k_handles = std::mem::take(&mut state.k_new_per_layer);
-            let v_handles = std::mem::take(&mut state.v_new_per_layer);
-            for (slot, (k_handle, v_handle)) in window_kv
-                .iter_mut()
-                .zip(k_handles.into_iter().zip(v_handles))
-                .take(num_layers)
-            {
-                let k_new_row = k_handle.into_array();
-                let v_new_row = v_handle.into_array();
-                slot.0.slice_mut(s![pos..pos + 1, ..]).assign(&k_new_row);
-                slot.1.slice_mut(s![pos..pos + 1, ..]).assign(&v_new_row);
-            }
-        }
-        self.current_window_kv_len = pos + 1;
-        self.current_window_tokens.push(token_id);
-        self.last_hidden = Some(hidden.clone());
-
-        // Window auto-close: same trigger as the legacy process loop.
-        if self.current_window_tokens.len() >= self.window_size {
-            self.close_window();
-        }
-        Some(hidden)
     }
 }
 

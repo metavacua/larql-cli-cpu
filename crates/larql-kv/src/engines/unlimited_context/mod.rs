@@ -1,4 +1,5 @@
 pub mod checkpoint_store;
+pub(crate) mod dispatch;
 pub mod engine;
 pub mod extend;
 pub mod token_archive;

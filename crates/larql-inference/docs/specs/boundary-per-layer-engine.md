@@ -389,6 +389,40 @@ doc.
 If per-position codec choice ever earns its complexity, it slots in
 here. Out of scope for v0.1; flagged in §3 as a non-promise.
 
+### Phase 2.5 — Performance & module shape (landed 2026-05-20)
+
+Two O(N²) bugs + the dense-walk perf gap that materialised once the
+engine was actually benched against `markov_residual_codec`:
+
+- **Bug A (hot-tier rebuild)**: each `decode_step` rebuilt every
+  layer's `stored[layer]` via `Array2::zeros + .assign` —
+  O(N · num_layers · hidden) per step → O(N²) total in unbounded
+  mode. Replaced with `ndarray::Array2::push_row` (amortised O(m)).
+- **Bug B (cold_kv nuke)**: every overflow set `cold_kv = None`,
+  forcing the next decode step to recompute K/V over the entire
+  decoded cold tier → O(N²) windowed-mode decode. Replaced with
+  `cold_tier::extend_cold_kv_with_overflow` (appends K/V on each
+  overflow at the pre-`cold_encoded.append` absolute position so
+  RoPE is correct). Validated 100% token agreement vs
+  `markov_residual_codec` on Gemma 3 4B Q4K via
+  `examples/boundary_per_layer_parity_gate.rs`.
+- **W1-GPU dispatch**: ported `markov_residual_codec`'s
+  `try_prefill_via_dispatch` / `decode_step_via_dispatch` pattern.
+  91.8 tok/s vs codec's 92.6 (−0.9%) on Gemma 3 4B, M3 Max; 44%
+  less hot memory (19.6 MB vs 35.3 MB) since this port doesn't
+  shadow hot K/V — backend's KV cache is canonical, hot K/V is
+  recomputed at overflow extension time.
+- **FFN routing**: `run_prefill` / `run_decode` previously hardcoded
+  `BackendFfn` which needed dense FFN weights — broke on `--compact`
+  vindexes. Now honours the caller-supplied `&dyn FfnBackend`.
+- **Module split** of `engines/boundary_per_layer/engine.rs` (1250
+  → 716 LOC) into sibling files `walk.rs` / `dispatch.rs` /
+  `executor.rs` / `cold_tier.rs`, mirroring
+  `markov_residual_codec`'s layout. Free-function pattern; engine
+  struct fields are `pub(super)` for sibling-module access.
+
+CHANGELOG entry: 2026-05-20.
+
 ## 10. Open questions
 
 - **Is the per-layer payoff worth the calibration cost?** The

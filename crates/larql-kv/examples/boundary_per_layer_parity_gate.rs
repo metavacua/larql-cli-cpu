@@ -39,7 +39,10 @@
 
 use std::path::PathBuf;
 
-use larql_inference::{cpu_backend, default_compute_backend, InferenceModel};
+use larql_inference::{
+    cpu_backend, cpu_engine_backend, default_compute_backend, default_engine_backend,
+    InferenceModel,
+};
 use larql_kv::EngineKind;
 use larql_vindex::{SilentLoadCallbacks, VectorIndex};
 use ndarray::Array2;
@@ -150,7 +153,14 @@ fn generate_tokens(
     } else {
         default_compute_backend()
     };
-    let engine_backend = larql_inference::cpu_engine_backend();
+    // Use default_engine_backend (Metal on Mac) so try_prefill_via_dispatch
+    // can take the W1-GPU fast path. cpu_engine_backend lacks
+    // supports_direct_matvec_decode on Q4K vindexes.
+    let engine_backend = if cpu {
+        cpu_engine_backend()
+    } else {
+        default_engine_backend()
+    };
     let kind = EngineKind::from_name(engine_spec)
         .unwrap_or_else(|| panic!("EngineKind::from_name({engine_spec:?}) returned None"));
     let mut engine = kind.build(engine_backend);
@@ -192,8 +202,6 @@ struct CaseResult {
     label: String,
     first_diff: Option<usize>,
     agreement_rate: f32,
-    ref_tokens: Vec<u32>,
-    cand_tokens: Vec<u32>,
     ref_stats: RunStats,
     cand_stats: RunStats,
 }
@@ -272,8 +280,6 @@ fn main() {
             label: (*label).to_string(),
             first_diff,
             agreement_rate,
-            ref_tokens,
-            cand_tokens,
             ref_stats,
             cand_stats,
         });

@@ -253,16 +253,16 @@ pub(super) fn last_row(h: &Array2<f32>) -> Array2<f32> {
 // ─── Engine ──────────────────────────────────────────────────────────────────
 
 pub struct TurboQuantEngine {
-    tq: TurboQuant,
-    backend: Box<dyn EngineBackend>,
-    layers: Vec<CompressedLayer>,
-    abs_position: usize,
-    profiling: bool,
-    profile: crate::profiler::EngineProfiler,
+    pub(super) tq: TurboQuant,
+    pub(super) backend: Box<dyn EngineBackend>,
+    pub(super) layers: Vec<CompressedLayer>,
+    pub(super) abs_position: usize,
+    pub(super) profiling: bool,
+    pub(super) profile: crate::profiler::EngineProfiler,
     /// W1-GPU: handle into the backend's internal K/V cache, populated
     /// when prefill routes through `coarse_prefill_with_state`. `None`
     /// means the engine took the legacy per-layer walk path.
-    kv_handle: Option<larql_inference::KvHandle>,
+    pub(super) kv_handle: Option<larql_inference::KvHandle>,
 }
 
 impl TurboQuantEngine {
@@ -286,169 +286,12 @@ impl TurboQuantEngine {
         self.profiling = enabled;
         self
     }
-
-    /// W1-GPU step 6: prefill via `coarse_prefill_with_state`.
-    /// Captured per-layer K/V is compressed into `CompressedLayer`
-    /// entries (one per model layer) for the engine's contract.
-    fn try_prefill_via_dispatch(
-        &mut self,
-        weights: &mut ModelWeights,
-        index: &VectorIndex,
-        token_ids: &[u32],
-    ) -> Option<Array2<f32>> {
-        use larql_inference::PerLayerDecodeState;
-        if !larql_inference::vindex::supports_cached_decode(weights)
-            || !larql_inference::vindex::supports_direct_matvec_decode(weights, index)
-        {
-            return None;
-        }
-        let num_layers = weights.num_layers;
-        let mut state = PerLayerDecodeState::with_capacity(num_layers);
-        let (hidden, handle) = self.backend.as_ref().coarse_prefill_with_state(
-            weights,
-            token_ids,
-            Some(index),
-            Some(&mut state),
-        )?;
-        if !state.is_complete_for(num_layers) {
-            return None;
-        }
-        // Compress each layer's full prefill K/V into CompressedLayer.
-        // state.k_new_per_layer[l] is [seq_len, kv_dim_for_layer]; same
-        // shape as `attention_decode_step_native` returns. The codec
-        // round-trip via `CompressedLayer::compress` is the engine's
-        // contract — the user picked turbo_quant for the K/V
-        // compression, so we honor it on the GPU-state path too.
-        // W10 Phase A: drain the handle vecs and consume each layer's
-        // K/V via into_array() — zero-copy move on the CPU happy path.
-        self.layers.clear();
-        let k_handles = std::mem::take(&mut state.k_new_per_layer);
-        let v_handles = std::mem::take(&mut state.v_new_per_layer);
-        for (k, v) in k_handles.into_iter().zip(v_handles) {
-            let k_arr = k.into_array();
-            let v_arr = v.into_array();
-            self.layers
-                .push(CompressedLayer::compress(&(k_arr, v_arr), &self.tq));
-        }
-        self.kv_handle = Some(handle);
-        self.abs_position = token_ids.len();
-        Some(hidden)
-    }
-
-    /// W1-GPU step 6: decode through dispatch. State capture gives
-    /// us the new K/V row per layer; we append + re-compress into
-    /// the existing `CompressedLayer` slot.
-    fn decode_step_via_dispatch(
-        &mut self,
-        weights: &mut ModelWeights,
-        index: &VectorIndex,
-        token_id: u32,
-    ) -> Option<Array2<f32>> {
-        // Diagnostic: decode_total wraps the whole step; state_capture
-        // isolates the backend call (kernel + state-dump readback);
-        // recompute_hot tracks the per-layer codec compress/decompress
-        // cycle (turbo-quant's distinctive cost). This split surfaces
-        // whether per-step time is kernel-bound or codec-bound.
-        let t_total = std::time::Instant::now();
-        use larql_inference::PerLayerDecodeState;
-        use ndarray::s;
-        let num_layers = weights.num_layers;
-        let mut state = PerLayerDecodeState::with_capacity(num_layers);
-        let handle = self.kv_handle.as_mut()?;
-        let t_capture = std::time::Instant::now();
-        let hidden = self.backend.as_ref().coarse_decode_step_with_state(
-            weights,
-            token_id,
-            Some(index),
-            handle,
-            self.abs_position,
-            Some(&mut state),
-        )?;
-        if self.profiling {
-            self.profile.state_capture.record(t_capture);
-        }
-        if !state.is_complete_for(num_layers) {
-            self.kv_handle = None;
-            return None;
-        }
-        // For each layer: decompress prior, append new row, re-compress.
-        // This is the same compression cycle the legacy path runs in
-        // `decode_step_quant_cpu` — just driven by state.k_new/v_new
-        // instead of an `attention_decode_step_native` call.
-        // W10 Phase A: consume handles via into_array().
-        let k_handles = std::mem::take(&mut state.k_new_per_layer);
-        let v_handles = std::mem::take(&mut state.v_new_per_layer);
-        let t_codec = std::time::Instant::now();
-        // 2026-05-19: append-only codec path. Diagnostic measurement
-        // showed the prior decompress+concat+re-compress flow was the
-        // real bottleneck (O(N) per step per layer, dominated the
-        // 20 ms recompute_hot bucket). Each row's codec round-trip is
-        // independent per the turbo-quant contract, so on a single-row
-        // append we just encode the new row and push its bytes onto
-        // the existing compressed buffer. Per-step CPU cost drops from
-        // O(N × num_layers × kv_dim) to O(num_layers × kv_dim).
-        //
-        // Scratch buffers reused across layers per step (and across
-        // heads within a layer) — matches compress_matrix's pattern.
-        let mut scratch_f32: Vec<f32> = Vec::new();
-        let mut scratch_u8: Vec<u8> = Vec::new();
-        for (layer, (k_handle, v_handle)) in k_handles.into_iter().zip(v_handles).enumerate() {
-            let k_new_row = k_handle.into_array();
-            let v_new_row = v_handle.into_array();
-            let arch = &*weights.arch;
-            let kv_dim = arch.num_kv_heads_for_layer(layer) * arch.head_dim_for_layer(layer);
-            let head_dim = detect_head_dim(kv_dim);
-            let layer_slot = &mut self.layers[layer];
-            // Bytes-per-row across all heads, so we can verify the
-            // append-only invariant: prior compressed_k length must
-            // equal `num_vecs * heads_per_row * bytes_per_head`.
-            let heads_per_row = kv_dim / head_dim;
-            let bytes_per_head = self.tq.bytes_per_vector(head_dim);
-            debug_assert_eq!(
-                layer_slot.compressed_k.len(),
-                layer_slot.num_vecs * heads_per_row * bytes_per_head,
-                "compressed_k length out of sync with num_vecs on layer {layer}"
-            );
-            // Encode K row, append head-by-head.
-            let k_row_slice = k_new_row.as_slice().expect("non-contiguous K row");
-            for chunk in k_row_slice.chunks(head_dim) {
-                self.tq.encode_vector_into(
-                    chunk,
-                    &mut layer_slot.compressed_k,
-                    &mut scratch_f32,
-                    &mut scratch_u8,
-                );
-            }
-            // Encode V row, append head-by-head.
-            let v_row_slice = v_new_row.as_slice().expect("non-contiguous V row");
-            for chunk in v_row_slice.chunks(head_dim) {
-                self.tq.encode_vector_into(
-                    chunk,
-                    &mut layer_slot.compressed_v,
-                    &mut scratch_f32,
-                    &mut scratch_u8,
-                );
-            }
-            layer_slot.num_vecs += 1;
-            // Update geometry fields (head_dim / kv_dim) only on first
-            // step where they might still be the prefill defaults.
-            layer_slot.kv_dim = kv_dim;
-            layer_slot.head_dim = head_dim;
-        }
-        // Suppress unused-import warning for the now-removed `s!` macro
-        // in this scope; keep it on the use line so other parts of the
-        // function that may need slicing keep compiling.
-        let _ = s![..];
-        if self.profiling {
-            self.profile.recompute_hot.record(t_codec);
-        }
-        self.abs_position += 1;
-        if self.profiling {
-            self.profile.decode_total.record(t_total);
-        }
-        Some(hidden)
-    }
 }
+
+// W1-GPU dispatch methods (`try_prefill_via_dispatch` /
+// `decode_step_via_dispatch`) live in [`super::dispatch`] as an
+// additional `impl TurboQuantEngine` block. They mutate the
+// `pub(super)` fields above.
 
 impl KvEngine for TurboQuantEngine {
     fn name(&self) -> &str {

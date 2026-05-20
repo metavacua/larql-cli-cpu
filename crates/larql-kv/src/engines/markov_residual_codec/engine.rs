@@ -1,47 +1,22 @@
 //! `MarkovResidualCodecEngine` — `KvEngine` implementation.
+//!
+//! Implementation is split across sibling modules (mirrors the layout
+//! used by `boundary_per_layer`):
+//!
+//! - this file: struct + construction + `KvEngine` trait glue
+//! - [`super::walk`] — CPU dense walk path
+//!   (`rs_prefill_codec_walk` / `rs_decode_step_codec_walk`)
+//! - [`super::compute`] — Q4K-native walk path
+//!   (`rs_prefill_codec` / `rs_decode_step_codec`)
+//! - [`super::dispatch`] — W1-GPU dispatch fast path with W10 mask
+//!   cascade
+//! - [`super::executor`] — `LayerExecutor`-driven path
+//! - [`super::helpers`] — W8.2 doubling-capacity buffer helpers
 
 use larql_inference::ffn::FfnBackend;
 use larql_inference::model::ModelWeights;
 use larql_inference::{cpu_engine_backend, EngineBackend};
-use ndarray::{s, Array2};
-
-// ── W8.2 helpers (mirror of crate::engines::markov_residual::engine) ─────
-// Same shape as markov_residual; pre-allocated doubling-capacity buffers
-// for `stored` / `hot_kv` so the dispatch hot path appends in-place
-// rather than allocating a fresh Array2 per token (which the flamegraph
-// surfaced as 58% of decode CPU pre-W8.2).
-
-fn window_capacity(prompt_len: usize, window_size: Option<usize>) -> usize {
-    match window_size {
-        Some(w) => prompt_len.max(w),
-        None => (prompt_len * 2).max(64),
-    }
-}
-
-fn grow_capacity_2d(src: &Array2<f32>, len: usize, cap: usize) -> Array2<f32> {
-    debug_assert_eq!(src.shape()[0], len, "src shape disagrees with len");
-    debug_assert!(cap >= len, "cap {cap} smaller than len {len}");
-    let cols = src.shape()[1];
-    let mut buf = Array2::<f32>::zeros((cap, cols));
-    if len > 0 {
-        buf.slice_mut(s![..len, ..]).assign(src);
-    }
-    buf
-}
-
-fn append_row(buf: &mut Array2<f32>, row: &Array2<f32>, len: usize) {
-    let cap = buf.shape()[0];
-    if len == cap {
-        let cols = buf.shape()[1];
-        let new_cap = (cap * 2).max(8);
-        let mut new_buf = Array2::<f32>::zeros((new_cap, cols));
-        new_buf
-            .slice_mut(s![..len, ..])
-            .assign(&buf.slice(s![..len, ..]));
-        *buf = new_buf;
-    }
-    buf.slice_mut(s![len..len + 1, ..]).assign(row);
-}
+use ndarray::Array2;
 
 use crate::engines::markov_residual::ensure_attn_tensors_dequantised;
 use crate::engines::markov_residual_codec::codec::ColdResidualCodec;
@@ -56,15 +31,15 @@ use crate::{DecodeStageSummary, EngineInfo, KvEngine};
 /// `MarkovResidualCodecEngine` — `MarkovResidualEngine` with a codec-encoded
 /// cold tier.
 pub struct MarkovResidualCodecEngine {
-    window_size: Option<usize>,
-    codec: ColdResidualCodec,
-    store: Option<RsStoreCodec>,
-    backend: Box<dyn EngineBackend>,
-    profiling: bool,
-    profile: EngineProfiler,
+    pub(super) window_size: Option<usize>,
+    pub(super) codec: ColdResidualCodec,
+    pub(super) store: Option<RsStoreCodec>,
+    pub(super) backend: Box<dyn EngineBackend>,
+    pub(super) profiling: bool,
+    pub(super) profile: EngineProfiler,
     /// W1-GPU: see `MarkovResidualEngine::kv_handle`.
-    kv_handle: Option<larql_inference::KvHandle>,
-    abs_position: usize,
+    pub(super) kv_handle: Option<larql_inference::KvHandle>,
+    pub(super) abs_position: usize,
 }
 
 impl MarkovResidualCodecEngine {
@@ -103,280 +78,15 @@ impl MarkovResidualCodecEngine {
     pub fn total_memory_bytes(&self) -> usize {
         self.store.as_ref().map_or(0, |s| s.memory_bytes())
     }
-
-    /// W1-GPU: mirrors `MarkovResidualEngine::try_prefill_via_dispatch`.
-    /// On the codec engine the prefill payload is identical (stored +
-    /// hot_kv from state.h_in / k_new / v_new). The cold tier
-    /// (`cold_encoded`) is codec-encoded; on overflow we still
-    /// invalidate `cold_kv` because codec round-trip is lossy.
-    fn try_prefill_via_dispatch(
-        &mut self,
-        weights: &mut ModelWeights,
-        index: &larql_inference::larql_vindex::VectorIndex,
-        token_ids: &[u32],
-    ) -> Option<Array2<f32>> {
-        use crate::engines::markov_residual_codec::store::EncodedColdLayer;
-        use larql_inference::PerLayerDecodeState;
-        if !larql_inference::vindex::supports_cached_decode(weights)
-            || !larql_inference::vindex::supports_direct_matvec_decode(weights, index)
-        {
-            return None;
-        }
-        let num_layers = weights.num_layers;
-        let mut state = PerLayerDecodeState::with_capacity(num_layers);
-        let (hidden, handle) = self.backend.as_ref().coarse_prefill_with_state(
-            weights,
-            token_ids,
-            Some(index),
-            Some(&mut state),
-        )?;
-        if !state.is_complete_for(num_layers) {
-            return None;
-        }
-        let hidden_size = weights.hidden_size;
-        // W8.2: pre-allocate doubling-capacity stored / hot_kv buffers.
-        // See `markov_residual::engine` for the rationale.
-        let prompt_len = token_ids.len();
-        let initial_cap = window_capacity(prompt_len, self.window_size);
-        // W10 Phase A: consume each layer's handle into an owned
-        // Array2; CpuStateHandle moves without a copy.
-        let stored: Vec<Array2<f32>> = state
-            .h_in_per_layer
-            .into_iter()
-            .map(|h| grow_capacity_2d(&h.into_array(), prompt_len, initial_cap))
-            .collect();
-        let hot_kv: Vec<larql_inference::attention::SharedKV> = state
-            .k_new_per_layer
-            .into_iter()
-            .zip(state.v_new_per_layer)
-            .map(|(k, v)| {
-                (
-                    grow_capacity_2d(&k.into_array(), prompt_len, initial_cap),
-                    grow_capacity_2d(&v.into_array(), prompt_len, initial_cap),
-                )
-            })
-            .collect();
-        // W10 Phase B: when `LARQL_W10_HONLY=1`, drop the hot_kv
-        // shadow. Metal's kv cache becomes the K/V source of truth;
-        // markov_residual_codec treats hot K/V as derivative (the
-        // codec-encoded residuals are canonical, the cached K/V is
-        // derivable). See state-policy.md §2.2.
-        //
-        // W10 Phase C: when window_size is also None, no cold-tier
-        // eviction triggers and `rs.stored` is dead weight. Drop it;
-        // decode steps request None mask, skipping h_in capture too.
-        let drop_hot_kv_shadow = std::env::var("LARQL_W10_HONLY")
-            .ok()
-            .map(|v| v == "1")
-            .unwrap_or(false);
-        let drop_stored_shadow = drop_hot_kv_shadow && self.window_size.is_none();
-        let stored = if drop_stored_shadow {
-            (0..num_layers)
-                .map(|_| ndarray::Array2::<f32>::zeros((0, hidden_size)))
-                .collect()
-        } else {
-            stored
-        };
-        let mut rs = RsStoreCodec {
-            stored,
-            cold_encoded: None,
-            cold_kv: None,
-            hot_kv: if drop_hot_kv_shadow {
-                None
-            } else {
-                Some(hot_kv)
-            },
-            cold_abs_start: 0,
-            next_position: prompt_len,
-            max_window: self.window_size,
-            codec: self.codec,
-            hot_len: if drop_stored_shadow { 0 } else { prompt_len },
-        };
-        // Clip on prefill — overflow encoded into the bf16 cold tier.
-        let mut overflow_per_layer: Vec<ndarray::Array2<f32>> = Vec::with_capacity(num_layers);
-        for layer in 0..num_layers {
-            overflow_per_layer.push(rs.clip_layer_overflow(layer));
-        }
-        rs.finalise_hot_len_after_clip();
-        if overflow_per_layer.first().map_or(0, |c| c.shape()[0]) > 0 {
-            let mut encoded_layers: Vec<EncodedColdLayer> = Vec::with_capacity(num_layers);
-            for overflow in overflow_per_layer.iter() {
-                let mut enc = EncodedColdLayer::empty(hidden_size);
-                enc.append(self.codec, overflow);
-                encoded_layers.push(enc);
-            }
-            rs.cold_encoded = Some(encoded_layers);
-            // Codec is lossy → cold_kv must be recomputed against the
-            // decoded bytes on next decode. Leave as None.
-            rs.cold_abs_start = 0;
-        }
-        self.store = Some(rs);
-        self.kv_handle = Some(handle);
-        self.abs_position = token_ids.len();
-        Some(hidden)
-    }
-
-    /// W1-GPU: codec decode through the dispatch surface. Same shape
-    /// as `MarkovResidualEngine::decode_step_via_dispatch` but the
-    /// overflow path encodes into `cold_encoded` (bf16) and clears
-    /// `cold_kv` so the next step recomputes against the decoded bytes.
-    fn decode_step_via_dispatch(
-        &mut self,
-        weights: &mut ModelWeights,
-        index: &larql_inference::larql_vindex::VectorIndex,
-        token_id: u32,
-    ) -> Option<Array2<f32>> {
-        // W10 instrumentation: decode_total wraps the whole step so
-        // stage_summary returns Some on the dispatch hot path (mirrors
-        // MarkovResidualEngine).
-        let t_total = std::time::Instant::now();
-        use crate::engines::markov_residual_codec::store::EncodedColdLayer;
-        use larql_inference::PerLayerDecodeState;
-        use ndarray::Array2;
-        let num_layers = weights.num_layers;
-        let hidden_size = weights.hidden_size;
-        let mut state = PerLayerDecodeState::with_capacity(num_layers);
-        let handle = self.kv_handle.as_mut()?;
-        // W10 Phase B/C: same mask selection as MarkovResidualEngine.
-        // None when both shadows dropped (windowless), HOnly when only
-        // hot_kv dropped, Full otherwise.
-        let env_on = std::env::var("LARQL_W10_HONLY")
-            .ok()
-            .map(|v| v == "1")
-            .unwrap_or(false);
-        let drop_hot_kv = self
-            .store
-            .as_ref()
-            .map(|s| s.hot_kv.is_none())
-            .unwrap_or(false)
-            && env_on;
-        let drop_stored = self
-            .store
-            .as_ref()
-            .map(|s| s.stored.first().map(|a| a.shape()[0] == 0).unwrap_or(false))
-            .unwrap_or(false)
-            && env_on;
-        let mask = if drop_stored && drop_hot_kv {
-            larql_compute::StateDumpMask::None
-        } else if drop_hot_kv {
-            larql_compute::StateDumpMask::HOnly
-        } else {
-            larql_compute::StateDumpMask::Full
-        };
-        // W10 instrumentation: state_capture wraps the backend call.
-        let t_capture = std::time::Instant::now();
-        let hidden = self.backend.as_ref().coarse_decode_step_with_state_masked(
-            weights,
-            token_id,
-            Some(index),
-            handle,
-            self.abs_position,
-            Some(&mut state),
-            mask,
-        )?;
-        if self.profiling {
-            self.profile.state_capture.record(t_capture);
-        }
-        if !state.is_complete_under(num_layers, mask) {
-            self.kv_handle = None;
-            return None;
-        }
-        let mut rs = self.store.take()?;
-        // W8.2: append in-place into pre-allocated buffers; doubling
-        // happens inside `append_row` only on cap overflow.
-        // W10 Phase A: consume handles via into_array() — zero-copy
-        // move on the CPU happy path.
-        // W10 Phase B: under HOnly the K/V handle vecs are empty;
-        // only h_in is consumed. Under None all are empty.
-        let len = rs.hot_len;
-        let h_handles = std::mem::take(&mut state.h_in_per_layer);
-        let k_handles = std::mem::take(&mut state.k_new_per_layer);
-        let v_handles = std::mem::take(&mut state.v_new_per_layer);
-        let did_append = !matches!(mask, larql_compute::StateDumpMask::None);
-        if matches!(mask, larql_compute::StateDumpMask::None) {
-            // hot_len deliberately stays 0; see markov_residual.
-            drop((h_handles, k_handles, v_handles));
-        } else if matches!(mask, larql_compute::StateDumpMask::HOnly) {
-            drop((k_handles, v_handles));
-            for (layer, h) in h_handles.into_iter().enumerate() {
-                let t_mat = std::time::Instant::now();
-                let h_arr = h.into_array();
-                if self.profiling {
-                    self.profile.state_materialise.record(t_mat);
-                }
-                let t_app = std::time::Instant::now();
-                append_row(&mut rs.stored[layer], &h_arr, len);
-                if self.profiling {
-                    self.profile.state_append.record(t_app);
-                }
-            }
-        } else {
-            for (layer, ((h, k), v)) in h_handles
-                .into_iter()
-                .zip(k_handles)
-                .zip(v_handles)
-                .enumerate()
-            {
-                let t_mat = std::time::Instant::now();
-                let h_arr = h.into_array();
-                let kv_arrs = if rs.hot_kv.is_some() {
-                    Some((k.into_array(), v.into_array()))
-                } else {
-                    None
-                };
-                if self.profiling {
-                    self.profile.state_materialise.record(t_mat);
-                }
-                let t_app = std::time::Instant::now();
-                append_row(&mut rs.stored[layer], &h_arr, len);
-                if let Some(hot_kv) = rs.hot_kv.as_mut() {
-                    if let Some((k_arr, v_arr)) = kv_arrs {
-                        append_row(&mut hot_kv[layer].0, &k_arr, len);
-                        append_row(&mut hot_kv[layer].1, &v_arr, len);
-                    }
-                }
-                if self.profiling {
-                    self.profile.state_append.record(t_app);
-                }
-            }
-        }
-        if did_append {
-            rs.hot_len = len + 1;
-        }
-        // Clip + bf16-encode the overflow.
-        let mut overflow_per_layer: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
-        for layer in 0..num_layers {
-            overflow_per_layer.push(rs.clip_layer_overflow(layer));
-        }
-        rs.finalise_hot_len_after_clip();
-        if overflow_per_layer.first().map_or(0, |c| c.shape()[0]) > 0 {
-            match rs.cold_encoded.as_mut() {
-                Some(layers) => {
-                    for (layer, overflow) in overflow_per_layer.iter().enumerate() {
-                        layers[layer].append(rs.codec, overflow);
-                    }
-                }
-                None => {
-                    let mut layers: Vec<EncodedColdLayer> = Vec::with_capacity(num_layers);
-                    for overflow in overflow_per_layer.iter() {
-                        let mut enc = EncodedColdLayer::empty(hidden_size);
-                        enc.append(rs.codec, overflow);
-                        layers.push(enc);
-                    }
-                    rs.cold_encoded = Some(layers);
-                }
-            }
-            // Lossy codec → invalidate cold_kv.
-            rs.cold_kv = None;
-        }
-        self.store = Some(rs);
-        self.abs_position += 1;
-        if self.profiling {
-            self.profile.decode_total.record(t_total);
-        }
-        Some(hidden)
-    }
 }
+
+// The W1-GPU dispatch methods (`try_prefill_via_dispatch` /
+// `decode_step_via_dispatch`) and executor-driven helpers
+// (`prefill_via_executor_impl` / `decode_step_via_executor_impl`)
+// live as additional `impl MarkovResidualCodecEngine` blocks in
+// sibling files [`super::dispatch`] and [`super::executor`]. They
+// mutate `store` / `kv_handle` / `abs_position` / `profile` (all
+// `pub(super)`).
 
 impl KvEngine for MarkovResidualCodecEngine {
     fn name(&self) -> &str {
@@ -517,83 +227,14 @@ impl KvEngine for MarkovResidualCodecEngine {
         index: &larql_inference::larql_vindex::VectorIndex,
         token_ids: &[u32],
     ) -> Option<Array2<f32>> {
-        use crate::engines::markov_residual::recompute_kv;
-        use crate::engines::markov_residual_codec::store::EncodedColdLayer;
-        use larql_inference::attention::SharedKV;
-        use larql_inference::forward::embed_tokens_pub;
         use larql_inference::layer_executor::ExecutorDispatchKind;
-        use ndarray::Array2;
-
         // Per spec §3.4: this engine's state policy (codec cold tier)
         // requires per-layer dispatch. Transparent degrade on fused
         // executor until Phase 3's refusal contract lands.
         if matches!(executor.dispatch_kind(), ExecutorDispatchKind::Fused) {
             return self.prefill_quant(weights, ffn, index, token_ids, executor.backend());
         }
-
-        ensure_attn_tensors_dequantised(weights, index);
-
-        let backend = executor.backend();
-        let num_layers = weights.num_layers;
-        let seq_len = token_ids.len();
-        let hidden_size = weights.hidden_size;
-        let mut h = embed_tokens_pub(weights, token_ids);
-        let mut stored: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
-
-        for layer in 0..num_layers {
-            stored.push(h.clone());
-            let (h_out, _kv) = executor.run_prefill_layer(weights, layer, &h, ffn)?;
-            h = h_out;
-        }
-
-        let mut rs = RsStoreCodec {
-            hot_len: stored.first().map_or(0, |s| s.shape()[0]),
-            stored,
-            cold_encoded: None,
-            cold_kv: None,
-            // Executor path doesn't yet capture K/V; falls back to
-            // recompute-from-residuals (W2 follow-up).
-            hot_kv: None,
-            cold_abs_start: 0,
-            next_position: seq_len,
-            max_window: self.window_size,
-            codec: self.codec,
-        };
-
-        let mut overflow_per_layer: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
-        for layer in 0..num_layers {
-            overflow_per_layer.push(rs.clip_layer_overflow(layer));
-        }
-        rs.finalise_hot_len_after_clip();
-        if overflow_per_layer.first().map_or(0, |c| c.shape()[0]) > 0 {
-            let mut encoded_layers: Vec<EncodedColdLayer> = Vec::with_capacity(num_layers);
-            let mut cold_kv: Vec<SharedKV> = Vec::with_capacity(num_layers);
-            for (layer, overflow) in overflow_per_layer.iter().enumerate() {
-                // Round-trip through the codec so cold K/V is computed
-                // from the bf16-reconstructed residuals (matches what
-                // future decode steps will see).
-                let mut tmp = EncodedColdLayer::empty(hidden_size);
-                tmp.append(self.codec, overflow);
-                let decoded = tmp.decode(self.codec);
-                let (k, v) = recompute_kv(weights, &decoded, layer, 0, backend, Some(index))
-                    .expect("cold K/V pre-computation failed");
-                cold_kv.push((k, v));
-                let mut enc = EncodedColdLayer::empty(hidden_size);
-                enc.append(self.codec, overflow);
-                encoded_layers.push(enc);
-            }
-            rs.cold_encoded = Some(encoded_layers);
-            rs.cold_kv = Some(cold_kv);
-            rs.cold_abs_start = 0;
-        }
-
-        let hidden = {
-            use ndarray::s;
-            let last = h.shape()[0] - 1;
-            h.slice(s![last..=last, ..]).to_owned()
-        };
-        self.store = Some(rs);
-        Some(hidden)
+        self.prefill_via_executor_impl(weights, executor, ffn, index, token_ids)
     }
 
     fn decode_step_quant_via_executor(
@@ -604,130 +245,11 @@ impl KvEngine for MarkovResidualCodecEngine {
         index: &larql_inference::larql_vindex::VectorIndex,
         token_id: u32,
     ) -> Option<Array2<f32>> {
-        use crate::engines::markov_residual::recompute_kv;
-        use crate::engines::markov_residual_codec::store::EncodedColdLayer;
-        use larql_inference::attention::SharedKV;
-        use larql_inference::forward::embed_tokens_pub;
         use larql_inference::layer_executor::ExecutorDispatchKind;
-        use ndarray::{s, Array2};
-
         if matches!(executor.dispatch_kind(), ExecutorDispatchKind::Fused) {
             return self.decode_step_quant(weights, ffn, index, token_id, executor.backend());
         }
-
-        ensure_attn_tensors_dequantised(weights, index);
-
-        let backend = executor.backend();
-        let rs = self.store.take()?;
-        let num_layers = weights.num_layers;
-        let abs_position = rs.next_position;
-        let mut h_new = embed_tokens_pub(weights, &[token_id]);
-        let mut new_stored: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
-
-        for layer in 0..num_layers {
-            let h_hot = &rs.stored[layer];
-            let s_hot = h_hot.shape()[0];
-            let hot_abs_start = abs_position.saturating_sub(s_hot);
-
-            let prior_kv: SharedKV = if let Some(cold_kv) = &rs.cold_kv {
-                let (k_cold, v_cold) = &cold_kv[layer];
-                let (k_hot, v_hot) =
-                    recompute_kv(weights, h_hot, layer, hot_abs_start, backend, Some(index))?;
-                let c = k_cold.shape()[0];
-                let kv_dim = k_cold.shape()[1];
-                let mut k_combined = Array2::<f32>::zeros((c + s_hot, kv_dim));
-                k_combined.slice_mut(s![..c, ..]).assign(k_cold);
-                k_combined.slice_mut(s![c.., ..]).assign(&k_hot);
-                let mut v_combined = Array2::<f32>::zeros((c + s_hot, kv_dim));
-                v_combined.slice_mut(s![..c, ..]).assign(v_cold);
-                v_combined.slice_mut(s![c.., ..]).assign(&v_hot);
-                (k_combined, v_combined)
-            } else {
-                let (h_full, full_abs_start) = match &rs.cold_encoded {
-                    Some(cold_layers) if cold_layers[layer].n_positions > 0 => {
-                        let decoded = cold_layers[layer].decode(rs.codec);
-                        let hidden = h_hot.shape()[1];
-                        let mut combined =
-                            Array2::<f32>::zeros((decoded.shape()[0] + s_hot, hidden));
-                        combined
-                            .slice_mut(s![..decoded.shape()[0], ..])
-                            .assign(&decoded);
-                        combined
-                            .slice_mut(s![decoded.shape()[0].., ..])
-                            .assign(h_hot);
-                        (combined, rs.cold_abs_start)
-                    }
-                    _ => (h_hot.clone(), hot_abs_start),
-                };
-                recompute_kv(
-                    weights,
-                    &h_full,
-                    layer,
-                    full_abs_start,
-                    backend,
-                    Some(index),
-                )?
-            };
-
-            new_stored.push(h_new.clone());
-            let (h_out, _new_kv) =
-                executor.run_decode_layer(weights, layer, &h_new, &prior_kv, abs_position, ffn)?;
-            h_new = h_out;
-        }
-
-        // Append new row + clip overflow into encoded cold tier.
-        let mut updated_stored: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
-        for (stored, new_row) in rs.stored.iter().zip(new_stored.iter()) {
-            let s_old = stored.shape()[0];
-            let hidden_dim = stored.shape()[1];
-            let mut combined = Array2::<f32>::zeros((s_old + 1, hidden_dim));
-            combined.slice_mut(s![..s_old, ..]).assign(stored);
-            combined.slice_mut(s![s_old.., ..]).assign(new_row);
-            updated_stored.push(combined);
-        }
-
-        let mut updated_rs = RsStoreCodec {
-            hot_len: updated_stored.first().map_or(0, |s| s.shape()[0]),
-            stored: updated_stored,
-            cold_encoded: rs.cold_encoded,
-            cold_kv: rs.cold_kv,
-            hot_kv: rs.hot_kv,
-            cold_abs_start: rs.cold_abs_start,
-            next_position: abs_position + 1,
-            max_window: rs.max_window,
-            codec: rs.codec,
-        };
-
-        let mut overflow_per_layer: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
-        for layer in 0..num_layers {
-            overflow_per_layer.push(updated_rs.clip_layer_overflow(layer));
-        }
-        updated_rs.finalise_hot_len_after_clip();
-        if overflow_per_layer.first().map_or(0, |c| c.shape()[0]) > 0 {
-            match updated_rs.cold_encoded.as_mut() {
-                Some(layers) => {
-                    for (layer, overflow) in overflow_per_layer.iter().enumerate() {
-                        layers[layer].append(updated_rs.codec, overflow);
-                    }
-                }
-                None => {
-                    let hidden = weights.hidden_size;
-                    let mut layers: Vec<EncodedColdLayer> = Vec::with_capacity(num_layers);
-                    for overflow in overflow_per_layer.iter() {
-                        let mut enc = EncodedColdLayer::empty(hidden);
-                        enc.append(updated_rs.codec, overflow);
-                        layers.push(enc);
-                    }
-                    updated_rs.cold_encoded = Some(layers);
-                }
-            }
-            updated_rs.cold_kv = None;
-        }
-
-        let last = h_new.shape()[0] - 1;
-        let out = h_new.slice(s![last..=last, ..]).to_owned();
-        self.store = Some(updated_rs);
-        Some(out)
+        self.decode_step_via_executor_impl(weights, executor, ffn, index, token_id)
     }
 }
 

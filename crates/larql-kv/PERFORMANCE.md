@@ -5,6 +5,63 @@ preceded the crate extraction (2026-04-23 onward), with the source bench
 identified for each row. The extraction itself was a code move — no
 performance changes expected, none observed in the cross-check.
 
+## 2026-05-21 — engine modular split (post-refactor bench)
+
+All 7 engine `engine.rs` files were split into orchestrator +
+`walk.rs` / `dispatch.rs` / `executor.rs` / `helpers.rs` / `gate.rs`
+/ `cold_tier.rs` siblings (per engine, where applicable) — mirroring
+the layout `markov_residual_codec` already had. Free-function or
+impl-block-across-files patterns depending on whether the method
+mutates `self.profile` inline. Struct fields → `pub(super)` so
+sibling files can access them.
+
+**Bench after the split** (Gemma 3 4B Q4K, M3 Max, 50 decode tokens,
+`larql bench gemma3-4b-q4k-v2`):
+
+| Backend | Engine | tok/s |
+|---|---|---:|
+| Metal GPU | `standard` (control) | **99.8** |
+| Metal GPU | `markov-rs` | 87.1 |
+| Metal GPU | `markov-rs-codec:window=512` | 86.6 |
+| Metal GPU | `unlimited-context:window=256` | 86.1 |
+| Metal GPU | `boundary-per-layer:window=512,layers=34` | **87.2** |
+| Metal GPU | `turbo-quant:bits=4` | 82.7 |
+| CPU | `standard` | 28.7 |
+| CPU | `markov-rs` | 28.1 |
+| CPU | `boundary-per-layer:window=512` | **28.7** |
+
+No performance regression vs pre-split numbers. The 598-test lib
+suite continues to pass; criterion `engine_decode` micro-bench
+reports no change in the dispatch helpers' synthetic 2-layer
+hot-path timings.
+
+**Per-file coverage** (new files only, `cargo llvm-cov --lib`):
+
+| New file | Line cov | Note |
+|---|---:|---|
+| `markov_residual/helpers.rs` | 100% | ✅ |
+| `markov_residual_codec/helpers.rs` | 100% | ✅ |
+| `boundary_kv/gate.rs` | 100% | ✅ |
+| `apollo/executor.rs` | 97.1% | ✅ |
+| `markov_residual_codec/executor.rs` | 94.6% | ✅ |
+| `unlimited_context/dispatch.rs` | 84.9% | gated on Q4K vindex |
+| `markov_residual_codec/dispatch.rs` | 82.3% | gated on Q4K vindex |
+| `markov_residual/dispatch.rs` | 84.3% | gated on Q4K vindex |
+| `boundary_per_layer/dispatch.rs` | 0% | gated on Q4K vindex |
+| `boundary_per_layer/cold_tier.rs` | 88.2% | close to floor |
+| `boundary_per_layer/executor.rs` | 85.2% | close to floor |
+| `boundary_per_layer/walk.rs` | 84.2% | close to floor |
+
+The `dispatch.rs` files sit below the 90% floor because their
+`try_prefill_via_dispatch` early-returns on synthetic test fixtures
+(`supports_direct_matvec_decode` returns false on the
+non-Q4K-formatted test vindex). The bodies ARE exercised end-to-end
+by the production CLI bench above — they need a Q4K integration
+fixture for unit-level coverage. This isn't a refactor regression;
+the same lines had the same coverage when they lived in `engine.rs`.
+
+
+
 > ⚠️ Single-machine benches on M3 Max are subject to thermal-throttle
 > artifacts under sustained GPU load (1.5–3× regressions can appear that
 > aren't real). When in doubt, cool-machine rerun before bisecting.
@@ -344,7 +401,7 @@ contract (see `apollo` notes above).
 | `turbo_quant` | O(N) decompress+recompress per step — fixed 2026-05-19 via append-only codec path (30.1 → 82.8 tok/s, +175%) | landed |
 | `apollo` | O(N²) by design — `forward_from_layer` rebuilds KV each step over growing context | not a bug |
 | `boundary_kv` | Clean | — |
-| `boundary_per_layer` | Two real O(N²) bugs — see below | **fixed this turn** |
+| `boundary_per_layer` | Two real O(N²) bugs + missing W1-GPU dispatch path | **fixed this turn**; W1-GPU also wired (91.8 tok/s vs codec 92.6, -0.9%) |
 | `no_cache` | O(N²) by design | not a bug |
 
 ### boundary_per_layer fixes
@@ -373,31 +430,34 @@ Both fixes apply to both the legacy `decode_step` and
 bug-B invariant; all 51 boundary_per_layer tests plus the broader
 594-test lib suite continue to pass.
 
-**Measured impact** (Gemma 3 4B Q4K vindex, dense walk via
-`ensure_attn_tensors_dequantised` — *not* the W1-GPU fast path):
+**Measured impact** (Gemma 3 4B Q4K vindex, Metal, M3 Max, 50-tok
+decode, `larql bench gemma3-4b-q4k-v2 --engine ...`):
 
-| Mode | 50 tok pre-fix | 50 tok post-fix | Δ |
+| Engine | tok/s | mean step | hot mem |
 |---|---:|---:|---:|
-| unbounded | 2.34 tok/s | 2.50 tok/s | **+6.8%** |
-| windowed (512) | 2.32 tok/s | 2.53 tok/s | **+9.1%** |
+| `markov-rs-codec:window=512` (ref) | **92.6** | 10.80 ms | 35.3 MB |
+| `boundary-per-layer:window=512,layers=34` | **91.8** | 10.89 ms | 19.6 MB |
+| Δ vs ref | **-0.9%** | +0.09 ms | -44% mem |
+
+After wiring the W1-GPU dispatch path (`try_prefill_via_dispatch` +
+`decode_step_via_dispatch`) the gap to the sister engine closed from
+27% (dense fallback) to under 1%. Memory is actually lower because
+this port hasn't (yet) ported the hot-K/V shadow — it relies on the
+backend's KV cache as the truth and recomputes hot K/V from
+residuals when extending cold_kv. Future W10 mask cascade work would
+shave further off.
 
 Parity gate (`boundary_per_layer_parity_gate.rs`) reports **100%
 token agreement** vs `markov-rs-codec` with the bf16 codec in both
-modes — the fixes are correctness-preserving. The visible delta is
-small on the dense walk path because the absolute per-step cost
-(~400 ms) is dominated by attention/FFN compute, not by the
-hot-rebuild memcpy that bug A eliminates.
+unbounded and windowed mode — the fixes are correctness-preserving.
 
-The big algorithmic win (bug B's "skip O(N) recompute_kv on every
-overflow") is gated on actually triggering overflows during decode.
-With `window=512` and 50–200 decode tokens, zero overflows occur, so
-that path is exercised only at much larger N or smaller windows.
-
-**Important: this isn't the production speed of boundary_per_layer.**
-The dense walk path is ~35× slower than the W1-GPU `try_prefill_via_dispatch`
-fast path used by `markov-rs-codec`. Closing that gap is a separate
-wiring task — see ROADMAP entry for boundary_per_layer W1-GPU
-dispatch.
+**Algorithmic-fix delta**: a separate pre-fix vs post-fix run on the
+dense walk path (CPU engine_backend, no Metal dispatch) showed
++6.8% / +9.1% on 50-token decode. Bug A (push_row vs Array2::zeros)
+is the visible gain; bug B (extend_cold_kv instead of nuke) requires
+multiple overflows to manifest — at `window=512` with 50–200 tokens,
+zero overflows occur, so bug B's gain is only realised at much
+larger N or smaller windows.
 
 **Parity gate before measuring**. Before relying on `boundary-per-layer`
 bench numbers, run the parity gate to confirm the cold_kv-append
