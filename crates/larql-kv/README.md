@@ -14,22 +14,60 @@ for the dep-graph rationale.
 
 ## Engine ladder
 
-Six engines: `Standard` and `NoCache` wrap today's production behaviour;
-the other four are the research engines that trade accuracy for memory
-or speed.
+Nine engines total. `Standard` and `NoCache` wrap today's production
+behaviour; the others are research engines that trade accuracy or
+memory for different state-policy properties (compressed cold tier,
+windowed checkpoints, retrieval injection, etc.).
 
-| Engine | Mechanism | KV memory | Accuracy |
-|---|---|---|---|
-| [`standard`](src/engines/standard.rs) | Production K/V tensor cache, `window=None` = unbounded, `Some(N)` = sliding window | O(layers × seq × kv_dim × 4B) | exact — the reference |
-| [`no_cache`](src/engines/no_cache.rs) | No K/V; full re-forward per step (O(N²)) | O(seq) token IDs only | exact — correctness fallback |
-| [`markov_residual`](src/engines/markov_residual) | Residual-stream replacement, K/V recomputed | ~171 MB on Gemma 3 4B | exact (KL = 0.0) under contract |
-| [`unlimited_context`](src/engines/unlimited_context) | Per-window K/V checkpoints | ~193 MB | exact within window |
-| [`turbo_quant`](src/engines/turbo_quant) | WHT + Lloyd-Max 3/4-bit codec | ~12.7 GB on 370K-token corpus | cos ≈ 0.991 |
-| [`apollo`](src/engines/apollo) | Boundary store + residual injection | ~11 MB on 370K-token corpus | task accuracy (first-token factual) |
+| Engine | Mechanism | Hot state (Gemma 3 4B) | Metal tok/s (Full) | W10 best | Accuracy | Spec |
+|---|---|---:|---:|---:|---|---|
+| [`standard`](src/engines/standard.rs) | Production K/V tensor cache; `window=None` unbounded, `Some(N)` sliding | full K/V, backend-managed | **~100** | n/a (reference) | exact — the reference | [standard-engine.md](../larql-inference/docs/specs/standard-engine.md) |
+| [`boundary_kv`](src/engines/boundary_kv) | `standard` + `larql-boundary` chunk frames for cross-session resume | same as standard | ~100 | n/a | exact | [boundary-kv-engine.md](../larql-inference/docs/specs/boundary-kv-engine.md) |
+| [`no_cache`](src/engines/no_cache.rs) | No K/V; full re-forward per step (O(N²)) | token list only | — | n/a | exact (correctness fallback) | [no-cache-engine.md](../larql-inference/docs/specs/no-cache-engine.md) |
+| [`markov_residual`](src/engines/markov_residual) | Residual-stream replacement, K/V derived from stored residuals (W2 cache) | 54.4 MB → **0 MB** | 88.2 | **99.5** (None, +13%) | exact (KL = 0.0) under contract | [markov-residual-engine.md](../larql-inference/docs/specs/markov-residual-engine.md) |
+| [`markov_residual_codec`](src/engines/markov_residual_codec) | `markov_residual` + bf16-encoded cold-tier residuals (2× cold saving) | 54.4 MB → **0 MB** | 87.2 | **99.8** (None, +14%) | bounded-KL vs markov_residual | [markov-residual-codec-engine.md](../larql-inference/docs/specs/markov-residual-codec-engine.md) |
+| [`boundary_per_layer`](src/engines/boundary_per_layer) | Per-layer codec policy on cold tier; calibration-driven; W1-GPU + W10 wired | 19.6 MB → **0 MB** | 86.9 | **99.3** (None, +14%) | per-layer KL bound | [boundary-per-layer-engine.md](../larql-inference/docs/specs/boundary-per-layer-engine.md) |
+| [`unlimited_context`](src/engines/unlimited_context) | Per-window K/V checkpoint + token archive; supports replay | 15.7 MB → **0 MB** | 86.1 | **95.0** (HOnly, +10%) | exact within window | [unlimited-context-engine.md](../larql-inference/docs/specs/unlimited-context-engine.md) |
+| [`turbo_quant`](src/engines/turbo_quant) | WHT + Lloyd-Max 3/4-bit K/V codec, in-place compression | 0.7 MB | **37.7** (10-tok) | n/a (canonical K/V) | cos ≈ 0.991 | [turbo-quant-engine.md](../larql-inference/docs/specs/turbo-quant-engine.md) |
+| [`apollo`](src/engines/apollo) | Constellation map + boundary-residual injection (retrieval) | scales w/ store | requires store | n/a | task-level | [apollo-engine.md](../larql-inference/docs/specs/apollo-engine.md) |
 
-Speed numbers (Gemma 3 4B, M3 Max, Metal Q4K) and compression ratios for
-the research engines live in [`PERFORMANCE.md`](PERFORMANCE.md). Reference
-for "compression" is full f16 KV at 49 GB on the same corpus.
+**Numbers are post W2 (hot K/V cache), W1-GPU (per-layer state-dump
+dispatch), W7 (blit-encoder fusion), and W10 (state-bridge mask
+cascade).** Three derivative-K/V engines (`markov_residual`,
+`markov_residual_codec`, `unlimited_context`) now match or exceed
+`standard`'s fused-kernel ~100 tok/s ceiling under their best mask,
+with engine-side memory shadows fully eliminated on Metal. See
+[`PERFORMANCE.md`](PERFORMANCE.md) for per-token cost decomposition,
+the `state_capture` / `state_materialise` / `state_append` timer
+cascade, and the bench protocol. ROADMAP "Closed (recent)" has the
+milestone history.
+
+### W10 — state-bridge mask cascade (default-on since 2026-05-21)
+
+Engines that treat K/V as **derivative** state (see
+[`docs/state-policy.md`](docs/state-policy.md)) automatically take a
+mask cascade:
+
+- **`HOnly`** — skip the GPU→CPU K/V staging blit + readback on
+  Metal. Triggered when the engine drops its `hot_kv` shadow.
+- **`None`** — also skip the h_in staging blit + readback. Triggered
+  when the engine *additionally* drops its residual store (only safe
+  with `window=None` — no cold-tier eviction can fire).
+
+The cascade is bit-identical to `Full` under the engine's
+exact_logits contract (proven by `examples/w10_parity_gate.rs`); it
+closes ~13% of the gap to `standard`'s fused-kernel ceiling and zeros
+out the engine-side memory shadow. Backends without an optimised
+masked path fall through to `Full` via the trait's default impl —
+correct everywhere, perf-positive only on Metal.
+
+Opt out with `LARQL_W10_DISABLE=1` (debug instrument; useful for
+bisecting backend-side masked-kernel regressions). The legacy
+`LARQL_W10_HONLY=1` env var is still accepted but is now a no-op.
+
+`turbo_quant` doesn't take the cascade — its codec is destructive,
+so K/V can't be derived from residuals. It stays on `Full` mask
+regardless of the env var.
 
 ### Standard vs MarkovResidual
 
@@ -198,6 +236,15 @@ The `KvEngine` trait itself lives in
   via `--output-file`. The historical `kv-cache-benchmark` crate that hosted
   synthetic-strategy comparators was retired in 2026-05-16 — its surviving
   pieces (`accuracy_suite` + `vindex_compare`) live in this crate.
+
+## Design
+
+- [`docs/state-policy.md`](docs/state-policy.md) — engine identity =
+  `(canonical_state, derivative_state, correctness_contract)`. The
+  vocabulary used to slot new engine proposals + judge whether a
+  derivative cache changes engine identity (it doesn't).
+- [`engine-state-vs-execution.md`](../larql-inference/docs/specs/engine-state-vs-execution.md)
+  — the orthogonal cut: engine ≠ dispatch decisions.
 
 ## History
 

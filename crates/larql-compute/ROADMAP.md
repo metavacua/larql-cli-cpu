@@ -23,7 +23,7 @@ Findings now tracked here so follow-up work does not live only in review notes:
   macOS-only `metal::` module.
 - [x] Add `.github/workflows/larql-compute.yml` for Linux, Windows, and macOS
   fast compute checks, including non-macOS `--all-features` coverage and macOS
-  `--features metal` coverage.
+  `--features gpu` coverage.
 - [x] Add compute coverage targets and a 90%-default per-file policy with
   current debt baselines in `crates/larql-compute/coverage-policy.json`.
 - [x] Raise default-feature line coverage from 56.76% to 93.59% with targeted
@@ -648,7 +648,7 @@ The gap is **almost entirely in the GPU forward**. Within GPU forward (~0.35 ms/
 
 ⚠ The earlier "103 GB/s ALU-bound on q4k_ffn_gate_up" diagnosis was a **profiler bug** — the "batched" measurement was creating a fresh cmd buffer per call (with commit+wait per call) instead of running `n_layers` dispatches in ONE cmd buffer. The per-call overhead dominated, undercounting throughput 2-4×. Fixed 2026-04-28 in `metal/diag/kernel_profile.rs::measure_single_cmdbuf_batched`. With the fix, both big FFN kernels are bandwidth-bound at 74-84% of LPDDR5X peak — no compute-bound headroom.
 
-Reproduction: `cargo run --release --features metal -p larql-cli --bin larql -- bench output/gemma3-4b-q4k-v2.vindex --backends metal --ollama gemma3:4b --tokens 50 --warmup 5` on a quiet system. Per-kernel detail: `cargo run --release --features metal -p larql-compute --example diag_profile_kernels`.
+Reproduction: `cargo run --release --features gpu -p larql-cli --bin larql -- bench output/gemma3-4b-q4k-v2.vindex --backends metal --ollama gemma3:4b --tokens 50 --warmup 5` on a quiet system. Per-kernel detail: `cargo run --release --features gpu -p larql-compute --example diag_profile_kernels`.
 
 ### Decode kernel optimization — the path forward (2026-04-28, revised)
 
@@ -1153,11 +1153,11 @@ Now consolidated under `src/metal/diag/`:
 **Key diagnostic commands:**
 ```bash
 # Per-kernel bandwidth profiler (results go to PERFORMANCE.md)
-cargo run --release --features metal -p larql-compute --example diag_profile_kernels
+cargo run --release --features gpu -p larql-compute --example diag_profile_kernels
 
 # Decode pipeline stage bisect (bisect CPU/Metal divergence)
 LARQL_METAL_DUMP_LAYERS=/tmp/dump \
-  cargo run --release --features metal -p larql-compute --example diag_decode_pipeline
+  cargo run --release --features gpu -p larql-compute --example diag_decode_pipeline
 
 # NaN/divergence bisect at specific layer (env-gated, zero binary overhead)
 LARQL_DECODE_DIAG_LAYER=12 larql infer <vindex> "prompt"
@@ -1426,7 +1426,7 @@ land.
    against CPU MoE reference.
 
 **Acceptance criteria**:
-- `cargo test -p larql-compute --features metal` green (existing + new parity).
+- `cargo test -p larql-compute --features gpu` green (existing + new parity).
 - `larql bench gemma4-26b-a4b` ≥ 15 tok/s (3× from baseline 5.1).
 - No regression on `larql bench gemma3-4b-q4k-v2` (dense path untouched).
 
@@ -1516,7 +1516,7 @@ so platform users start with a competitive baseline.
 larql-compute has a CPU baseline plus a macOS-only Metal backend. The
 `ComputeBackend` trait and CPU fallback compile without Metal at the trait
 level. Current guardrail: tests, examples, benches, and the exported
-`metal::` module are gated on `#[cfg(all(feature = "metal", target_os =
+`metal::` module are gated on `#[cfg(all(feature = "gpu", target_os =
 "macos"))]`, so Linux `--all-features` checks do not try to import Metal.
 Done for `larql-compute`: Linux CI installs OpenBLAS, checks default and
 all-feature builds, runs clippy, and runs the fast compute test split. Gaps:

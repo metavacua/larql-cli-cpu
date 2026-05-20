@@ -160,7 +160,62 @@ change. The trait accepts the parameter; default `prefill_q4k` /
 `decode_step_q4k` continue to dispatch to `prefill` / `decode_step`
 with `ffn` forwarded.
 
-### 4.4 What does *not* go on the trait
+### 4.4 W10 (2026-05-18) — state-bridge mask cascade
+
+A second widening for engines that treat K/V as derivative state.
+Adds three trait surfaces on `KvDispatch`:
+
+```rust
+fn coarse_decode_step_with_state_masked(
+    &self,
+    weights: &mut ModelWeights,
+    token_id: u32,
+    index: Option<&dyn crate::KvIndex>,
+    handle: &mut KvHandle,
+    abs_position: usize,
+    state: Option<&mut PerLayerDecodeState>,
+    mask: crate::StateDumpMask,            // NEW
+) -> Option<Array2<f32>>;
+
+fn read_kv_row_at(
+    &self,
+    handle: &KvHandle,
+    layer: usize,
+    pos: usize,
+) -> Option<(Vec<f32>, Vec<f32>)>;          // NEW
+
+// On DecodeBackend (the substrate trait):
+fn decode_token_with_state_dump_masked(
+    &self,
+    layers: &[FullPipelineLayer<'_>],
+    x: &[f32],
+    hidden: usize,
+    inter: usize,
+    state: Option<&mut DecodeStateDump>,
+    mask: StateDumpMask,                   // NEW
+) -> Option<Vec<f32>>;
+```
+
+`StateDumpMask::{Full, HOnly, None}` lets engines say "skip K/V
+readback" (`HOnly`) or "skip both K/V and h_in readbacks" (`None`).
+Defaults preserve today's `Full` behaviour everywhere — backends
+without an optimised path fall through via the trait's default
+impl.
+
+`read_kv_row_at` lets engines that dropped their CPU shadow query
+the backend's internal kv cache on demand (e.g.
+`UnlimitedContextEngine.close_window` reading the last position's
+K/V back for the checkpoint).
+
+Per-engine opt-in is gated by the `LARQL_W10_HONLY=1` env flag in
+the current iteration; cf. `crates/larql-kv/PERFORMANCE.md` for the
+mask cascade table and measured wins. The trait surface is
+grid-ready: the `PerLayerDecodeState` fields hold
+`Vec<Box<dyn StateHandle>>` whose `location()` accessor enumerates
+`LocalCpu`/`LocalGpu{backend}`/`Remote{node_id}` — future
+`larql-grid` slabs slot in here without changing engines.
+
+### 4.5 What does *not* go on the trait
 
 - `LayerHook` integration. Hooks (`generate_cached_hooked`,
   `kv_generate.rs:174`) are a research-only path; the production decode

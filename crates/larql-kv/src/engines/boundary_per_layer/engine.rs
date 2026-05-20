@@ -1,28 +1,33 @@
-//! `BoundaryPerLayerEngine` — `KvEngine` implementation with per-layer codec
-//! policy.
+//! `BoundaryPerLayerEngine` — `KvEngine` implementation with per-layer
+//! codec policy on the cold tier.
 //!
 //! The engine refuses to construct without a matching calibration record
-//! (per spec §4.7 + §4.9). v0.1 supports `Bf16` per layer only; other codec
-//! choices are rejected at policy construction (per
+//! (per spec §4.7 + §4.9). v0.1 supports `Bf16` per layer only; other
+//! codec choices are rejected at policy construction (per
 //! [`super::policy::PolicyError`]).
+//!
+//! Implementation is split across sibling modules:
+//!
+//! - this file: struct + construction + `KvEngine` trait glue
+//! - [`super::walk`] — CPU dense walk path (`run_prefill`/`run_decode`)
+//! - [`super::dispatch`] — W1-GPU dispatch fast path
+//!   (`try_prefill_via_dispatch`/`decode_step_via_dispatch`)
+//! - [`super::executor`] — `LayerExecutor`-driven path
+//!   (`prefill_via_executor`/`decode_step_via_executor`)
+//! - [`super::cold_tier`] — cold-tier maintenance
+//!   (`extend_cold_kv_with_overflow` + small helpers)
 
-use larql_compute::ComputeBackend;
-use larql_inference::attention::{
-    run_attention_block_decode_step_backend, run_attention_with_kv_backend, SharedKV,
-};
-use larql_inference::ffn::{BackendFfn, FfnBackend};
-use larql_inference::forward::{embed_tokens_pub, run_ffn};
+use larql_inference::ffn::FfnBackend;
 use larql_inference::model::ModelWeights;
 use larql_inference::{cpu_engine_backend, EngineBackend};
-use ndarray::{s, Array2};
+use ndarray::Array2;
 
 use crate::engines::boundary_per_layer::calibration::{
     BoundaryCalibrationRecord, BoundaryCalibrationStore, CalibrationError,
 };
 use crate::engines::boundary_per_layer::policy::BoundaryLayerPolicy;
-use crate::engines::boundary_per_layer::store::{PerLayerEncodedColdLayer, RsStorePerLayer};
-use crate::engines::markov_residual::recompute_kv;
-use crate::engines::markov_residual_codec::codec::ColdResidualCodec;
+use crate::engines::boundary_per_layer::store::RsStorePerLayer;
+use crate::engines::boundary_per_layer::{dispatch, executor, walk};
 use crate::{EngineInfo, KvEngine};
 
 /// Errors during engine construction (preconditions per spec §4.6).
@@ -39,11 +44,16 @@ pub enum EngineConstructionError {
 
 /// `BoundaryPerLayerEngine` — per-layer codec policy on the cold tier.
 pub struct BoundaryPerLayerEngine {
-    window_size: Option<usize>,
-    policy: BoundaryLayerPolicy,
-    record: BoundaryCalibrationRecord,
-    store: Option<RsStorePerLayer>,
-    backend: Box<dyn EngineBackend>,
+    pub(super) window_size: Option<usize>,
+    pub(super) policy: BoundaryLayerPolicy,
+    pub(super) record: BoundaryCalibrationRecord,
+    pub(super) store: Option<RsStorePerLayer>,
+    /// W1-GPU dispatch handle. `Some` when the prefill went through
+    /// `dispatch::try_prefill_via_dispatch` and decode is using the
+    /// kernel-fused fast path. `None` when the engine fell back to the
+    /// dense walk (e.g. backend lacks cached_decode support).
+    pub(super) kv_handle: Option<larql_inference::KvHandle>,
+    pub(super) backend: Box<dyn EngineBackend>,
 }
 
 impl BoundaryPerLayerEngine {
@@ -68,6 +78,29 @@ impl BoundaryPerLayerEngine {
         )
     }
 
+    /// Convenience constructor for the v0.1 cold-start case: any
+    /// uniform-bf16 policy inherits `MarkovResidualCodecEngine`'s
+    /// trivial bf16 calibration record (KL ≤ 0.01 nats — the
+    /// spec's §4.7 "uncalibrated but trivially safe" record).
+    ///
+    /// Use this when you don't have a calibration store handy (e.g.
+    /// a freshly-downloaded model). For non-bf16 policies the
+    /// engine still requires an explicit calibration via [`new`] —
+    /// non-trivial codecs need a measured KL bound to be safe.
+    /// Equivalent to what `EngineKind::BoundaryPerLayer.build()`
+    /// does internally.
+    pub fn new_with_default_calibration(
+        window_size: Option<usize>,
+        num_model_layers: usize,
+    ) -> Result<Self, EngineConstructionError> {
+        let policy = BoundaryLayerPolicy::bf16_uniform("default", num_model_layers);
+        let cal = crate::engines::boundary_per_layer::calibration::InMemoryCalibrationStore::new();
+        cal.put(BoundaryCalibrationRecord::bf16_uniform_default(
+            policy.fingerprint(),
+        ))?;
+        Self::new(window_size, policy, num_model_layers, &cal)
+    }
+
     pub fn with_backend(
         window_size: Option<usize>,
         policy: BoundaryLayerPolicy,
@@ -87,6 +120,7 @@ impl BoundaryPerLayerEngine {
             policy,
             record,
             store: None,
+            kv_handle: None,
             backend,
         })
     }
@@ -97,184 +131,6 @@ impl BoundaryPerLayerEngine {
 
     pub fn calibration_record(&self) -> &BoundaryCalibrationRecord {
         &self.record
-    }
-
-    fn run_prefill(&mut self, weights: &ModelWeights, token_ids: &[u32]) -> Option<Array2<f32>> {
-        let backend = self.backend.as_ref();
-        let num_layers = weights.num_layers;
-        let seq_len = token_ids.len();
-        let mut h = embed_tokens_pub(weights, token_ids);
-        let mut stored: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
-        let be = Some(backend as &dyn ComputeBackend);
-
-        for layer in 0..num_layers {
-            stored.push(h.clone());
-            let (h_post_attn, _k, _v) =
-                run_attention_with_kv_backend(weights, &h, layer, be).expect("attention failed");
-            let bffn = BackendFfn {
-                weights,
-                backend: backend as &dyn ComputeBackend,
-            };
-            let (h_out, _) = run_ffn(weights, &h_post_attn, layer, &bffn, false);
-            h = h_out;
-        }
-
-        let mut rs = RsStorePerLayer {
-            stored,
-            cold_encoded: None,
-            cold_kv: None,
-            cold_abs_start: 0,
-            next_position: seq_len,
-            max_window: self.window_size,
-            policy_codecs: self.policy.entries.clone(),
-        };
-
-        let mut overflow_per_layer: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
-        for layer in 0..num_layers {
-            overflow_per_layer.push(rs.clip_layer_overflow(layer));
-        }
-        if overflow_per_layer.first().map_or(0, |c| c.shape()[0]) > 0 {
-            let mut encoded_layers: Vec<PerLayerEncodedColdLayer> = Vec::with_capacity(num_layers);
-            let mut cold_kv: Vec<SharedKV> = Vec::with_capacity(num_layers);
-            for (layer, overflow) in overflow_per_layer.iter().enumerate() {
-                let codec = self.policy.codec_for(layer);
-                let decoded_overflow = roundtrip(overflow, codec);
-                let (k, v) = recompute_kv(weights, &decoded_overflow, layer, 0, backend, None)
-                    .expect("cold K/V pre-computation failed");
-                cold_kv.push((k, v));
-                let mut enc = PerLayerEncodedColdLayer::empty(codec, weights.hidden_size);
-                enc.append(overflow);
-                encoded_layers.push(enc);
-            }
-            rs.cold_encoded = Some(encoded_layers);
-            rs.cold_kv = Some(cold_kv);
-            rs.cold_abs_start = 0;
-        }
-
-        let last = last_row(&h);
-        self.store = Some(rs);
-        Some(last)
-    }
-
-    fn run_decode(&mut self, weights: &ModelWeights, token_id: u32) -> Option<Array2<f32>> {
-        let backend = self.backend.as_ref();
-        let rs = self.store.take()?;
-        let num_layers = weights.num_layers;
-        let abs_position = rs.next_position;
-        let mut h_new = embed_tokens_pub(weights, &[token_id]);
-        let mut new_stored: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
-
-        for layer in 0..num_layers {
-            let h_hot = &rs.stored[layer];
-            let s_hot = h_hot.shape()[0];
-            let hot_abs_start = abs_position.saturating_sub(s_hot);
-
-            let (k_full, v_full) = if let Some(cold_kv) = &rs.cold_kv {
-                let (k_cold, v_cold) = &cold_kv[layer];
-                let (k_hot, v_hot) =
-                    recompute_kv(weights, h_hot, layer, hot_abs_start, backend, None)?;
-                let c = k_cold.shape()[0];
-                let kv_dim = k_cold.shape()[1];
-                let mut k_combined = Array2::<f32>::zeros((c + s_hot, kv_dim));
-                k_combined.slice_mut(s![..c, ..]).assign(k_cold);
-                k_combined.slice_mut(s![c.., ..]).assign(&k_hot);
-                let mut v_combined = Array2::<f32>::zeros((c + s_hot, kv_dim));
-                v_combined.slice_mut(s![..c, ..]).assign(v_cold);
-                v_combined.slice_mut(s![c.., ..]).assign(&v_hot);
-                (k_combined, v_combined)
-            } else {
-                let (h_full, full_abs_start) = if let Some(cold_layers) = &rs.cold_encoded {
-                    let enc = &cold_layers[layer];
-                    if enc.n_positions > 0 {
-                        let decoded = enc.decode();
-                        let hidden = h_hot.shape()[1];
-                        let mut combined =
-                            Array2::<f32>::zeros((decoded.shape()[0] + s_hot, hidden));
-                        combined
-                            .slice_mut(s![..decoded.shape()[0], ..])
-                            .assign(&decoded);
-                        combined
-                            .slice_mut(s![decoded.shape()[0].., ..])
-                            .assign(h_hot);
-                        (combined, rs.cold_abs_start)
-                    } else {
-                        (h_hot.clone(), hot_abs_start)
-                    }
-                } else {
-                    (h_hot.clone(), hot_abs_start)
-                };
-                let (k, v) = recompute_kv(weights, &h_full, layer, full_abs_start, backend, None)?;
-                (k, v)
-            };
-
-            new_stored.push(h_new.clone());
-
-            let (h_post_attn, _new_kv) = run_attention_block_decode_step_backend(
-                weights,
-                &h_new,
-                layer,
-                Some(&(k_full, v_full)),
-                abs_position,
-                Some(backend as &dyn ComputeBackend),
-            )?;
-
-            let bffn = BackendFfn {
-                weights,
-                backend: backend as &dyn ComputeBackend,
-            };
-            let (h_out, _) = run_ffn(weights, &h_post_attn, layer, &bffn, false);
-            h_new = h_out;
-        }
-
-        let mut updated_stored: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
-        for (stored, new_row) in rs.stored.iter().zip(new_stored.iter()) {
-            let s_old = stored.shape()[0];
-            let hidden_dim = stored.shape()[1];
-            let mut combined = Array2::<f32>::zeros((s_old + 1, hidden_dim));
-            combined.slice_mut(s![..s_old, ..]).assign(stored);
-            combined.slice_mut(s![s_old.., ..]).assign(new_row);
-            updated_stored.push(combined);
-        }
-
-        let mut updated_rs = RsStorePerLayer {
-            stored: updated_stored,
-            cold_encoded: rs.cold_encoded,
-            cold_kv: rs.cold_kv,
-            cold_abs_start: rs.cold_abs_start,
-            next_position: abs_position + 1,
-            max_window: rs.max_window,
-            policy_codecs: rs.policy_codecs,
-        };
-
-        let mut overflow_per_layer: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
-        for layer in 0..num_layers {
-            overflow_per_layer.push(updated_rs.clip_layer_overflow(layer));
-        }
-        if overflow_per_layer.first().map_or(0, |c| c.shape()[0]) > 0 {
-            match updated_rs.cold_encoded.as_mut() {
-                Some(layers) => {
-                    for (layer, overflow) in overflow_per_layer.iter().enumerate() {
-                        layers[layer].append(overflow);
-                    }
-                }
-                None => {
-                    let hidden = weights.hidden_size;
-                    let mut layers: Vec<PerLayerEncodedColdLayer> = Vec::with_capacity(num_layers);
-                    for (layer, overflow) in overflow_per_layer.iter().enumerate() {
-                        let codec = self.policy.codec_for(layer);
-                        let mut enc = PerLayerEncodedColdLayer::empty(codec, hidden);
-                        enc.append(overflow);
-                        layers.push(enc);
-                    }
-                    updated_rs.cold_encoded = Some(layers);
-                }
-            }
-            updated_rs.cold_kv = None;
-        }
-
-        let last = last_row(&h_new);
-        self.store = Some(updated_rs);
-        Some(last)
     }
 }
 
@@ -304,19 +160,38 @@ impl KvEngine for BoundaryPerLayerEngine {
     fn prefill(
         &mut self,
         weights: &ModelWeights,
-        _ffn: &dyn FfnBackend,
+        ffn: &dyn FfnBackend,
         token_ids: &[u32],
     ) -> Option<Array2<f32>> {
-        self.run_prefill(weights, token_ids)
+        let (hidden, store) = walk::run_prefill(
+            weights,
+            ffn,
+            self.backend.as_ref(),
+            &self.policy,
+            self.window_size,
+            token_ids,
+        )?;
+        self.store = Some(store);
+        Some(hidden)
     }
 
     fn decode_step(
         &mut self,
         weights: &ModelWeights,
-        _ffn: &dyn FfnBackend,
+        ffn: &dyn FfnBackend,
         token_id: u32,
     ) -> Option<Array2<f32>> {
-        self.run_decode(weights, token_id)
+        let rs = self.store.take()?;
+        let (hidden, new_rs) = walk::run_decode(
+            weights,
+            ffn,
+            self.backend.as_ref(),
+            &self.policy,
+            rs,
+            token_id,
+        )?;
+        self.store = Some(new_rs);
+        Some(hidden)
     }
 
     fn memory_bytes(&self) -> usize {
@@ -331,11 +206,82 @@ impl KvEngine for BoundaryPerLayerEngine {
         self.store.as_ref().map_or(0, |s| s.cold_bytes())
     }
 
+    // ── Q4K path ─────────────────────────────────────────────────────────
+    //
+    // Try W1-GPU dispatch first; fall back to dense walk with attn
+    // tensors dequantised when the backend / vindex doesn't support
+    // direct-matvec decode.
+
+    fn prefill_quant(
+        &mut self,
+        weights: &mut ModelWeights,
+        ffn: &dyn FfnBackend,
+        index: &larql_inference::larql_vindex::VectorIndex,
+        token_ids: &[u32],
+        _backend: &dyn larql_compute::ComputeBackend,
+    ) -> Option<Array2<f32>> {
+        if let Some((hidden, store, handle)) = dispatch::try_prefill_via_dispatch(
+            weights,
+            self.backend.as_ref(),
+            &self.policy,
+            self.window_size,
+            index,
+            token_ids,
+        ) {
+            self.store = Some(store);
+            self.kv_handle = Some(handle);
+            return Some(hidden);
+        }
+        // Fall back to dense f32 walk (compact vindexes / CPU backend).
+        self.kv_handle = None;
+        larql_inference::vindex::dequant::ensure_attn_tensors_dequantised(weights, index);
+        self.prefill(weights, ffn, token_ids)
+    }
+
+    fn decode_step_quant(
+        &mut self,
+        weights: &mut ModelWeights,
+        ffn: &dyn FfnBackend,
+        index: &larql_inference::larql_vindex::VectorIndex,
+        token_id: u32,
+        _backend: &dyn larql_compute::ComputeBackend,
+    ) -> Option<Array2<f32>> {
+        // If prefill went through dispatch, decode does too.
+        if self.kv_handle.is_some() {
+            let mut handle = self.kv_handle.take()?;
+            let rs = self.store.take()?;
+            let result = dispatch::decode_step_via_dispatch(
+                weights,
+                self.backend.as_ref(),
+                &self.policy,
+                &mut handle,
+                rs,
+                index,
+                token_id,
+            );
+            match result {
+                Some((hidden, new_rs)) => {
+                    self.store = Some(new_rs);
+                    self.kv_handle = Some(handle);
+                    return Some(hidden);
+                }
+                None => {
+                    // State-dump failure — clear handle, fall through to
+                    // dense walk on the next call.
+                    self.kv_handle = None;
+                    return None;
+                }
+            }
+        }
+        larql_inference::vindex::dequant::ensure_attn_tensors_dequantised(weights, index);
+        self.decode_step(weights, ffn, token_id)
+    }
+
     // ── Phase 2 migration: executor-driven path ──────────────────────────
     //
-    // Per-layer codec policy requires per-layer dispatch. Override the
-    // dense (non-quant) via_executor methods to drive the layer loop
-    // through the executor + honor the caller's FFN backend.
+    // Per-layer codec policy requires per-layer dispatch. The executor
+    // path drives the layer loop through a caller-supplied executor +
+    // honours the caller's FFN backend.
 
     fn prefill_via_executor(
         &mut self,
@@ -344,61 +290,21 @@ impl KvEngine for BoundaryPerLayerEngine {
         ffn: &dyn FfnBackend,
         token_ids: &[u32],
     ) -> Option<Array2<f32>> {
-        use crate::engines::markov_residual::recompute_kv;
         use larql_inference::layer_executor::ExecutorDispatchKind;
-
         if matches!(executor.dispatch_kind(), ExecutorDispatchKind::Fused) {
             // State policy can't fire under fused dispatch; degrade.
             return self.prefill(weights, ffn, token_ids);
         }
-
-        let backend = executor.backend();
-        let num_layers = weights.num_layers;
-        let seq_len = token_ids.len();
-        let mut h = embed_tokens_pub(weights, token_ids);
-        let mut stored: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
-
-        for layer in 0..num_layers {
-            stored.push(h.clone());
-            let (h_out, _kv) = executor.run_prefill_layer(weights, layer, &h, ffn)?;
-            h = h_out;
-        }
-
-        let mut rs = RsStorePerLayer {
-            stored,
-            cold_encoded: None,
-            cold_kv: None,
-            cold_abs_start: 0,
-            next_position: seq_len,
-            max_window: self.window_size,
-            policy_codecs: self.policy.entries.clone(),
-        };
-
-        let mut overflow_per_layer: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
-        for layer in 0..num_layers {
-            overflow_per_layer.push(rs.clip_layer_overflow(layer));
-        }
-        if overflow_per_layer.first().map_or(0, |c| c.shape()[0]) > 0 {
-            let mut encoded_layers: Vec<PerLayerEncodedColdLayer> = Vec::with_capacity(num_layers);
-            let mut cold_kv: Vec<SharedKV> = Vec::with_capacity(num_layers);
-            for (layer, overflow) in overflow_per_layer.iter().enumerate() {
-                let codec = self.policy.codec_for(layer);
-                let decoded_overflow = roundtrip(overflow, codec);
-                let (k, v) = recompute_kv(weights, &decoded_overflow, layer, 0, backend, None)
-                    .expect("cold K/V pre-computation failed");
-                cold_kv.push((k, v));
-                let mut enc = PerLayerEncodedColdLayer::empty(codec, weights.hidden_size);
-                enc.append(overflow);
-                encoded_layers.push(enc);
-            }
-            rs.cold_encoded = Some(encoded_layers);
-            rs.cold_kv = Some(cold_kv);
-            rs.cold_abs_start = 0;
-        }
-
-        let out = last_row(&h);
-        self.store = Some(rs);
-        Some(out)
+        let (hidden, store) = executor::run_prefill(
+            weights,
+            executor,
+            ffn,
+            &self.policy,
+            self.window_size,
+            token_ids,
+        )?;
+        self.store = Some(store);
+        Some(hidden)
     }
 
     fn decode_step_via_executor(
@@ -408,128 +314,16 @@ impl KvEngine for BoundaryPerLayerEngine {
         ffn: &dyn FfnBackend,
         token_id: u32,
     ) -> Option<Array2<f32>> {
-        use crate::engines::markov_residual::recompute_kv;
         use larql_inference::layer_executor::ExecutorDispatchKind;
-
         if matches!(executor.dispatch_kind(), ExecutorDispatchKind::Fused) {
             return self.decode_step(weights, ffn, token_id);
         }
-
-        let backend = executor.backend();
         let rs = self.store.take()?;
-        let num_layers = weights.num_layers;
-        let abs_position = rs.next_position;
-        let mut h_new = embed_tokens_pub(weights, &[token_id]);
-        let mut new_stored: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
-
-        for layer in 0..num_layers {
-            let h_hot = &rs.stored[layer];
-            let s_hot = h_hot.shape()[0];
-            let hot_abs_start = abs_position.saturating_sub(s_hot);
-
-            let prior_kv: SharedKV = if let Some(cold_kv) = &rs.cold_kv {
-                let (k_cold, v_cold) = &cold_kv[layer];
-                let (k_hot, v_hot) =
-                    recompute_kv(weights, h_hot, layer, hot_abs_start, backend, None)?;
-                let c = k_cold.shape()[0];
-                let kv_dim = k_cold.shape()[1];
-                let mut k_combined = Array2::<f32>::zeros((c + s_hot, kv_dim));
-                k_combined.slice_mut(s![..c, ..]).assign(k_cold);
-                k_combined.slice_mut(s![c.., ..]).assign(&k_hot);
-                let mut v_combined = Array2::<f32>::zeros((c + s_hot, kv_dim));
-                v_combined.slice_mut(s![..c, ..]).assign(v_cold);
-                v_combined.slice_mut(s![c.., ..]).assign(&v_hot);
-                (k_combined, v_combined)
-            } else {
-                let (h_full, full_abs_start) = match &rs.cold_encoded {
-                    Some(cold_layers) if cold_layers[layer].n_positions > 0 => {
-                        let decoded = cold_layers[layer].decode();
-                        let hidden = h_hot.shape()[1];
-                        let mut combined =
-                            Array2::<f32>::zeros((decoded.shape()[0] + s_hot, hidden));
-                        combined
-                            .slice_mut(s![..decoded.shape()[0], ..])
-                            .assign(&decoded);
-                        combined
-                            .slice_mut(s![decoded.shape()[0].., ..])
-                            .assign(h_hot);
-                        (combined, rs.cold_abs_start)
-                    }
-                    _ => (h_hot.clone(), hot_abs_start),
-                };
-                recompute_kv(weights, &h_full, layer, full_abs_start, backend, None)?
-            };
-
-            new_stored.push(h_new.clone());
-            let (h_out, _new_kv) =
-                executor.run_decode_layer(weights, layer, &h_new, &prior_kv, abs_position, ffn)?;
-            h_new = h_out;
-        }
-
-        let mut updated_stored: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
-        for (stored, new_row) in rs.stored.iter().zip(new_stored.iter()) {
-            let s_old = stored.shape()[0];
-            let hidden_dim = stored.shape()[1];
-            let mut combined = Array2::<f32>::zeros((s_old + 1, hidden_dim));
-            combined.slice_mut(s![..s_old, ..]).assign(stored);
-            combined.slice_mut(s![s_old.., ..]).assign(new_row);
-            updated_stored.push(combined);
-        }
-
-        let mut updated_rs = RsStorePerLayer {
-            stored: updated_stored,
-            cold_encoded: rs.cold_encoded,
-            cold_kv: rs.cold_kv,
-            cold_abs_start: rs.cold_abs_start,
-            next_position: abs_position + 1,
-            max_window: rs.max_window,
-            policy_codecs: rs.policy_codecs,
-        };
-
-        let mut overflow_per_layer: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
-        for layer in 0..num_layers {
-            overflow_per_layer.push(updated_rs.clip_layer_overflow(layer));
-        }
-        if overflow_per_layer.first().map_or(0, |c| c.shape()[0]) > 0 {
-            match updated_rs.cold_encoded.as_mut() {
-                Some(layers) => {
-                    for (layer, overflow) in overflow_per_layer.iter().enumerate() {
-                        layers[layer].append(overflow);
-                    }
-                }
-                None => {
-                    let hidden = weights.hidden_size;
-                    let mut layers: Vec<PerLayerEncodedColdLayer> = Vec::with_capacity(num_layers);
-                    for (layer, overflow) in overflow_per_layer.iter().enumerate() {
-                        let codec = self.policy.codec_for(layer);
-                        let mut enc = PerLayerEncodedColdLayer::empty(codec, hidden);
-                        enc.append(overflow);
-                        layers.push(enc);
-                    }
-                    updated_rs.cold_encoded = Some(layers);
-                }
-            }
-            updated_rs.cold_kv = None;
-        }
-
-        let out = last_row(&h_new);
-        self.store = Some(updated_rs);
-        Some(out)
+        let (hidden, new_rs) =
+            executor::run_decode(weights, executor, ffn, &self.policy, rs, token_id)?;
+        self.store = Some(new_rs);
+        Some(hidden)
     }
-}
-
-fn roundtrip(block: &Array2<f32>, codec: ColdResidualCodec) -> Array2<f32> {
-    if block.shape()[0] == 0 {
-        return block.clone();
-    }
-    let mut tmp = PerLayerEncodedColdLayer::empty(codec, block.shape()[1]);
-    tmp.append(block);
-    tmp.decode()
-}
-
-fn last_row(h: &Array2<f32>) -> Array2<f32> {
-    let last = h.shape()[0] - 1;
-    h.slice(s![last..=last, ..]).to_owned()
 }
 
 #[cfg(test)]
@@ -725,7 +519,11 @@ mod tests {
     }
 
     #[test]
-    fn cold_encoded_path_exercised_after_eviction() {
+    fn cold_kv_stays_populated_across_multiple_overflows() {
+        // After each overflow, `extend_cold_kv_with_overflow` appends the new
+        // overflow's K/V to `cold_kv` rather than nuking it (the previous
+        // `cold_kv = None` line forced an O(N) recompute on every next step,
+        // i.e. O(N²) windowed-mode decode).
         let weights = make_test_weights();
         let ffn = WeightFfn { weights: &weights };
         let policy = BoundaryLayerPolicy::bf16_uniform("test", weights.num_layers);
@@ -734,10 +532,14 @@ mod tests {
             BoundaryPerLayerEngine::new(Some(2), policy, weights.num_layers, &store).unwrap();
         eng.prefill(&weights, &ffn, &[0u32, 1, 2, 3])
             .expect("prefill");
-        eng.decode_step(&weights, &ffn, 4).expect("first decode"); // clears cold_kv
-        let h = eng
-            .decode_step(&weights, &ffn, 5)
-            .expect("second decode hits cold_encoded path");
+        assert!(eng.store.as_ref().unwrap().cold_kv.is_some());
+        eng.decode_step(&weights, &ffn, 4).expect("first decode");
+        assert!(
+            eng.store.as_ref().unwrap().cold_kv.is_some(),
+            "cold_kv should stay Some after overflow (was being nuked pre-fix)"
+        );
+        let h = eng.decode_step(&weights, &ffn, 5).expect("second decode");
+        assert!(eng.store.as_ref().unwrap().cold_kv.is_some());
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert!(h.iter().all(|v| v.is_finite()));
     }
@@ -758,26 +560,6 @@ mod tests {
         let m2 = eng.memory_bytes();
         assert!(m1 > m0);
         assert!(m2 > m1);
-    }
-
-    #[test]
-    fn roundtrip_empty_block_short_circuits() {
-        let empty: Array2<f32> = Array2::zeros((0, 8));
-        let out = roundtrip(&empty, ColdResidualCodec::Bf16);
-        assert_eq!(out.shape(), &[0, 8]);
-    }
-
-    #[test]
-    fn last_row_extracts_correct_row() {
-        let mut h = Array2::<f32>::zeros((3, 4));
-        for j in 0..4 {
-            h[[2, j]] = (j + 1) as f32;
-        }
-        let r = last_row(&h);
-        assert_eq!(r.shape(), &[1, 4]);
-        for j in 0..4 {
-            assert_eq!(r[[0, j]], (j + 1) as f32);
-        }
     }
 
     // ── Phase 2 migration: executor-driven path ──────────────────────────
@@ -871,10 +653,11 @@ mod tests {
         assert!(engine.cold_bytes() > 0);
     }
 
-    /// Legacy `decode_step` with cold-tier (lines 172-184 / 186-205 /
-    /// 254-272). Drives both the cold_kv combine branch on first decode
-    /// and the cold_encoded recompute branch on the second decode (after
-    /// overflow clears cold_kv).
+    /// Legacy `decode_step` with cold-tier. Drives the cold_kv combine
+    /// branch (cold_kv populated by prefill) on the first decode, then
+    /// another overflow on the second decode which exercises the
+    /// `extend_cold_kv_with_overflow` Some-branch (append onto existing
+    /// cold_kv).
     #[test]
     fn legacy_decode_step_traverses_cold_tier_branches() {
         let weights = make_test_weights();
@@ -886,19 +669,12 @@ mod tests {
         engine
             .prefill(&weights, &ffn, &[0u32, 1, 2, 3])
             .expect("prefill overflow");
-        // First decode: cold_kv populated by prefill → hits combine branch.
         let h = engine.decode_step(&weights, &ffn, 4).expect("decode 1");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
-        // Second decode: prior decode's overflow cleared cold_kv → hits
-        // the cold_encoded recompute branch + the cold_encoded None→Some
-        // append branch (lines 254-272).
         let h2 = engine.decode_step(&weights, &ffn, 5).expect("decode 2");
         assert_eq!(h2.shape(), &[1, weights.hidden_size]);
     }
 
-    /// Executor-driven decode with cold tier — exercises the same
-    /// cold_kv / cold_encoded branches in `decode_step_via_executor`
-    /// (lines 431-456 / 494-).
     #[test]
     fn decode_via_executor_traverses_cold_tier_branches() {
         use larql_inference::ffn::NullFfn;
@@ -914,19 +690,17 @@ mod tests {
         engine
             .prefill_via_executor(&weights, &executor, &ffn, &[0u32, 1, 2, 3])
             .expect("prefill overflow");
-        // First decode: cold_kv combine branch.
         engine
             .decode_step_via_executor(&weights, &executor, &ffn, 4)
             .expect("decode 1");
-        // Second decode: cold_encoded recompute branch.
         let h = engine
             .decode_step_via_executor(&weights, &executor, &ffn, 5)
             .expect("decode 2");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
     }
 
-    /// Fused-executor fallback: lines 350-352 / 414-415 dispatch back
-    /// through the legacy `prefill` / `decode_step` path.
+    /// Fused-executor fallback: dispatches back through the legacy
+    /// `prefill` / `decode_step` path.
     struct FusedStubExecutor {
         backend: larql_compute::CpuBackend,
     }
