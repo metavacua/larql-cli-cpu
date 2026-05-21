@@ -2,7 +2,27 @@
 
 **Status:** ✅ Shipped. W2 (hot K/V cache) + W1-GPU step 6 wired
 2026-05-17. Decode 19.6 → 33.0 tok/s on Metal post-W1-GPU.
+Append-only codec path across all decode paths (dispatch + CPU +
+legacy) 2026-05-21; 85.0 tok/s on Gemma 3 4B Q4K, 50-token decode.
 **Audience:** LARQL contributors.
+
+> **State Policy slot**: `(canonical = quantised K/V (in-place,
+> destructive codec), derivative = ∅, contract = bounded_KL —
+> codec round-trip ≥ cos 0.991)`. K/V is **canonical** here, not
+> derivative — the codec is destructive, so the engine can't drop
+> the K/V shadow under W10. Result: 85.0 tok/s vs `standard`'s
+> 97.6 (-12.9%). This is the empirical evidence that
+> canonical-vs-derivative is the dominant tok/s lever on the
+> trait — same compression contract as `MarkovResidualCodecEngine`,
+> different §2 slot, 13% perf gap.
+>
+> **Task #31** proposes a derivative-K/V `TurboQuant` sibling
+> (residuals canonical, quantised K/V reconstructable on demand).
+> If the prediction holds, the new engine joins
+> `MarkovResidualCodecEngine` et al. at 98+ tok/s. If it doesn't,
+> [state-policy.md §3.1](../../../larql-kv/docs/state-policy.md)'s
+> claim is falsified and the W10 perf shape needs a different
+> explanation.
 
 ---
 

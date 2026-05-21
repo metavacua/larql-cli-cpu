@@ -1,18 +1,48 @@
 # larql-kv
 
-Pluggable KV-cache engines for `larql-inference`. Each engine implements the
-full prefill + autoregressive decode loop but manages persistent inference
-state differently — trading memory, accuracy, and speed.
+**LARQL KV engines separate model continuation state from execution
+cache.** Standard engines store K/V as state. Residual-state engines
+store the residual stream and derive K/V only when execution needs
+it. The choice changes how the engine composes with the dispatch
+hot path — and as of 2026-05-21, the three derivative-K/V engines
+match `standard`'s fused-kernel speed because they can elide the
+GPU→CPU state bridge entirely (W10 mask cascade, default-on).
+
+> *KV cache is an implementation detail. Continuation state is the
+> real abstraction.* — [State Policy §2](docs/state-policy.md)
+
+### Engine ladder at a glance
+
+| Engine | Canonical state | K/V role | Contract | Bench (tok/s) |
+|---|---|---|---|---:|
+| `standard` | K/V tensors | canonical | exact logits | 97.6 |
+| `no-cache` | tokens | recomputed | exact logits | (debug) |
+| `markov-rs` | residual stream | **derivative** | exact logits under arch contract | **98.0** |
+| `markov-rs-codec` | compressed residuals | **derivative** | bounded KL | **98.1** |
+| `boundary-per-layer` | per-layer codec residuals | **derivative** | bounded KL per-layer | **98.7** |
+| `unlimited-context` | KV (within window) + checkpoints | **derivative** | exact within window | 94.2 |
+| `turbo-quant` | quantised K/V | canonical (destructive) | bounded KL | 85.0 |
+| `boundary-kv` | K/V + boundary frames | canonical | exact logits | composes `standard` |
+| `apollo` | boundary retrieval store | n/a (retrieval) | task-level | orthogonal |
+
+Gemma 3 4B Q4K, Metal, M3 Max, 50 decode tokens, W10 default-on
+(2026-05-21). The 13% gap between the four derivative-K/V engines
+and `turbo-quant` is the cleanest available evidence that the
+canonical-vs-derivative classification is *operationally* load-bearing,
+not just descriptive. See [docs/state-policy.md §3.1](docs/state-policy.md)
+for the prediction; task #31 is the falsification path.
+
+### Trait location
 
 The `KvEngine` trait + `EngineInfo` + `DecodeStageSummary` live in
 `larql-inference::kv_engine`; this crate re-exports them so
-`larql_kv::KvEngine` continues to work as the public surface. The trait
-lives upstream so `larql-inference`'s decode dispatch
-(`generate_with_engine`) can reference it without a circular dep. See
-[`crates/larql-inference/docs/specs/kv-engine-unification.md`](../larql-inference/docs/specs/kv-engine-unification.md)
+`larql_kv::KvEngine` continues to work as the public surface. The
+trait lives upstream so `larql-inference`'s decode dispatch
+(`generate_with_engine`) can reference it without a circular dep.
+See [`crates/larql-inference/docs/specs/kv-engine-unification.md`](../larql-inference/docs/specs/kv-engine-unification.md)
 for the dep-graph rationale.
 
-## Engine ladder
+## Full engine catalog
 
 Nine engines total. `Standard` and `NoCache` wrap today's production
 behaviour; the others are research engines that trade accuracy or

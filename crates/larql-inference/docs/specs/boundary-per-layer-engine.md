@@ -7,6 +7,17 @@
 fragility differences to push cold-tier compression past what a
 uniform codec can safely achieve.
 
+> **State Policy slot**: `(canonical = per-layer codec residuals,
+> derivative = `rs.stored` when windowless, contract =
+> bounded_KL(ε_l) per-layer; calibrated)`. K/V is **never**
+> shadowed by this engine — it's recomputed from residuals at
+> overflow time. Under W10 (default-on 2026-05-21) the engine
+> additionally drops `rs.stored` when `window=None` and reaches
+> the None mask, hitting `standard`'s fused-kernel speed
+> (98.7 tok/s — the fastest of the per-layer engines, marginally
+> ahead of `standard`'s 97.6). See
+> [state-policy.md §3.1](../../../larql-kv/docs/state-policy.md).
+
 This is engine 3 of 3 in the boundary-engine series. The siblings are
 [`BoundaryKvEngine`](boundary-kv-engine.md) (transport / save-restore,
 no in-session change) and

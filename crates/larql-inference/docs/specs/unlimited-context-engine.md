@@ -2,8 +2,21 @@
 
 **Status:** ✅ Shipped. W1-GPU step 4 wired + bench-validated
 2026-05-17: 28 → 56.0 tok/s on Metal (window=256, Gemma 3 4B,
-M3 Max, 50-token decode).
+M3 Max, 50-token decode). W10 HOnly default-on (2026-05-21):
+94.2 tok/s on the same bench.
 **Audience:** LARQL contributors.
+
+> **State Policy slot**: `(canonical = K/V within window +
+> per-window checkpoints + token archive, derivative =
+> `current_window_kv` (CPU shadow of the Metal cache), contract
+> = exact_logits within window)`. The CPU shadow is dropped under
+> W10 HOnly mask (default-on 2026-05-21); engine sits at 94.2
+> tok/s on Gemma 3 4B Q4K, ~3.5% behind `standard`'s 97.6. The
+> residual gap is `close_window`'s `KvDispatch::read_kv_row_at`
+> readback cost — a windowed-engine concern that doesn't apply to
+> the windowless residual-state engines (which reach the None
+> mask and the full ceiling). See
+> [state-policy.md §3.1](../../../larql-kv/docs/state-policy.md).
 
 ---
 

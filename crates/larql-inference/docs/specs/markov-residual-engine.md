@@ -6,6 +6,14 @@
 currently validated on Gemma 3 4B, designed to admit other architectures
 behind explicit preconditions.
 
+> **State Policy slot**: `(canonical = residual stream, derivative
+> = hot K/V, contract = exact_logits under arch preconditions)`.
+> K/V is derivative — the residual stream is what continuation
+> needs; K/V can be rebuilt on demand. This classification is what
+> lets the engine drop the K/V shadow under W10 and reach
+> `standard`'s fused-kernel speed (98.0 tok/s vs 97.6 on Gemma 3
+> 4B Q4K, 2026-05-21). See [state-policy.md §3.1](../../../larql-kv/docs/state-policy.md).
+
 This spec defines *what the engine promises* and *under what preconditions*.
 It deliberately does not prescribe Rust API shapes — those are the
 implementer's call, subject to the contracts below.
