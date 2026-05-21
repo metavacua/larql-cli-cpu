@@ -6,6 +6,15 @@
 `MarkovResidualEngine` with a codec layer on its cold tier, trading
 bounded fidelity loss for cold-tier memory reduction.
 
+> **State Policy slot**: `(canonical = codec-encoded residuals,
+> derivative = hot K/V, contract = bounded_KL(ε))`. K/V is
+> derivative; the codec'd residuals are the canonical state, and
+> ε is stated per codec via the calibration sweep. Like
+> `MarkovResidualEngine`, the derivative-K/V classification lets
+> the engine drop the K/V shadow under W10 and reach
+> `standard`'s fused-kernel speed (98.1 tok/s, 2026-05-21).
+> See [state-policy.md §3.1](../../../larql-kv/docs/state-policy.md).
+
 This is engine 2 of 3 in the boundary-engine series. The siblings are
 [`BoundaryKvEngine`](boundary-kv-engine.md) (transport / save-restore,
 no in-session change) and `BoundaryPerLayerEngine` (per-layer codec

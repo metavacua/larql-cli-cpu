@@ -89,6 +89,17 @@ PR.
 
 ---
 
+> *KV cache is an implementation detail. Continuation state is the
+> real abstraction.*
+
+The triple `(canonical_state, derivative_state, correctness_contract)`
+is how this spec keeps that distinction honest. The 2026-05-21 W10
+bench (§3.1) confirms the distinction is operationally
+load-bearing: engines that classify K/V as derivative gain a 13%
+tok/s win that engines with canonical K/V structurally cannot.
+
+---
+
 ## 3. The rule
 
 > **An engine may keep any derivative cache it wants, as long as
