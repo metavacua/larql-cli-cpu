@@ -35,11 +35,78 @@ use super::needle::{build_haystack, needle_found, NeedleTest};
 use super::prompts::{KnowledgeSource, TestPrompt};
 use crate::KvEngine;
 
-/// Per-prompt score from a single `KvEngine` run. Captures both the
-/// argmax verdict (top-1 match) and the Shannon bits-per-token surprise
-/// for the expected answer's first token — top-1 collapses confidence
-/// into a binary, bits separates "barely confident in Paris" from
-/// "highly confident in Paris" on the same `match=true`.
+/// Outcome of attempting to score a prompt against a `KvEngine`.
+///
+/// **Interim taxonomy — see `larql-kv/ROADMAP.md` "P0 — sibling trait
+/// extraction for non-K/V engines."** The variant set mirrors the typed
+/// `EngineError` enum that the trait extraction will land, so migration
+/// to the typed surface is a flat projection when the refactor ships.
+///
+/// Today, only `Served`, `SkippedEmptyPrompt`, and `SkippedInternalError`
+/// are constructible from `score_one` — `KvEngine::prefill` returns
+/// `Option<T>` and the harness cannot distinguish a retrieval miss from
+/// a backend-unavailable error from any other failure. The two
+/// currently-unconstructible variants (`SkippedRetrievalMiss`,
+/// `SkippedBackendUnavailable`) are present so the serde schema stays
+/// stable across the trait-extraction migration; their construction
+/// paths arrive with the typed `Result<T, EngineError>` trait surface.
+///
+/// Exhaustive — adding a variant later is a deliberate schema change
+/// that breaks every consumer until updated. **Do not add
+/// `#[non_exhaustive]`**; defaulting new variants into existing arms
+/// reproduces the silent-drop problem one layer down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ScoreOutcome {
+    /// Engine produced a measurable score for this prompt.
+    Served,
+    /// Prompt tokenised to zero ids (empty input, tokenizer failure,
+    /// all-out-of-vocab characters).
+    SkippedEmptyPrompt,
+    /// Engine returned `None` from a retrieval-style miss. **Not
+    /// constructible today** — requires the `RetrievalEngine` sibling
+    /// trait extraction. Today these failures surface as
+    /// `SkippedInternalError`.
+    SkippedRetrievalMiss,
+    /// Engine returned `None` because a required backend (Q4K, Metal)
+    /// is unavailable. **Not constructible today** — requires the
+    /// trait extraction's typed error surface. Today these failures
+    /// surface as `SkippedInternalError`.
+    SkippedBackendUnavailable,
+    /// Engine returned `None` for an opaque internal reason. Today this
+    /// collapses all engine-side failure modes (invariant violations
+    /// like decode-before-prefill, backend kernel failures, retrieval
+    /// misses, backend-unavailable) into one bucket because
+    /// `KvEngine::prefill`'s `Option<T>` return type cannot
+    /// distinguish them.
+    SkippedInternalError,
+}
+
+impl ScoreOutcome {
+    /// True if the engine produced a measurable score. Use this to
+    /// filter rows for match-rate / bits aggregates so the computation
+    /// isn't polluted by skipped rows.
+    pub fn is_served(&self) -> bool {
+        matches!(self, ScoreOutcome::Served)
+    }
+}
+
+/// Per-prompt score from a single `KvEngine` run.
+///
+/// `outcome` distinguishes the rows that produced a measurable score
+/// (`ScoreOutcome::Served`) from the rows the engine skipped. For
+/// skipped rows, `predicted_top1` / `top1_match` / `bits_per_token`
+/// are all `None`. The correlated optionality is enforced by the
+/// `served()` / `skipped()` constructors; don't construct this struct
+/// literally outside tests.
+///
+/// **Interim limitation:** the harness reports `outcome` based on what
+/// `KvEngine::prefill` returned (`Option<T>`). For engines whose trait
+/// method dispatches to multiple internal paths with different FFN
+/// usage (`markov_residual`'s CPU vs `*_via_executor` paths), the
+/// outcome may not reflect path-specific behavior. The trait
+/// extraction (see ROADMAP) lifts the trait to
+/// `Result<T, EngineError>` and removes this limitation.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PromptScore {
     /// Prompt text (truncated for needle tests to avoid bloating reports).
@@ -54,38 +121,137 @@ pub struct PromptScore {
     pub strategy: String,
     /// Expected substring (e.g. "Paris", "AURORA").
     pub expected_contains: String,
-    /// Decoded top-1 token the engine produced.
-    pub predicted_top1: String,
+    /// Whether this prompt produced a measurable score. See
+    /// [`ScoreOutcome`] for the variant set and the interim-taxonomy
+    /// caveat.
+    pub outcome: ScoreOutcome,
+    /// Decoded top-1 token the engine produced. `None` when
+    /// `outcome != Served`.
+    pub predicted_top1: Option<String>,
     /// Whether `predicted_top1` contains `expected_contains`
-    /// (case-insensitive).
-    pub top1_match: bool,
-    /// `-log2(P(expected_first_token | prompt))` after softmax. Lower =
-    /// more confident recall. `NaN` if the expected answer didn't
-    /// tokenise cleanly. ≥10 ≈ uniform over a 1024-token vocab.
-    pub bits_per_token: f64,
+    /// (case-insensitive). `None` when not served.
+    pub top1_match: Option<bool>,
+    /// `-log2(P(expected_first_token | prompt))` after softmax. `None`
+    /// when not served. May be `Some(NaN)` when the expected answer
+    /// doesn't tokenise cleanly (in-vocab miss) — distinct from
+    /// `None`, which means the engine never ran.
+    pub bits_per_token: Option<f64>,
+}
+
+impl PromptScore {
+    /// Build a `Served` row. All score fields required.
+    #[allow(clippy::too_many_arguments)]
+    pub fn served(
+        prompt: String,
+        category: String,
+        knowledge_source: KnowledgeSource,
+        strategy: String,
+        expected_contains: String,
+        predicted_top1: String,
+        top1_match: bool,
+        bits_per_token: f64,
+    ) -> Self {
+        Self {
+            prompt,
+            category,
+            knowledge_source,
+            strategy,
+            expected_contains,
+            outcome: ScoreOutcome::Served,
+            predicted_top1: Some(predicted_top1),
+            top1_match: Some(top1_match),
+            bits_per_token: Some(bits_per_token),
+        }
+    }
+
+    /// Build a `Skipped` row with the given outcome. Score fields are
+    /// forced to `None`; passing `ScoreOutcome::Served` here is a
+    /// programming error and trips a debug assertion.
+    pub fn skipped(
+        prompt: String,
+        category: String,
+        knowledge_source: KnowledgeSource,
+        strategy: String,
+        expected_contains: String,
+        outcome: ScoreOutcome,
+    ) -> Self {
+        debug_assert!(
+            !matches!(outcome, ScoreOutcome::Served),
+            "PromptScore::skipped called with ScoreOutcome::Served — \
+             use PromptScore::served for served rows"
+        );
+        Self {
+            prompt,
+            category,
+            knowledge_source,
+            strategy,
+            expected_contains,
+            outcome,
+            predicted_top1: None,
+            top1_match: None,
+            bits_per_token: None,
+        }
+    }
 }
 
 /// Per-engine aggregate across the parametric, in-context, and conflict
 /// corpora. All `_rate` fields are in [0, 1]; the mean-bits columns are
 /// raw bits-per-token (lower = more confident).
+///
+/// **`served_rate` and `*_match_rate` are required-companion fields.** A
+/// match-rate value without an accompanying served-rate is a misleading
+/// number for engines that skip prompts (notably Apollo on store-miss
+/// queries). The aggregator computes match-rate over the served subset;
+/// served-rate exposes the denominator so downstream consumers can read
+/// both rather than inferring one from row counts. For engines with
+/// no skips, `served_rate == 1.0` and the historical `match_rate`
+/// reading is preserved exactly.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct StrategySplit {
     pub strategy: String,
     pub parametric_match_rate: f64,
     pub parametric_mean_bits: f64,
+    /// Total parametric prompts the engine was asked to score
+    /// (including skipped rows).
     pub parametric_n: usize,
+    /// Number that produced a measurable score. Equals `parametric_n`
+    /// for engines that never skip.
+    pub parametric_served: usize,
+    /// `parametric_served / parametric_n`. Required companion to
+    /// `parametric_match_rate`.
+    pub parametric_served_rate: f64,
     pub in_context_match_rate: f64,
     pub in_context_mean_bits: f64,
     pub in_context_n: usize,
+    pub in_context_served: usize,
+    pub in_context_served_rate: f64,
     pub conflict_follow_rate: f64,
     pub conflict_parametric_fallback_rate: f64,
     pub conflict_n: usize,
+    pub conflict_served: usize,
+    pub conflict_served_rate: f64,
+}
+
+/// Outcome of a single [`score_one`] attempt: either `Served` with the
+/// three score components, or `Skipped` with the reason. Private — the
+/// public score types (`PromptScore`, `ConflictScore`) are what
+/// `evaluate_*` callers receive.
+enum ScoreResult {
+    Served {
+        predicted: String,
+        matched: bool,
+        bits: f64,
+    },
+    Skipped(ScoreOutcome),
 }
 
 /// Score one prompt: prefill via the engine, project to logits, score.
 ///
-/// Returns `None` if the engine's `prefill` fails (e.g. empty prompt,
-/// no Q4K backend) or the prompt tokenises to nothing.
+/// Returns [`ScoreResult::Served`] on success, otherwise
+/// [`ScoreResult::Skipped`] with a [`ScoreOutcome`] describing why. The
+/// caller is responsible for building the appropriate `PromptScore` or
+/// `ConflictScore` variant; today's drivers build a row in both cases
+/// (replacing the historical `filter_map` silent-drop behaviour).
 fn score_one(
     engine: &mut dyn KvEngine,
     weights: &ModelWeights,
@@ -93,22 +259,32 @@ fn score_one(
     tokenizer: &Tokenizer,
     prompt_text: &str,
     expected_contains: &str,
-) -> Option<(String, bool, f64)> {
-    let encoding = tokenizer.encode(prompt_text, true).ok()?;
+) -> ScoreResult {
+    let encoding = match tokenizer.encode(prompt_text, true) {
+        Ok(e) => e,
+        Err(_) => return ScoreResult::Skipped(ScoreOutcome::SkippedEmptyPrompt),
+    };
     let prompt_ids: Vec<u32> = encoding.get_ids().to_vec();
     if prompt_ids.is_empty() {
-        return None;
+        return ScoreResult::Skipped(ScoreOutcome::SkippedEmptyPrompt);
     }
 
-    let hidden = engine.prefill(weights, ffn, &prompt_ids)?;
+    let hidden = match engine.prefill(weights, ffn, &prompt_ids) {
+        Some(h) => h,
+        None => return ScoreResult::Skipped(ScoreOutcome::SkippedInternalError),
+    };
     let logits = hidden_to_raw_logits(weights, &hidden);
 
     // Argmax → top-1 string for the match check.
-    let (top1_id, _) = logits
+    let (top1_id, _) = match logits
         .iter()
         .enumerate()
         .filter(|(_, &v)| v.is_finite())
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))?;
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+    {
+        Some(t) => t,
+        None => return ScoreResult::Skipped(ScoreOutcome::SkippedInternalError),
+    };
     let predicted = tokenizer
         .decode(&[top1_id as u32], true)
         .unwrap_or_else(|_| format!("<{top1_id}>"));
@@ -119,7 +295,11 @@ fn score_one(
     // Shannon: bits of surprise on the expected answer's first token.
     let bits = shannon_bits_for_expected(&logits, tokenizer, expected_contains);
 
-    Some((predicted, matched, bits))
+    ScoreResult::Served {
+        predicted,
+        matched,
+        bits,
+    }
 }
 
 /// `-log2(P(expected_first_token | logits))`. Returns `NaN` if the
@@ -197,26 +377,39 @@ where
 {
     prompts
         .iter()
-        .filter_map(|p| {
+        .map(|p| {
             let mut engine = build_engine();
-            let (predicted, matched, bits) = score_one(
+            match score_one(
                 engine.as_mut(),
                 weights,
                 ffn,
                 tokenizer,
                 p.text,
                 p.expected_contains,
-            )?;
-            Some(PromptScore {
-                prompt: p.text.to_string(),
-                category: p.category.to_string(),
-                knowledge_source: p.knowledge_source,
-                strategy: strategy_name.to_string(),
-                expected_contains: p.expected_contains.to_string(),
-                predicted_top1: predicted,
-                top1_match: matched,
-                bits_per_token: bits,
-            })
+            ) {
+                ScoreResult::Served {
+                    predicted,
+                    matched,
+                    bits,
+                } => PromptScore::served(
+                    p.text.to_string(),
+                    p.category.to_string(),
+                    p.knowledge_source,
+                    strategy_name.to_string(),
+                    p.expected_contains.to_string(),
+                    predicted,
+                    matched,
+                    bits,
+                ),
+                ScoreResult::Skipped(outcome) => PromptScore::skipped(
+                    p.text.to_string(),
+                    p.category.to_string(),
+                    p.knowledge_source,
+                    strategy_name.to_string(),
+                    p.expected_contains.to_string(),
+                    outcome,
+                ),
+            }
         })
         .collect()
 }
@@ -239,32 +432,47 @@ where
 {
     needles
         .iter()
-        .filter_map(|n| {
+        .map(|n| {
             let haystack = build_haystack(n.context_tokens, n.needle_text);
             let prompt_text = format!("{haystack}\n\n{}\nAnswer:", n.query_text);
+            let row_prompt = format!("[needle@{}tok] {}", n.context_tokens, n.query_text);
             let mut engine = build_engine();
-            let (predicted, _, bits) = score_one(
+            match score_one(
                 engine.as_mut(),
                 weights,
                 ffn,
                 tokenizer,
                 &prompt_text,
                 n.needle_answer,
-            )?;
-            // For needles, "match" uses the dedicated case-insensitive
-            // `needle_found` helper (allows substring anywhere in the
-            // decoded top-1, same as the historical scorer).
-            let matched = needle_found(&predicted, n.needle_answer);
-            Some(PromptScore {
-                prompt: format!("[needle@{}tok] {}", n.context_tokens, n.query_text),
-                category: "needle".to_string(),
-                knowledge_source: KnowledgeSource::InContext,
-                strategy: strategy_name.to_string(),
-                expected_contains: n.needle_answer.to_string(),
-                predicted_top1: predicted,
-                top1_match: matched,
-                bits_per_token: bits,
-            })
+            ) {
+                ScoreResult::Served {
+                    predicted, bits, ..
+                } => {
+                    // For needles, "match" uses the dedicated
+                    // case-insensitive `needle_found` helper (allows
+                    // substring anywhere in the decoded top-1, same as
+                    // the historical scorer).
+                    let matched = needle_found(&predicted, n.needle_answer);
+                    PromptScore::served(
+                        row_prompt,
+                        "needle".to_string(),
+                        KnowledgeSource::InContext,
+                        strategy_name.to_string(),
+                        n.needle_answer.to_string(),
+                        predicted,
+                        matched,
+                        bits,
+                    )
+                }
+                ScoreResult::Skipped(outcome) => PromptScore::skipped(
+                    row_prompt,
+                    "needle".to_string(),
+                    KnowledgeSource::InContext,
+                    strategy_name.to_string(),
+                    n.needle_answer.to_string(),
+                    outcome,
+                ),
+            }
         })
         .collect()
 }
@@ -272,17 +480,75 @@ where
 /// One scored conflict prompt: did the engine follow the in-context
 /// override, fall back to the parametric answer, or produce something
 /// else entirely?
+///
+/// Same `Option`-on-skip pattern as [`PromptScore`]; build via
+/// [`Self::served`] / [`Self::skipped`] rather than literal
+/// construction outside tests so the correlated-optionality invariant
+/// is enforced.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ConflictScore {
     pub prompt: String,
     pub strategy: String,
     pub override_answer: String,
     pub parametric_answer: String,
-    pub predicted_top1: String,
-    /// Top-1 matched the in-context override.
-    pub followed_context: bool,
+    /// Whether the engine produced a measurable verdict. See
+    /// [`ScoreOutcome`] for the variant set and the interim-taxonomy
+    /// caveat.
+    pub outcome: ScoreOutcome,
+    /// Decoded top-1 the engine produced. `None` when not served.
+    pub predicted_top1: Option<String>,
+    /// Top-1 matched the in-context override. `None` when not served.
+    pub followed_context: Option<bool>,
     /// Top-1 matched the parametric answer (model ignored the prompt).
-    pub parametric_fallback: bool,
+    /// `None` when not served.
+    pub parametric_fallback: Option<bool>,
+}
+
+impl ConflictScore {
+    pub fn served(
+        prompt: String,
+        strategy: String,
+        override_answer: String,
+        parametric_answer: String,
+        predicted_top1: String,
+        followed_context: bool,
+        parametric_fallback: bool,
+    ) -> Self {
+        Self {
+            prompt,
+            strategy,
+            override_answer,
+            parametric_answer,
+            outcome: ScoreOutcome::Served,
+            predicted_top1: Some(predicted_top1),
+            followed_context: Some(followed_context),
+            parametric_fallback: Some(parametric_fallback),
+        }
+    }
+
+    pub fn skipped(
+        prompt: String,
+        strategy: String,
+        override_answer: String,
+        parametric_answer: String,
+        outcome: ScoreOutcome,
+    ) -> Self {
+        debug_assert!(
+            !matches!(outcome, ScoreOutcome::Served),
+            "ConflictScore::skipped called with ScoreOutcome::Served — \
+             use ConflictScore::served for served rows"
+        );
+        Self {
+            prompt,
+            strategy,
+            override_answer,
+            parametric_answer,
+            outcome,
+            predicted_top1: None,
+            followed_context: None,
+            parametric_fallback: None,
+        }
+    }
 }
 
 /// Drive an engine through the conflict corpus.
@@ -303,33 +569,53 @@ where
 {
     prompts
         .iter()
-        .filter_map(|p| {
+        .map(|p| {
             let mut engine = build_engine();
-            let (predicted, _, _) = score_one(
+            match score_one(
                 engine.as_mut(),
                 weights,
                 ffn,
                 tokenizer,
                 p.prompt,
                 p.override_answer, // unused for match here; we recompute both sides below
-            )?;
-            let lower = predicted.to_lowercase();
-            let followed = lower.contains(&p.override_answer.to_lowercase());
-            let fallback = !followed && lower.contains(&p.parametric_answer.to_lowercase());
-            Some(ConflictScore {
-                prompt: p.prompt.to_string(),
-                strategy: strategy_name.to_string(),
-                override_answer: p.override_answer.to_string(),
-                parametric_answer: p.parametric_answer.to_string(),
-                predicted_top1: predicted,
-                followed_context: followed,
-                parametric_fallback: fallback,
-            })
+            ) {
+                ScoreResult::Served { predicted, .. } => {
+                    let lower = predicted.to_lowercase();
+                    let followed = lower.contains(&p.override_answer.to_lowercase());
+                    let fallback =
+                        !followed && lower.contains(&p.parametric_answer.to_lowercase());
+                    ConflictScore::served(
+                        p.prompt.to_string(),
+                        strategy_name.to_string(),
+                        p.override_answer.to_string(),
+                        p.parametric_answer.to_string(),
+                        predicted,
+                        followed,
+                        fallback,
+                    )
+                }
+                ScoreResult::Skipped(outcome) => ConflictScore::skipped(
+                    p.prompt.to_string(),
+                    strategy_name.to_string(),
+                    p.override_answer.to_string(),
+                    p.parametric_answer.to_string(),
+                    outcome,
+                ),
+            }
         })
         .collect()
 }
 
-/// Aggregate per-prompt scores + conflict scores into one row per engine.
+/// Aggregate per-prompt scores + conflict scores into one row per
+/// engine.
+///
+/// Match-rate / mean-bits / follow-rate / fallback-rate are computed
+/// over the *served* subset (rows where the engine produced a
+/// measurable score). Skipped rows count toward the `*_n` total and
+/// reduce `*_served_rate` but don't pollute the match-rate numerator —
+/// this is the position from ROADMAP "P0 — sibling trait extraction"
+/// Item 1, finding A: counting skips as zero punishes engines for
+/// honest reporting and reproduces the silent-drop incentive.
 pub fn compute_strategy_split(
     scores: &[PromptScore],
     conflicts: &[ConflictScore],
@@ -345,13 +631,13 @@ pub fn compute_strategy_split(
     strategies
         .into_iter()
         .map(|strat| {
-            let (p_match, p_bits, p_n) = aggregate(scores.iter().filter(|s| {
+            let (p_match, p_bits, p_n, p_served) = aggregate(scores.iter().filter(|s| {
                 s.strategy == strat && s.knowledge_source == KnowledgeSource::Parametric
             }));
-            let (ic_match, ic_bits, ic_n) = aggregate(scores.iter().filter(|s| {
+            let (ic_match, ic_bits, ic_n, ic_served) = aggregate(scores.iter().filter(|s| {
                 s.strategy == strat && s.knowledge_source == KnowledgeSource::InContext
             }));
-            let (conflict_n, conflict_follow, conflict_fallback) =
+            let (conflict_n, conflict_served, conflict_follow, conflict_fallback) =
                 aggregate_conflict(conflicts.iter().filter(|c| c.strategy == strat));
 
             StrategySplit {
@@ -359,69 +645,117 @@ pub fn compute_strategy_split(
                 parametric_match_rate: p_match,
                 parametric_mean_bits: p_bits,
                 parametric_n: p_n,
+                parametric_served: p_served,
+                parametric_served_rate: served_rate(p_served, p_n),
                 in_context_match_rate: ic_match,
                 in_context_mean_bits: ic_bits,
                 in_context_n: ic_n,
+                in_context_served: ic_served,
+                in_context_served_rate: served_rate(ic_served, ic_n),
                 conflict_follow_rate: conflict_follow,
                 conflict_parametric_fallback_rate: conflict_fallback,
                 conflict_n,
+                conflict_served,
+                conflict_served_rate: served_rate(conflict_served, conflict_n),
             }
         })
         .collect()
 }
 
-fn aggregate<'a>(iter: impl Iterator<Item = &'a PromptScore>) -> (f64, f64, usize) {
+/// `served / total`, NaN when `total == 0`. Inlined helper for the
+/// three axes in [`compute_strategy_split`].
+fn served_rate(served: usize, total: usize) -> f64 {
+    if total == 0 {
+        f64::NAN
+    } else {
+        served as f64 / total as f64
+    }
+}
+
+/// Aggregate prompt scores. Returns `(match_rate, mean_bits, total,
+/// served)`. Match-rate denominator is `served`, not `total`. Mean-bits
+/// averages only the finite-bits served rows. Total counts every row
+/// passed in (including skipped); served counts only the rows the
+/// engine actually scored.
+fn aggregate<'a>(iter: impl Iterator<Item = &'a PromptScore>) -> (f64, f64, usize, usize) {
     let mut matches = 0usize;
     let mut bits_sum = 0.0f64;
     let mut bits_n = 0usize;
     let mut total = 0usize;
+    let mut served = 0usize;
     for s in iter {
         total += 1;
-        if s.top1_match {
+        if !s.outcome.is_served() {
+            continue;
+        }
+        served += 1;
+        if matches!(s.top1_match, Some(true)) {
             matches += 1;
         }
-        if s.bits_per_token.is_finite() {
-            bits_sum += s.bits_per_token;
-            bits_n += 1;
+        if let Some(b) = s.bits_per_token {
+            if b.is_finite() {
+                bits_sum += b;
+                bits_n += 1;
+            }
         }
     }
-    let match_rate = if total == 0 {
+    let match_rate = if served == 0 {
         f64::NAN
     } else {
-        matches as f64 / total as f64
+        matches as f64 / served as f64
     };
     let mean_bits = if bits_n == 0 {
         f64::NAN
     } else {
         bits_sum / bits_n as f64
     };
-    (match_rate, mean_bits, total)
+    (match_rate, mean_bits, total, served)
 }
 
-fn aggregate_conflict<'a>(iter: impl Iterator<Item = &'a ConflictScore>) -> (usize, f64, f64) {
+/// Aggregate conflict scores. Returns `(total, served, follow_rate,
+/// fallback_rate)`. Same served-only-denominator policy as
+/// [`aggregate`].
+fn aggregate_conflict<'a>(
+    iter: impl Iterator<Item = &'a ConflictScore>,
+) -> (usize, usize, f64, f64) {
     let mut total = 0usize;
+    let mut served = 0usize;
     let mut follow = 0usize;
     let mut fallback = 0usize;
     for c in iter {
         total += 1;
-        if c.followed_context {
+        if !c.outcome.is_served() {
+            continue;
+        }
+        served += 1;
+        if matches!(c.followed_context, Some(true)) {
             follow += 1;
         }
-        if c.parametric_fallback {
+        if matches!(c.parametric_fallback, Some(true)) {
             fallback += 1;
         }
     }
-    if total == 0 {
-        return (0, f64::NAN, f64::NAN);
+    if served == 0 {
+        return (total, 0, f64::NAN, f64::NAN);
     }
     (
         total,
-        follow as f64 / total as f64,
-        fallback as f64 / total as f64,
+        served,
+        follow as f64 / served as f64,
+        fallback as f64 / served as f64,
     )
 }
 
 /// Format the split table (parametric vs in-context vs conflict).
+///
+/// Rows where every axis had `served == n` (no skips) emit one line
+/// per strategy in the historical format. Rows where any axis skipped
+/// prompts emit a second indented line with served denominators
+/// (`served: P=60/101, IC=7/7, C=20/20` style) so the match-rate
+/// numbers above can be read in context. The conditional second line
+/// keeps the common case (no skips, seven of the nine engines today)
+/// unchanged while making misses visible in the human-readable
+/// summary. Per ROADMAP "P0 — sibling trait extraction" Item 1.
 pub fn format_strategy_split(splits: &[StrategySplit]) -> String {
     let mut out = String::new();
     out.push_str("\n=== Engine Split: Parametric vs In-Context vs Conflict ===\n\n");
@@ -443,9 +777,29 @@ pub fn format_strategy_split(splits: &[StrategySplit]) -> String {
             fmt_pct(s.conflict_follow_rate, 10),
             fmt_pct(s.conflict_parametric_fallback_rate, 10),
         ));
+        if has_skips(s) {
+            out.push_str(&format!(
+                "{:<25}   served: P={}/{}, IC={}/{}, C={}/{}\n",
+                "",
+                s.parametric_served,
+                s.parametric_n,
+                s.in_context_served,
+                s.in_context_n,
+                s.conflict_served,
+                s.conflict_n,
+            ));
+        }
     }
 
     out
+}
+
+/// True if any axis on this row served fewer than the total. Drives
+/// the conditional second-line emission in [`format_strategy_split`].
+fn has_skips(s: &StrategySplit) -> bool {
+    s.parametric_served < s.parametric_n
+        || s.in_context_served < s.in_context_n
+        || s.conflict_served < s.conflict_n
 }
 
 fn fmt_pct(v: f64, width: usize) -> String {
@@ -747,56 +1101,56 @@ mod tests {
     #[test]
     fn compute_strategy_split_splits_by_knowledge_source() {
         let scores = vec![
-            PromptScore {
-                prompt: "p1".into(),
-                category: "factual".into(),
-                knowledge_source: KnowledgeSource::Parametric,
-                strategy: "Standard".into(),
-                expected_contains: "Paris".into(),
-                predicted_top1: "Paris".into(),
-                top1_match: true,
-                bits_per_token: 0.5,
-            },
-            PromptScore {
-                prompt: "p2".into(),
-                category: "factual".into(),
-                knowledge_source: KnowledgeSource::Parametric,
-                strategy: "Standard".into(),
-                expected_contains: "Berlin".into(),
-                predicted_top1: "wrong".into(),
-                top1_match: false,
-                bits_per_token: 2.0,
-            },
-            PromptScore {
-                prompt: "n1".into(),
-                category: "needle".into(),
-                knowledge_source: KnowledgeSource::InContext,
-                strategy: "Standard".into(),
-                expected_contains: "AURORA".into(),
-                predicted_top1: "AURORA".into(),
-                top1_match: true,
-                bits_per_token: 1.0,
-            },
+            PromptScore::served(
+                "p1".into(),
+                "factual".into(),
+                KnowledgeSource::Parametric,
+                "Standard".into(),
+                "Paris".into(),
+                "Paris".into(),
+                true,
+                0.5,
+            ),
+            PromptScore::served(
+                "p2".into(),
+                "factual".into(),
+                KnowledgeSource::Parametric,
+                "Standard".into(),
+                "Berlin".into(),
+                "wrong".into(),
+                false,
+                2.0,
+            ),
+            PromptScore::served(
+                "n1".into(),
+                "needle".into(),
+                KnowledgeSource::InContext,
+                "Standard".into(),
+                "AURORA".into(),
+                "AURORA".into(),
+                true,
+                1.0,
+            ),
         ];
         let conflicts = vec![
-            ConflictScore {
-                prompt: "c1".into(),
-                strategy: "Standard".into(),
-                override_answer: "Lyon".into(),
-                parametric_answer: "Paris".into(),
-                predicted_top1: "Lyon".into(),
-                followed_context: true,
-                parametric_fallback: false,
-            },
-            ConflictScore {
-                prompt: "c2".into(),
-                strategy: "Standard".into(),
-                override_answer: "Osaka".into(),
-                parametric_answer: "Tokyo".into(),
-                predicted_top1: "Tokyo".into(),
-                followed_context: false,
-                parametric_fallback: true,
-            },
+            ConflictScore::served(
+                "c1".into(),
+                "Standard".into(),
+                "Lyon".into(),
+                "Paris".into(),
+                "Lyon".into(),
+                true,
+                false,
+            ),
+            ConflictScore::served(
+                "c2".into(),
+                "Standard".into(),
+                "Osaka".into(),
+                "Tokyo".into(),
+                "Tokyo".into(),
+                false,
+                true,
+            ),
         ];
 
         let splits = compute_strategy_split(&scores, &conflicts);
@@ -805,12 +1159,81 @@ mod tests {
         assert!((s.parametric_match_rate - 0.5).abs() < 1e-9);
         assert!((s.parametric_mean_bits - 1.25).abs() < 1e-9);
         assert_eq!(s.parametric_n, 2);
+        assert_eq!(s.parametric_served, 2);
+        assert!((s.parametric_served_rate - 1.0).abs() < 1e-9);
         assert!((s.in_context_match_rate - 1.0).abs() < 1e-9);
         assert!((s.in_context_mean_bits - 1.0).abs() < 1e-9);
         assert_eq!(s.in_context_n, 1);
+        assert_eq!(s.in_context_served, 1);
         assert!((s.conflict_follow_rate - 0.5).abs() < 1e-9);
         assert!((s.conflict_parametric_fallback_rate - 0.5).abs() < 1e-9);
         assert_eq!(s.conflict_n, 2);
+        assert_eq!(s.conflict_served, 2);
+        assert!((s.conflict_served_rate - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn aggregate_ignores_skipped_rows_in_match_rate() {
+        // Three Parametric scores: two served (one match, one miss),
+        // one skipped. Match-rate should be 1/2 = 0.5, not 1/3.
+        // served_rate should be 2/3.
+        let scores = vec![
+            PromptScore::served(
+                "p1".into(),
+                "factual".into(),
+                KnowledgeSource::Parametric,
+                "Apollo".into(),
+                "Paris".into(),
+                "Paris".into(),
+                true,
+                0.4,
+            ),
+            PromptScore::served(
+                "p2".into(),
+                "factual".into(),
+                KnowledgeSource::Parametric,
+                "Apollo".into(),
+                "Berlin".into(),
+                "wrong".into(),
+                false,
+                3.0,
+            ),
+            PromptScore::skipped(
+                "p3".into(),
+                "factual".into(),
+                KnowledgeSource::Parametric,
+                "Apollo".into(),
+                "Rome".into(),
+                ScoreOutcome::SkippedInternalError,
+            ),
+        ];
+        let splits = compute_strategy_split(&scores, &[]);
+        let s = &splits[0];
+        assert!((s.parametric_match_rate - 0.5).abs() < 1e-9);
+        assert_eq!(s.parametric_n, 3);
+        assert_eq!(s.parametric_served, 2);
+        assert!((s.parametric_served_rate - 2.0 / 3.0).abs() < 1e-9);
+        // Mean bits over the two served rows only: (0.4 + 3.0) / 2.
+        assert!((s.parametric_mean_bits - 1.7).abs() < 1e-9);
+    }
+
+    #[test]
+    fn aggregate_all_skipped_yields_nan_match_rate_and_zero_served() {
+        let scores = vec![PromptScore::skipped(
+            "p1".into(),
+            "factual".into(),
+            KnowledgeSource::Parametric,
+            "Apollo".into(),
+            "Paris".into(),
+            ScoreOutcome::SkippedInternalError,
+        )];
+        let splits = compute_strategy_split(&scores, &[]);
+        let s = &splits[0];
+        assert!(s.parametric_match_rate.is_nan());
+        assert!(s.parametric_mean_bits.is_nan());
+        assert_eq!(s.parametric_n, 1);
+        assert_eq!(s.parametric_served, 0);
+        assert!((s.parametric_served_rate - 0.0).abs() < 1e-9);
     }
 
     #[test]
@@ -826,12 +1249,18 @@ mod tests {
             parametric_match_rate: 1.0,
             parametric_mean_bits: 0.43,
             parametric_n: 100,
+            parametric_served: 100,
+            parametric_served_rate: 1.0,
             in_context_match_rate: 0.88,
             in_context_mean_bits: 3.71,
             in_context_n: 7,
+            in_context_served: 7,
+            in_context_served_rate: 1.0,
             conflict_follow_rate: f64::NAN,
             conflict_parametric_fallback_rate: f64::NAN,
             conflict_n: 0,
+            conflict_served: 0,
+            conflict_served_rate: f64::NAN,
         }];
         let s = format_strategy_split(&splits);
         assert!(s.contains("Markov RS"));
@@ -839,6 +1268,159 @@ mod tests {
         assert!(s.contains("0.43"));
         assert!(s.contains("3.71"));
         assert!(s.contains("—"), "NaN columns should render as em-dash");
+        // No skips on any axis → no second served-denominator line.
+        assert!(
+            !s.contains("served:"),
+            "no-skip strategy must not emit served-denominator line"
+        );
+    }
+
+    #[test]
+    fn format_strategy_split_emits_second_line_when_any_axis_skips() {
+        // Parametric has 60/101 served; in-context and conflict are
+        // skip-free. The second line should appear because at least
+        // one axis has a gap, and show the denominators on all three
+        // axes for context.
+        let splits = vec![StrategySplit {
+            strategy: "Apollo".into(),
+            parametric_match_rate: 0.95,
+            parametric_mean_bits: 0.42,
+            parametric_n: 101,
+            parametric_served: 60,
+            parametric_served_rate: 60.0 / 101.0,
+            in_context_match_rate: 1.0,
+            in_context_mean_bits: 1.10,
+            in_context_n: 7,
+            in_context_served: 7,
+            in_context_served_rate: 1.0,
+            conflict_follow_rate: 0.5,
+            conflict_parametric_fallback_rate: 0.4,
+            conflict_n: 20,
+            conflict_served: 20,
+            conflict_served_rate: 1.0,
+        }];
+        let s = format_strategy_split(&splits);
+        assert!(s.contains("Apollo"));
+        assert!(
+            s.contains("served: P=60/101, IC=7/7, C=20/20"),
+            "expected served-denominator line, got:\n{s}"
+        );
+    }
+
+    #[test]
+    fn score_outcome_serde_round_trip_is_flat_tagged() {
+        // Serde representation is flat-tagged: {"status": "served"}
+        // / {"status": "skipped_retrieval_miss"} — not nested under a
+        // single Skipped object. The flatness is load-bearing for
+        // downstream jq / pandas consumers.
+        let cases = [
+            (ScoreOutcome::Served, r#"{"status":"served"}"#),
+            (
+                ScoreOutcome::SkippedEmptyPrompt,
+                r#"{"status":"skipped_empty_prompt"}"#,
+            ),
+            (
+                ScoreOutcome::SkippedRetrievalMiss,
+                r#"{"status":"skipped_retrieval_miss"}"#,
+            ),
+            (
+                ScoreOutcome::SkippedBackendUnavailable,
+                r#"{"status":"skipped_backend_unavailable"}"#,
+            ),
+            (
+                ScoreOutcome::SkippedInternalError,
+                r#"{"status":"skipped_internal_error"}"#,
+            ),
+        ];
+        for (outcome, expected_json) in &cases {
+            let json = serde_json::to_string(outcome).unwrap();
+            assert_eq!(&json, expected_json, "serialize {:?}", outcome);
+            let round: ScoreOutcome = serde_json::from_str(&json).unwrap();
+            assert_eq!(round, *outcome, "round-trip {:?}", outcome);
+        }
+    }
+
+    #[test]
+    fn prompt_score_served_constructor_sets_outcome_and_fields() {
+        let s = PromptScore::served(
+            "prompt".into(),
+            "factual".into(),
+            KnowledgeSource::Parametric,
+            "Apollo".into(),
+            "Paris".into(),
+            "Paris".into(),
+            true,
+            0.4,
+        );
+        assert_eq!(s.outcome, ScoreOutcome::Served);
+        assert_eq!(s.predicted_top1.as_deref(), Some("Paris"));
+        assert_eq!(s.top1_match, Some(true));
+        assert_eq!(s.bits_per_token, Some(0.4));
+    }
+
+    #[test]
+    fn prompt_score_skipped_constructor_nulls_score_fields() {
+        let s = PromptScore::skipped(
+            "prompt".into(),
+            "factual".into(),
+            KnowledgeSource::Parametric,
+            "Apollo".into(),
+            "Paris".into(),
+            ScoreOutcome::SkippedRetrievalMiss,
+        );
+        assert_eq!(s.outcome, ScoreOutcome::SkippedRetrievalMiss);
+        assert!(s.predicted_top1.is_none());
+        assert!(s.top1_match.is_none());
+        assert!(s.bits_per_token.is_none());
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "PromptScore::skipped called with ScoreOutcome::Served")]
+    fn prompt_score_skipped_debug_asserts_when_outcome_is_served() {
+        let _ = PromptScore::skipped(
+            "prompt".into(),
+            "factual".into(),
+            KnowledgeSource::Parametric,
+            "Apollo".into(),
+            "Paris".into(),
+            ScoreOutcome::Served,
+        );
+    }
+
+    #[test]
+    fn conflict_score_served_and_skipped_constructors() {
+        let served = ConflictScore::served(
+            "c1".into(),
+            "Apollo".into(),
+            "Lyon".into(),
+            "Paris".into(),
+            "Lyon".into(),
+            true,
+            false,
+        );
+        assert_eq!(served.outcome, ScoreOutcome::Served);
+        assert_eq!(served.followed_context, Some(true));
+
+        let skipped = ConflictScore::skipped(
+            "c2".into(),
+            "Apollo".into(),
+            "Osaka".into(),
+            "Tokyo".into(),
+            ScoreOutcome::SkippedInternalError,
+        );
+        assert_eq!(skipped.outcome, ScoreOutcome::SkippedInternalError);
+        assert!(skipped.followed_context.is_none());
+        assert!(skipped.parametric_fallback.is_none());
+    }
+
+    #[test]
+    fn score_outcome_is_served_only_for_served_variant() {
+        assert!(ScoreOutcome::Served.is_served());
+        assert!(!ScoreOutcome::SkippedEmptyPrompt.is_served());
+        assert!(!ScoreOutcome::SkippedRetrievalMiss.is_served());
+        assert!(!ScoreOutcome::SkippedBackendUnavailable.is_served());
+        assert!(!ScoreOutcome::SkippedInternalError.is_served());
     }
 
     #[test]
@@ -973,11 +1555,12 @@ mod tests {
         assert!(nan_bits.is_nan(), "expected NaN, got {nan_bits}");
     }
 
-    /// Drive `evaluate_parametric` through `score_one`'s "empty
-    /// prompt_ids → None" path (line 99-100), filtering out the prompt.
+    /// Drive `evaluate_parametric` through `score_one`'s
+    /// empty-prompt-ids path. Post Item 1 schema fix, the row is
+    /// **surfaced as `SkippedEmptyPrompt`**, not silently dropped.
     /// Uses an empty `text` so the tokeniser produces zero ids.
     #[test]
-    fn evaluate_parametric_filters_empty_prompts() {
+    fn evaluate_parametric_surfaces_empty_prompt_as_skipped() {
         use larql_inference::ffn::WeightFfn;
         use larql_inference::test_utils::{make_test_tokenizer, make_test_weights};
         let weights = make_test_weights();
@@ -1000,10 +1583,10 @@ mod tests {
             "NoCache",
             &prompts,
         );
-        assert!(
-            scores.is_empty(),
-            "empty prompt should be filtered, got {scores:?}"
-        );
+        assert_eq!(scores.len(), 1, "row must be surfaced, not dropped");
+        assert_eq!(scores[0].outcome, ScoreOutcome::SkippedEmptyPrompt);
+        assert!(scores[0].predicted_top1.is_none());
+        assert!(scores[0].top1_match.is_none());
     }
 
     /// `evaluate_in_context` with an empty haystack + empty query →
@@ -1042,10 +1625,12 @@ mod tests {
         let _ = scores;
     }
 
-    /// `evaluate_conflict` with an empty prompt — drives the filter
-    /// path in score_one for the conflict branch (line 99-100).
+    /// `evaluate_conflict` with an empty prompt — drives the
+    /// score_one empty-prompt path for the conflict branch. Post
+    /// Item 1, the row is surfaced as `SkippedEmptyPrompt`, not
+    /// silently dropped.
     #[test]
-    fn evaluate_conflict_filters_empty_prompt() {
+    fn evaluate_conflict_surfaces_empty_prompt_as_skipped() {
         use larql_inference::ffn::WeightFfn;
         use larql_inference::test_utils::{make_test_tokenizer, make_test_weights};
         let weights = make_test_weights();
@@ -1069,6 +1654,9 @@ mod tests {
             "NoCache",
             &prompts,
         );
-        assert!(scores.is_empty());
+        assert_eq!(scores.len(), 1, "row must be surfaced, not dropped");
+        assert_eq!(scores[0].outcome, ScoreOutcome::SkippedEmptyPrompt);
+        assert!(scores[0].followed_context.is_none());
+        assert!(scores[0].parametric_fallback.is_none());
     }
 }

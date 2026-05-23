@@ -177,8 +177,9 @@ pub fn run(args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
                         )?);
                     }
                     None => eprintln!(
-                        "unknown engine {:?} — supported: standard, no-cache, markov-rs, unlimited-context, turbo-quant, apollo",
-                        engine_name
+                        "unknown engine {:?} — supported: {}",
+                        engine_name,
+                        EngineKind::supported_names().join(", "),
                     ),
                 }
             }
@@ -209,8 +210,9 @@ pub fn run(args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
                         )?);
                     }
                     None => eprintln!(
-                        "unknown engine {:?} — supported: standard, no-cache, markov-rs, unlimited-context, turbo-quant, apollo",
-                        engine_name
+                        "unknown engine {:?} — supported: {}",
+                        engine_name,
+                        EngineKind::supported_names().join(", "),
                     ),
                 }
             }

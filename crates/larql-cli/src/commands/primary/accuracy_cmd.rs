@@ -29,7 +29,7 @@ use larql_kv::accuracy_suite::needle::{needle_tests, NeedleTest};
 use larql_kv::accuracy_suite::prompts::{diverse_100, quick_20};
 use larql_kv::accuracy_suite::runner::{
     compute_strategy_split, evaluate_conflict, evaluate_in_context, evaluate_parametric,
-    format_strategy_split, ConflictScore, PromptScore, StrategySplit,
+    format_strategy_split, ConflictScore, PromptScore, ScoreOutcome, StrategySplit,
 };
 use larql_kv::EngineKind;
 use std::path::PathBuf;
@@ -166,21 +166,24 @@ pub fn run(args: AccuracyArgs) -> Result<(), Box<dyn std::error::Error>> {
             &strategy_name,
             &parametric_prompts,
         );
-        let p_match = param_scores.iter().filter(|s| s.top1_match).count();
+        let p_match = param_scores
+            .iter()
+            .filter(|s| s.top1_match == Some(true))
+            .count();
+        let p_served = param_scores.iter().filter(|s| s.outcome.is_served()).count();
         eprintln!(
-            "  parametric: {}/{} top-1 in {:.1}s",
-            p_match,
-            param_scores.len(),
+            "  parametric: {} in {:.1}s",
+            fmt_served_summary(p_match, p_served, param_scores.len()),
             t0.elapsed().as_secs_f64(),
         );
         if args.verbose {
             for s in &param_scores {
                 eprintln!(
-                    "    [{}] {} → {:?} (bits={:.2})",
-                    if s.top1_match { "✓" } else { "✗" },
+                    "    [{}] {} → {} (bits={})",
+                    score_mark(s.outcome, s.top1_match),
                     truncate(&s.prompt, 60),
-                    s.predicted_top1,
-                    s.bits_per_token,
+                    fmt_opt_str(s.predicted_top1.as_deref()),
+                    fmt_opt_bits(s.bits_per_token),
                 );
             }
         }
@@ -196,21 +199,27 @@ pub fn run(args: AccuracyArgs) -> Result<(), Box<dyn std::error::Error>> {
                 &strategy_name,
                 &needles,
             );
-            let n_match = needle_scores.iter().filter(|s| s.top1_match).count();
+            let n_match = needle_scores
+                .iter()
+                .filter(|s| s.top1_match == Some(true))
+                .count();
+            let n_served = needle_scores
+                .iter()
+                .filter(|s| s.outcome.is_served())
+                .count();
             eprintln!(
-                "  in-context: {}/{} top-1 in {:.1}s",
-                n_match,
-                needle_scores.len(),
+                "  in-context: {} in {:.1}s",
+                fmt_served_summary(n_match, n_served, needle_scores.len()),
                 t0.elapsed().as_secs_f64(),
             );
             if args.verbose {
                 for s in &needle_scores {
                     eprintln!(
-                        "    [{}] {} → {:?} (bits={:.2})",
-                        if s.top1_match { "✓" } else { "✗" },
+                        "    [{}] {} → {} (bits={})",
+                        score_mark(s.outcome, s.top1_match),
                         s.prompt,
-                        s.predicted_top1,
-                        s.bits_per_token,
+                        fmt_opt_str(s.predicted_top1.as_deref()),
+                        fmt_opt_bits(s.bits_per_token),
                     );
                 }
             }
@@ -229,31 +238,47 @@ pub fn run(args: AccuracyArgs) -> Result<(), Box<dyn std::error::Error>> {
             );
             let followed = conflict_scores
                 .iter()
-                .filter(|s| s.followed_context)
+                .filter(|s| s.followed_context == Some(true))
                 .count();
             let fallback = conflict_scores
                 .iter()
-                .filter(|s| s.parametric_fallback)
+                .filter(|s| s.parametric_fallback == Some(true))
                 .count();
-            eprintln!(
-                "  conflict: {} followed / {} fallback / {} other in {:.1}s",
-                followed,
-                fallback,
-                conflict_scores.len() - followed - fallback,
-                t0.elapsed().as_secs_f64(),
-            );
+            let served = conflict_scores
+                .iter()
+                .filter(|s| s.outcome.is_served())
+                .count();
+            let other = served - followed - fallback;
+            let skipped = conflict_scores.len() - served;
+            if skipped == 0 {
+                eprintln!(
+                    "  conflict: {followed} followed / {fallback} fallback / {other} other in {:.1}s",
+                    t0.elapsed().as_secs_f64(),
+                );
+            } else {
+                eprintln!(
+                    "  conflict: {followed} followed / {fallback} fallback / {other} other / {skipped} skipped ({served}/{} served) in {:.1}s",
+                    conflict_scores.len(),
+                    t0.elapsed().as_secs_f64(),
+                );
+            }
             if args.verbose {
                 for s in &conflict_scores {
-                    let verdict = if s.followed_context {
-                        "FOLLOW"
-                    } else if s.parametric_fallback {
-                        "FALLBACK"
-                    } else {
-                        "OTHER"
+                    let verdict = match (
+                        s.outcome,
+                        s.followed_context,
+                        s.parametric_fallback,
+                    ) {
+                        (ScoreOutcome::Served, Some(true), _) => "FOLLOW".to_string(),
+                        (ScoreOutcome::Served, _, Some(true)) => "FALLBACK".to_string(),
+                        (ScoreOutcome::Served, _, _) => "OTHER".to_string(),
+                        (other, _, _) => format!("SKIP:{:?}", other),
                     };
                     eprintln!(
-                        "    [{verdict}] override={:?} param={:?} got={:?}",
-                        s.override_answer, s.parametric_answer, s.predicted_top1,
+                        "    [{verdict}] override={:?} param={:?} got={}",
+                        s.override_answer,
+                        s.parametric_answer,
+                        fmt_opt_str(s.predicted_top1.as_deref()),
                     );
                 }
             }
@@ -293,6 +318,53 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// Format a one-line per-axis summary.
+///
+/// When `served == total` (no skips), prints the historical
+/// `N/M top-1` shape so engines that never skip look identical to how
+/// they did pre-Item-1. When `served < total`, surfaces both
+/// denominators: `N/served top-1 (served/total served)`. The format
+/// branches on the value, not the engine class, so future engines
+/// that develop skip behaviour (Mode 5 etc.) automatically get the
+/// expanded form.
+fn fmt_served_summary(matches: usize, served: usize, total: usize) -> String {
+    if served == total {
+        format!("{matches}/{total} top-1")
+    } else {
+        format!("{matches}/{served} top-1 ({served}/{total} served)")
+    }
+}
+
+/// Verbose-mode row marker. `✓` / `✗` for served rows (matching today's
+/// shape); `·` for skipped rows so the eye can scan the column for
+/// engine misses.
+fn score_mark(outcome: ScoreOutcome, top1_match: Option<bool>) -> &'static str {
+    match (outcome, top1_match) {
+        (ScoreOutcome::Served, Some(true)) => "✓",
+        (ScoreOutcome::Served, _) => "✗",
+        _ => "·",
+    }
+}
+
+/// `{:?}`-style debug print of an optional string, with a stable
+/// rendering for `None` so jq / grep over verbose logs can match it.
+fn fmt_opt_str(s: Option<&str>) -> String {
+    match s {
+        Some(v) => format!("{v:?}"),
+        None => "—".to_string(),
+    }
+}
+
+/// Format an optional bits-per-token value with two-decimal precision
+/// when present, em-dash when absent. Preserves the historical
+/// `bits={:.2}` shape for served rows.
+fn fmt_opt_bits(b: Option<f64>) -> String {
+    match b {
+        Some(v) => format!("{v:.2}"),
+        None => "—".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,5 +388,47 @@ mod tests {
         // doesn't panic.
         let s = truncate("αβγδεζηθικ", 5);
         assert_eq!(s.chars().count(), 5);
+    }
+
+    #[test]
+    fn fmt_served_summary_preserves_historical_format_when_no_skips() {
+        // Engines that never skip get the pre-Item-1 one-segment
+        // format, byte-for-byte. No "served" addendum.
+        let s = fmt_served_summary(95, 101, 101);
+        assert_eq!(s, "95/101 top-1");
+        assert!(!s.contains("served"));
+    }
+
+    #[test]
+    fn fmt_served_summary_surfaces_both_denominators_when_skips_present() {
+        // Apollo at 95% on 60 served / 101 total. Both denominators
+        // visible; downstream reader can tell match-rate was computed
+        // over 60, not 101.
+        let s = fmt_served_summary(57, 60, 101);
+        assert_eq!(s, "57/60 top-1 (60/101 served)");
+    }
+
+    #[test]
+    fn score_mark_distinguishes_served_match_miss_and_skipped() {
+        assert_eq!(score_mark(ScoreOutcome::Served, Some(true)), "✓");
+        assert_eq!(score_mark(ScoreOutcome::Served, Some(false)), "✗");
+        assert_eq!(score_mark(ScoreOutcome::Served, None), "✗");
+        assert_eq!(score_mark(ScoreOutcome::SkippedEmptyPrompt, None), "·");
+        assert_eq!(
+            score_mark(ScoreOutcome::SkippedInternalError, None),
+            "·"
+        );
+    }
+
+    #[test]
+    fn fmt_opt_str_uses_em_dash_for_none() {
+        assert_eq!(fmt_opt_str(Some("Paris")), "\"Paris\"");
+        assert_eq!(fmt_opt_str(None), "—");
+    }
+
+    #[test]
+    fn fmt_opt_bits_uses_em_dash_for_none() {
+        assert_eq!(fmt_opt_bits(Some(0.42)), "0.42");
+        assert_eq!(fmt_opt_bits(None), "—");
     }
 }

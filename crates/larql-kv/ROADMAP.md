@@ -439,6 +439,144 @@ in expected ROI order.
   path, the per-engine optimization workstreams (W1-W6) are
   unfalsifiable. Wire it before starting W1.
 
+### P0 — sibling trait extraction for non-K/V engines (Apollo, Mode 5)
+
+**Problem.** The `KvEngine` trait surface assumes per-step K/V append,
+FFN dispatched through `FfnBackend`, and state reconstructible to
+K/V tensors. Apollo violates all three (`engines/apollo/engine.rs`:
+`_ffn` unused, `decode_step` re-forwards full `context_tokens` each
+call, state is residual delta + boundary residual + token list — no
+K/V). Mode 5 / Graph-Grounded will violate the same three when it
+lands. The trait's `Option<T>` return type also collapses
+semantically distinct outcomes — empty prompt, backend unavailable,
+retrieval miss, internal error, decode-before-prefill invariant
+violation — into a single `None` the harnesses route incompatibly:
+`accuracy_suite/runner.rs` silently drops via `filter_map` (Apollo's
+store-miss prompts disappear from the JSON, structurally shorter
+result vector than other engines), while `engine_runtime.rs` aborts
+with `"engine prefill failed"` on the same `None`. Same trait method,
+two semantics, neither implements the spec's documented
+`fallback_mode = standard` from
+[`docs/state-policy.md`](docs/state-policy.md) §3.
+
+**Resolution.** Extract a `RetrievalEngine` (or `QueryEngine`) sibling
+trait that drops the per-step K/V append assumption and the
+`FfnBackend` dispatch requirement. Apollo moves to it; Mode 5 lands
+on it directly. Tighten both trait return types from `Option<T>` to
+`Result<T, EngineError>` with a typed error enum so the two harnesses
+agree on a single taxonomy and downstream consumers can route on
+error kind. Harness dispatch goes through an `AnyEngine::{Kv,
+Retrieval}` enum that branches once at construction.
+
+**Scope (atomic — six touchpoints).** Partial application is worse
+than no application; a half-refactored trait surface has three
+disagreeing semantics instead of two.
+
+1. New `RetrievalEngine` trait. `Apollo` impl moves from `KvEngine`
+   to `RetrievalEngine`. Internal behaviour unchanged.
+2. `KvEngine::prefill` / `decode_step` (and `*_quant` / `*_via_executor`
+   variants) return type changes from `Option<T>` to
+   `Result<T, EngineError>`. **All eight `KvEngine` impls touched** —
+   `standard`, `no_cache`, `markov_residual`, `markov_residual_codec`,
+   `unlimited_context`, `turbo_quant`, `boundary_kv`,
+   `boundary_per_layer` — not just the one that motivated the
+   refactor. The translation is mechanical: validated on three
+   structurally-distinct samples (`markov_residual` for arch
+   preconditions, `unlimited_context` for window boundaries,
+   `boundary_per_layer` for calibration stores); every `None`-return
+   in those engines maps cleanly to `InternalError(...)`. The
+   remaining five are variations on already-validated patterns
+   (`standard` / `no_cache` are simpler; `markov_residual_codec` /
+   `boundary_kv` extend already-sampled families; `turbo_quant`'s
+   destructive-codec failure modes are in-contract per
+   state-policy §3 worked example and don't surface as `None`).
+3. `AnyEngine::{Kv, Retrieval}` dispatch enum at harness boundary.
+   Construction parses to one or the other; execution branches once.
+4. Accuracy harness (`accuracy_suite/runner.rs`,
+   `larql-cli/src/commands/primary/accuracy_cmd.rs`): per-error-kind
+   handling replaces `filter_map`; miss-rate surfaces as a first-class
+   `served_rate` column inseparable from `match_rate`.
+5. Bench harness (`engine_runtime.rs`): distinguish recoverable from
+   internal errors; recoverable misses log a skip note but don't
+   abort the whole run.
+6. `LayerEngine` / `ZoneEngine` (per
+   [`layer-engine.md`](../larql-inference/docs/specs/layer-engine.md),
+   [`zone-engine.md`](../larql-inference/docs/specs/zone-engine.md))
+   consume `AnyEngine` rather than `Box<dyn KvEngine>`.
+
+**Three findings from the validation pass that constrain the design.**
+
+1. **Interim `ffn_backend` JSON limitation (until this refactor lands).**
+   Item 1's schema fix (predecessor PR — see "Predecessors" below)
+   reports `ffn_backend` as the value passed at engine construction,
+   *not* the FFN backend actually used during the run. For engines
+   where the trait method dispatches to multiple internal paths with
+   different FFN usage (`markov_residual`'s CPU path uses `_ffn`;
+   its `*_via_executor` path uses `ffn` — same engine, same trait,
+   different ffn-honoring), the reported value may not reflect which
+   backend actually executed. **Downstream consumers should not
+   condition on `ffn_backend` for engines where this distinction
+   matters until this refactor lands.** The fix falls out naturally
+   from the typed `Result` carrying path information; deferring to
+   the refactor preserves Item 1's 200-300 line scope.
+
+2. **`InternalError` sub-taxonomy is load-bearing for production
+   observability — required design decision, not discretionary.**
+   "decode_step called before prefill" (`markov_residual::engine.rs:103`,
+   `boundary_per_layer::engine.rs:184`, others) is structurally
+   different from "the inner backend returned None for an opaque
+   reason." The first indicates a harness-level dispatch bug that
+   wants immediate investigation; the second indicates a runtime data
+   condition that wants diagnostic logging. Collapsing both into a
+   single `InternalError` makes production logs unable to distinguish
+   these alerting categories. **Recommend splitting `EngineError`
+   into `InvariantViolation { what: String }` and
+   `BackendFailure { details: String }` as two top-level variants**
+   (not a sub-tag under a single `InternalError`). This is the
+   trait-extraction PR reviewer's first design call.
+
+3. **Extensibility note — the four-variant enum is not a permanent
+   ceiling.** Currently-invisible failure modes — `unlimited_context`'s
+   "request crossed an uncheckpointed window boundary" (collapsed
+   into generic `process()` None today), `boundary_per_layer`'s
+   "calibration record missing for policy fingerprint" (a
+   construction-time `.expect()` panic at `lib.rs:362` today) — are
+   real conditions the typed `Result` surface *enables* surfacing
+   without further trait changes. The starting enum
+   (`EmptyPrompt`, `BackendUnavailable`, `RetrievalMiss { reason }`,
+   `InvariantViolation`, `BackendFailure`) is the minimum-honest
+   shape, not a commitment that the taxonomy is closed. New variants
+   are deliberate schema changes — exhaustive enum, breaking changes
+   on extension, no `#[non_exhaustive]`. Defaulting new variants
+   into existing arms reproduces the silent-drop problem one layer
+   down.
+
+**Blocks.** Item 5 in the conversational priority queue (Mode 5 /
+Graph-Grounded engine wiring). Mode 5 lands as a `RetrievalEngine`
+impl once this refactor is in; its canonical state (retrieval graph
++ token archive) is already accommodated by
+[`docs/state-policy.md`](docs/state-policy.md) §2.1's open-list of
+canonical state kinds.
+
+**Predecessors.** Item 1 schema fix (`ScoreOutcome` enum +
+`served_rate` column in `accuracy_suite/runner.rs`) ships as interim
+diagnosability. Its `ScoreOutcome` variants mirror the eventual
+`EngineError` enum so migration is a flat projection when this
+refactor lands; the field stops being interim, only its construction
+path moves from harness-side `match` to engine-side `Result`.
+Item 3 (Apollo into `larql accuracy` coverage) is safe to land once
+Item 1 ships, but its rows will only be properly diagnosable after
+this refactor.
+
+**Closes.** [`docs/state-policy.md`](docs/state-policy.md) §8 Open
+Question 1 ("Where does Apollo's fallback live? Two engines stacked
+or one engine with `fallback_mode = standard`?"). The state-policy
+patch declaring Q1 resolved lands in the same PR as this refactor —
+patching the spec to mark Q1 resolved while the harnesses still
+disagree would reproduce the same category of error the spec already
+commits with `fallback_mode = standard` (documenting intent as if it
+were implementation).
+
 ### P1 — capability extensions
 
 - **Wire `--ffn http://...` through the executor surface.** The

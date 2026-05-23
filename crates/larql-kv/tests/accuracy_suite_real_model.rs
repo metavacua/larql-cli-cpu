@@ -68,12 +68,17 @@ fn parametric_corpus_runs_through_standard_engine() {
     for s in &scores {
         assert_eq!(s.strategy, "Standard");
         assert_eq!(s.knowledge_source, KnowledgeSource::Parametric);
-        assert!(!s.predicted_top1.is_empty(), "empty predicted_top1");
+        // Standard engine never skips a real prompt — every row must
+        // be Served and carry the score fields.
+        assert!(s.outcome.is_served(), "standard engine must serve, got {:?}", s.outcome);
+        let predicted = s.predicted_top1.as_deref().expect("served row has predicted_top1");
+        assert!(!predicted.is_empty(), "empty predicted_top1");
+        let bits = s.bits_per_token.expect("served row has bits_per_token");
         // Real models on real prompts should produce finite bits.
         assert!(
-            s.bits_per_token.is_finite(),
+            bits.is_finite(),
             "bits should be finite on a real model, got {} for prompt {:?}",
-            s.bits_per_token,
+            bits,
             s.prompt
         );
     }
@@ -111,7 +116,9 @@ fn in_context_needle_runs_through_standard_engine() {
     for s in &scores {
         assert_eq!(s.knowledge_source, KnowledgeSource::InContext);
         assert_eq!(s.category, "needle");
-        assert!(s.bits_per_token.is_finite() || s.bits_per_token.is_nan());
+        assert!(s.outcome.is_served(), "standard engine must serve needles");
+        let bits = s.bits_per_token.expect("served row has bits_per_token");
+        assert!(bits.is_finite() || bits.is_nan());
     }
 }
 
@@ -136,18 +143,25 @@ fn conflict_corpus_runs_through_standard_engine() {
     );
     assert_eq!(scores.len(), prompts.len());
     for s in &scores {
+        assert!(s.outcome.is_served(), "standard engine must serve, got {:?}", s.outcome);
+        let followed = s.followed_context.expect("served row has followed_context");
+        let fallback = s.parametric_fallback.expect("served row has parametric_fallback");
         assert!(
-            !(s.followed_context && s.parametric_fallback),
+            !(followed && fallback),
             "followed and fallback are mutually exclusive by construction"
         );
     }
     eprintln!(
         "conflict scores: follow={} fallback={} other={}",
-        scores.iter().filter(|s| s.followed_context).count(),
-        scores.iter().filter(|s| s.parametric_fallback).count(),
+        scores.iter().filter(|s| s.followed_context == Some(true)).count(),
+        scores.iter().filter(|s| s.parametric_fallback == Some(true)).count(),
         scores
             .iter()
-            .filter(|s| !s.followed_context && !s.parametric_fallback)
+            .filter(|s| {
+                s.outcome.is_served()
+                    && s.followed_context != Some(true)
+                    && s.parametric_fallback != Some(true)
+            })
             .count(),
     );
 }
