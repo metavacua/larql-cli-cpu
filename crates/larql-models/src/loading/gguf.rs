@@ -369,6 +369,7 @@ impl GgufFile {
             "phi" | "phi2" | "phi3" => "phi",
             "gpt2" => "gpt2",
             "deepseek" | "deepseek2" => "deepseek_v2",
+            "deepseek_v4" | "deepseekv4" => "deepseek_v4",
             other => other,
         };
 
@@ -1018,6 +1019,9 @@ mod tests {
             moe_intermediate_size: None,
             kv_lora_rank: None,
             q_lora_rank: None,
+            qk_nope_head_dim: None,
+            qk_rope_head_dim: None,
+            v_head_dim: None,
             rope_scaling: None,
             attn_logit_softcapping: None,
             final_logit_softcapping: None,
@@ -1157,6 +1161,9 @@ mod tests {
             moe_intermediate_size: None,
             kv_lora_rank: None,
             q_lora_rank: None,
+            qk_nope_head_dim: None,
+            qk_rope_head_dim: None,
+            v_head_dim: None,
             rope_scaling: None,
             attn_logit_softcapping: None,
             final_logit_softcapping: None,

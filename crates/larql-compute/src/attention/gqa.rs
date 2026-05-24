@@ -254,6 +254,76 @@ fn gqa_attention_capture(
     (out, weights, all_weights)
 }
 
+/// GQA with asymmetric Q/K vs V head dimensions — required for MLA-absorbed attention.
+///
+/// `qk_head_dim`: head dimension for Q and K (e.g. 192 for DS-V3: nope=128 + rope=64).
+/// `v_head_dim`: head dimension for V and the output (e.g. 128 for DS-V3).
+///
+/// q: (seq, num_q * qk_head_dim), k: (seq, num_kv * qk_head_dim), v: (seq, num_kv * v_head_dim)
+/// Returns: (seq, num_q * v_head_dim)
+#[allow(clippy::too_many_arguments)]
+pub fn gqa_attention_asym(
+    q: &Array2<f32>,
+    k: &Array2<f32>,
+    v: &Array2<f32>,
+    num_q: usize,
+    qk_head_dim: usize,
+    v_head_dim: usize,
+    reps: usize,
+    scale: f64,
+    seq_len: usize,
+) -> Array2<f32> {
+    let mut out = Array2::<f32>::zeros((seq_len, num_q * v_head_dim));
+    let scale_f32 = scale as f32;
+    let mut scores_buf = vec![0.0f32; seq_len];
+
+    for h in 0..num_q {
+        let kv_h = h / reps;
+        let q_off = h * qk_head_dim;
+        let kv_qk_off = kv_h * qk_head_dim;
+        let kv_v_off = kv_h * v_head_dim;
+        let out_off = h * v_head_dim;
+
+        for qi in 0..seq_len {
+            let causal_len = qi + 1;
+            let q_row = q.slice(ndarray::s![qi, q_off..q_off + qk_head_dim]);
+            let k_block = k.slice(ndarray::s![
+                0..causal_len,
+                kv_qk_off..kv_qk_off + qk_head_dim
+            ]);
+            let raw_scores = k_block.dot(&q_row);
+
+            for i in 0..causal_len {
+                scores_buf[i] = raw_scores[i] * scale_f32;
+            }
+            let max_val = scores_buf[..causal_len]
+                .iter()
+                .copied()
+                .fold(f32::NEG_INFINITY, f32::max);
+            let mut sum = 0.0f64;
+            for score in scores_buf.iter_mut().take(causal_len) {
+                let e = ((*score - max_val) as f64).exp();
+                *score = e as f32;
+                sum += e;
+            }
+            let inv_sum = (1.0 / sum) as f32;
+            for score in scores_buf.iter_mut().take(causal_len) {
+                *score *= inv_sum;
+            }
+
+            let v_block = v.slice(ndarray::s![0..causal_len, kv_v_off..kv_v_off + v_head_dim]);
+            for d in 0..v_head_dim {
+                let mut acc = 0.0f32;
+                for i in 0..causal_len {
+                    acc += scores_buf[i] * v_block[(i, d)];
+                }
+                out[(qi, out_off + d)] = acc;
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -654,6 +724,118 @@ mod tests {
             assert!(
                 (a - b).abs() < 1e-5,
                 "heads 0 and 1 should produce same output: {a} vs {b}"
+            );
+        }
+    }
+
+    // ── gqa_attention_asym — MLA-absorbed asymmetric head dims ──────────────
+
+    #[test]
+    fn asym_output_shape() {
+        // DS-V3 style: qk_head_dim=6, v_head_dim=4, num_q=2, reps=2 (num_kv=1)
+        let seq = 3usize;
+        let qk_hd = 6usize;
+        let v_hd = 4usize;
+        let num_q = 2usize;
+        let reps = 2usize;
+        let q = small(seq, num_q * qk_hd, 0.01);
+        let k = small(seq, (num_q / reps) * qk_hd, 0.01);
+        let v = small(seq, (num_q / reps) * v_hd, 0.01);
+        let out = gqa_attention_asym(
+            &q,
+            &k,
+            &v,
+            num_q,
+            qk_hd,
+            v_hd,
+            reps,
+            1.0 / (qk_hd as f64).sqrt(),
+            seq,
+        );
+        assert_eq!(
+            out.shape(),
+            &[seq, num_q * v_hd],
+            "asym output shape should be [seq, num_q * v_head_dim]"
+        );
+    }
+
+    #[test]
+    fn asym_output_finite() {
+        let seq = 4usize;
+        let qk_hd = 8usize;
+        let v_hd = 6usize;
+        let num_q = 4usize;
+        let reps = 2usize;
+        let num_kv = num_q / reps;
+        let q = small(seq, num_q * qk_hd, 0.01);
+        let k = small(seq, num_kv * qk_hd, 0.01);
+        let v = small(seq, num_kv * v_hd, 0.01);
+        let out = gqa_attention_asym(
+            &q,
+            &k,
+            &v,
+            num_q,
+            qk_hd,
+            v_hd,
+            reps,
+            1.0 / (qk_hd as f64).sqrt(),
+            seq,
+        );
+        assert!(
+            out.iter().all(|x| x.is_finite()),
+            "asym GQA output has non-finite values"
+        );
+    }
+
+    #[test]
+    fn asym_sym_equivalence_when_dims_equal() {
+        // When qk_head_dim == v_head_dim, asym must match sym exactly.
+        let seq = 3usize;
+        let hd = 4usize;
+        let num_q = 2usize;
+        let reps = 2usize;
+        let num_kv = num_q / reps;
+        let q = small(seq, num_q * hd, 0.05);
+        let k = small(seq, num_kv * hd, 0.05);
+        let v = small(seq, num_kv * hd, 0.05);
+        let scale = 1.0 / (hd as f64).sqrt();
+        let sym = gqa_attention(&q, &k, &v, num_q, hd, reps, scale, seq);
+        let asym = gqa_attention_asym(&q, &k, &v, num_q, hd, hd, reps, scale, seq);
+        for (a, b) in sym.iter().zip(asym.iter()) {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "asym must match sym when dims are equal: {a} vs {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn asym_single_token_causal() {
+        // seq=1 → causal_len=1 everywhere; trivial softmax (weight=1.0)
+        let seq = 1usize;
+        let qk_hd = 4usize;
+        let v_hd = 2usize;
+        let q = small(seq, qk_hd, 0.1);
+        let k = small(seq, qk_hd, 0.1);
+        let v = small(seq, v_hd, 0.1);
+        let out = gqa_attention_asym(
+            &q,
+            &k,
+            &v,
+            1,
+            qk_hd,
+            v_hd,
+            1,
+            1.0 / (qk_hd as f64).sqrt(),
+            seq,
+        );
+        // Output must equal V exactly (weight=1 on single token).
+        let v_row: Vec<f32> = v.row(0).to_vec();
+        let out_row: Vec<f32> = out.row(0).to_vec();
+        for (vv, ov) in v_row.iter().zip(out_row.iter()) {
+            assert!(
+                (vv - ov).abs() < 1e-5,
+                "seq=1 output must equal V: {vv} vs {ov}"
             );
         }
     }
