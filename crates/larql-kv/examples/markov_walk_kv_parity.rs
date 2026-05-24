@@ -212,7 +212,9 @@ fn run_markov(
         let token = forced_tokens.map_or(next, |ids| ids[step]);
         hidden = engine
             .decode_step_quant_via_executor(weights, &executor, &ffn, index, token)
-            .unwrap_or_else(|| panic!("markov-rs decode via executor failed at step {step}"));
+            .unwrap_or_else(|err| {
+                panic!("markov-rs decode via executor failed at step {step}: {err}")
+            });
         logits = hidden_to_raw_logits(weights, &hidden);
         next = argmax(&logits);
         steps.push(StepLogits {

@@ -1,6 +1,20 @@
 # KV Engine Unification — Specification
 
 **Status:** All 7 steps landed (2026-05-16). Step 6 ships run/walk only; server wiring deferred to the ComputeBackend redesign (§10.6). Step 7 cleanup is partial-by-design: `KvCacheKind` and `generate_cached_backend` are intentionally retained (see §8.7).
+
+> **Post-2026-05-24 update — sibling trait extraction landed.** The
+> code samples in §4.2 still show `Option<Array2<f32>>` returns for
+> historical clarity. The live trait surface now returns
+> `Result<Array2<f32>, EngineError>` with a typed error enum (variants:
+> `EmptyPrompt`, `BackendUnavailable`, `RetrievalMiss { reason }`,
+> `InvariantViolation { what }`, `BackendFailure { details }`). Apollo
+> moved off `KvEngine` onto a sibling [`RetrievalEngine`] trait;
+> [`AnyEngine::{Kv, Retrieval}`] is the harness dispatch enum that
+> replaces `Box<dyn KvEngine>` at construction sites. See the
+> 2026-05-24 entry in [`larql-kv/ROADMAP.md`](../../../larql-kv/ROADMAP.md)
+> for the migration details and [`state-policy.md`](../../../larql-kv/docs/state-policy.md)
+> §8 OQ1 for the closure of "where does Apollo's fallback live".
+
 **Audience:** LARQL contributors.
 **Scope:** Replace the parallel "live decode cache" and "research KV engine"
 code paths with a single `KvEngine`-based dispatch, so `larql run` / `larql

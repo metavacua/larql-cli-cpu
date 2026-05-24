@@ -1,6 +1,5 @@
 pub mod engine;
 pub mod entry;
-pub(crate) mod executor;
 pub mod npy;
 pub mod routing;
 pub mod store;

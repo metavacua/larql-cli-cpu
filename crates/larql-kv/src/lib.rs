@@ -50,7 +50,9 @@ pub use engines::unlimited_context::UnlimitedContextEngine;
 // `larql_kv::KvEngine` continues to resolve to the same trait.
 //
 // See `crates/larql-inference/docs/specs/kv-engine-unification.md` §10.4.
-pub use larql_inference::{DecodeStageSummary, EngineInfo, KvEngine};
+pub use larql_inference::kv_engine::{
+    AnyEngine, DecodeStageSummary, EngineError, EngineInfo, KvEngine, RetrievalEngine,
+};
 
 // ─── EngineKind ───────────────────────────────────────────────────────────────
 
@@ -305,11 +307,19 @@ impl EngineKind {
     }
 
     /// Build a boxed engine, dispatching compute through `backend`.
-    pub fn build(self, backend: Box<dyn larql_inference::EngineBackend>) -> Box<dyn KvEngine> {
+    pub fn build(self, backend: Box<dyn larql_inference::EngineBackend>) -> AnyEngine {
         self.build_with_profiling(backend, false)
     }
 
     /// Build a boxed engine with optional per-stage decode profiling.
+    ///
+    /// Returns [`AnyEngine`] — the dispatch enum that wraps either a
+    /// [`KvEngine`] (per-token K/V cache engines: standard, no_cache,
+    /// markov_residual, markov_residual_codec, unlimited_context,
+    /// turbo_quant, boundary_kv, boundary_per_layer) or a
+    /// [`RetrievalEngine`] (Apollo, future Mode 5). Callers branch
+    /// once on the enum variant and stay in the variant-specific code
+    /// path thereafter. See the `AnyEngine` docs for the rationale.
     ///
     /// Takes [`larql_inference::EngineBackend`] — the umbrella over
     /// `ComputeBackend + KvDispatch` — so migrated engines (Step 3c
@@ -320,37 +330,41 @@ impl EngineKind {
         self,
         backend: Box<dyn larql_inference::EngineBackend>,
         profiling: bool,
-    ) -> Box<dyn KvEngine> {
+    ) -> AnyEngine {
         // `profiling` is honoured only by engines that implement it
         // (currently MarkovResidual). Other engines accept the flag for
         // a uniform construction API and ignore it.
         let _ = profiling;
         match self {
-            EngineKind::Standard { window_size } => {
-                Box::new(standard::StandardEngine::with_backend(window_size, backend))
+            EngineKind::Standard { window_size } => AnyEngine::Kv(Box::new(
+                standard::StandardEngine::with_backend(window_size, backend),
+            )),
+            EngineKind::NoCache => {
+                AnyEngine::Kv(Box::new(no_cache::NoCacheEngine::with_backend(backend)))
             }
-            EngineKind::NoCache => Box::new(no_cache::NoCacheEngine::with_backend(backend)),
-            EngineKind::MarkovResidual { window_size } => Box::new(
+            EngineKind::MarkovResidual { window_size } => AnyEngine::Kv(Box::new(
                 markov_residual::MarkovResidualEngine::with_backend(window_size, backend)
                     .with_profiling(profiling),
-            ),
-            EngineKind::UnlimitedContext { window_size } => Box::new(
+            )),
+            EngineKind::UnlimitedContext { window_size } => AnyEngine::Kv(Box::new(
                 unlimited_context::UnlimitedContextEngine::with_backend(window_size, backend)
                     .with_profiling(profiling),
-            ),
-            EngineKind::TurboQuant { bits } => Box::new(
+            )),
+            EngineKind::TurboQuant { bits } => AnyEngine::Kv(Box::new(
                 turbo_quant::TurboQuantEngine::with_backend(bits, backend)
                     .with_profiling(profiling),
-            ),
+            )),
             EngineKind::Apollo {
                 injection_layer,
                 inject_coefficient,
                 top_k,
-            } => Box::new(apollo::ApolloEngine::new(apollo::InjectionConfig {
-                injection_layer,
-                inject_coefficient,
-                top_k,
-            })),
+            } => AnyEngine::Retrieval(Box::new(apollo::ApolloEngine::new(
+                apollo::InjectionConfig {
+                    injection_layer,
+                    inject_coefficient,
+                    top_k,
+                },
+            ))),
             EngineKind::BoundaryKv {
                 window_size,
                 chunk_tokens,
@@ -360,16 +374,18 @@ impl EngineKind {
                 let mut config = boundary_kv::BoundaryKvEngineConfig::new(sequence_id, identity);
                 config.window_size = window_size;
                 config.chunk_tokens = chunk_tokens;
-                Box::new(boundary_kv::BoundaryKvEngine::with_backend(config, backend))
+                AnyEngine::Kv(Box::new(boundary_kv::BoundaryKvEngine::with_backend(
+                    config, backend,
+                )))
             }
-            EngineKind::MarkovResidualCodec { window_size, codec } => Box::new(
+            EngineKind::MarkovResidualCodec { window_size, codec } => AnyEngine::Kv(Box::new(
                 markov_residual_codec::MarkovResidualCodecEngine::with_backend(
                     window_size,
                     codec,
                     backend,
                 )
                 .with_profiling(profiling),
-            ),
+            )),
             EngineKind::BoundaryPerLayer {
                 window_size,
                 num_layers,
@@ -388,7 +404,7 @@ impl EngineKind {
                     policy.fingerprint(),
                 ))
                 .expect("calibration store seed failed");
-                Box::new(
+                AnyEngine::Kv(Box::new(
                     BoundaryPerLayerEngine::with_backend(
                         window_size,
                         policy,
@@ -397,7 +413,7 @@ impl EngineKind {
                         backend,
                     )
                     .expect("boundary-per-layer construction failed"),
-                )
+                ))
             }
         }
     }
@@ -934,18 +950,18 @@ mod compliance_tests {
             _weights: &ModelWeights,
             _ffn: &dyn larql_inference::ffn::FfnBackend,
             _token_ids: &[u32],
-        ) -> Option<Array2<f32>> {
+        ) -> Result<Array2<f32>, EngineError> {
             self.prefill_calls += 1;
-            Some(Array2::zeros((1, 4)))
+            Ok(Array2::zeros((1, 4)))
         }
         fn decode_step(
             &mut self,
             _weights: &ModelWeights,
             _ffn: &dyn larql_inference::ffn::FfnBackend,
             _token_id: u32,
-        ) -> Option<Array2<f32>> {
+        ) -> Result<Array2<f32>, EngineError> {
             self.decode_calls += 1;
-            Some(Array2::zeros((1, 4)))
+            Ok(Array2::zeros((1, 4)))
         }
         fn memory_bytes(&self) -> usize {
             0
@@ -967,14 +983,14 @@ mod compliance_tests {
         // Build a separate &mut binding for the `prefill_quant` call.
         let mut weights_for_q4k = larql_inference::test_utils::make_test_weights();
         let out = engine.prefill_quant(&mut weights_for_q4k, &ffn, &index, &[1, 2, 3], &*backend);
-        assert!(out.is_some());
+        assert!(out.is_ok());
         assert_eq!(
             engine.prefill_calls, 1,
             "default prefill_quant must call prefill"
         );
 
         let out = engine.decode_step_quant(&mut weights_for_q4k, &ffn, &index, 4, &*backend);
-        assert!(out.is_some());
+        assert!(out.is_ok());
         assert_eq!(
             engine.decode_calls, 1,
             "default decode_step_quant must call decode_step"

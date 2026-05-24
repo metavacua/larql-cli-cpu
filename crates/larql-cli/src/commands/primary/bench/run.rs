@@ -7,7 +7,7 @@ use larql_kv::EngineKind;
 use crate::commands::primary::cache;
 
 use super::args::BenchArgs;
-use super::engine_runtime::{run_engine, run_engine_q4k};
+use super::engine_runtime::run_engine;
 use super::grid_lan_runtime::{self, GridLanOptions};
 use super::helpers;
 use super::local_runtime::run_larql;
@@ -173,9 +173,9 @@ pub fn run(args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
                         } else {
                             larql_inference::cpu_engine_backend()
                         };
-                        rows.push(run_engine_q4k(
+                        rows.push(run_engine(
                             &mut weights,
-                            &index,
+                            Some(&index),
                             &token_ids,
                             kv_ref_bytes,
                             kind,
@@ -192,7 +192,11 @@ pub fn run(args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         } else {
-            let weights = larql_vindex::load_model_weights(&vindex_path, &mut cb)?;
+            // `&mut` so the unified `run_engine` signature works for the
+            // dense path too (`run_engine` requires &mut for the quant
+            // path's lazy dequant; the dense path reborrows immutably
+            // inside).
+            let mut weights = larql_vindex::load_model_weights(&vindex_path, &mut cb)?;
             let tokenizer = larql_vindex::load_vindex_tokenizer(&vindex_path)?;
             let token_ids =
                 larql_inference::encode_prompt(&tokenizer, &*weights.arch, args.prompt.as_str())
@@ -212,7 +216,8 @@ pub fn run(args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
                             larql_inference::cpu_engine_backend()
                         };
                         rows.push(run_engine(
-                            &weights,
+                            &mut weights,
+                            None,
                             &token_ids,
                             kv_ref_bytes,
                             kind,

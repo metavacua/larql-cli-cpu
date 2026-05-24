@@ -5,6 +5,7 @@ use std::sync::Arc;
 use larql_boundary::BoundaryGateConfig;
 use larql_inference::async_compute_backend::AsyncComputeBackend;
 use larql_inference::ffn::FfnBackend;
+use larql_inference::kv_engine::EngineError;
 use larql_inference::model::ModelWeights;
 use larql_inference::{cpu_engine_backend, EngineBackend};
 use ndarray::Array2;
@@ -184,16 +185,20 @@ impl KvEngine for BoundaryKvEngine {
         weights: &ModelWeights,
         ffn: &dyn FfnBackend,
         token_ids: &[u32],
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
+        if token_ids.is_empty() {
+            return Err(EngineError::EmptyPrompt);
+        }
         let hidden = self.inner.prefill(weights, ffn, token_ids)?;
         self.abs_position = token_ids.len();
         // Best-effort emit; archive errors propagate as engine-decode
-        // failure (None) per §8.2: a failed emit must not be silently
-        // dropped.
+        // failure per §8.2: a failed emit must not be silently dropped.
         if self.maybe_emit_frame(weights, &hidden).is_err() {
-            return None;
+            return Err(EngineError::BackendFailure {
+                details: "boundary frame emit failed".into(),
+            });
         }
-        Some(hidden)
+        Ok(hidden)
     }
 
     fn decode_step(
@@ -201,13 +206,15 @@ impl KvEngine for BoundaryKvEngine {
         weights: &ModelWeights,
         ffn: &dyn FfnBackend,
         token_id: u32,
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
         let hidden = self.inner.decode_step(weights, ffn, token_id)?;
         self.abs_position += 1;
         if self.maybe_emit_frame(weights, &hidden).is_err() {
-            return None;
+            return Err(EngineError::BackendFailure {
+                details: "boundary frame emit failed".into(),
+            });
         }
-        Some(hidden)
+        Ok(hidden)
     }
 
     fn memory_bytes(&self) -> usize {
@@ -229,15 +236,20 @@ impl KvEngine for BoundaryKvEngine {
         index: &larql_inference::larql_vindex::VectorIndex,
         token_ids: &[u32],
         backend: &dyn larql_compute::ComputeBackend,
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
+        if token_ids.is_empty() {
+            return Err(EngineError::EmptyPrompt);
+        }
         let hidden = self
             .inner
             .prefill_quant(weights, ffn, index, token_ids, backend)?;
         self.abs_position = token_ids.len();
         if self.maybe_emit_frame(weights, &hidden).is_err() {
-            return None;
+            return Err(EngineError::BackendFailure {
+                details: "boundary frame emit failed".into(),
+            });
         }
-        Some(hidden)
+        Ok(hidden)
     }
 
     fn decode_step_quant(
@@ -247,15 +259,17 @@ impl KvEngine for BoundaryKvEngine {
         index: &larql_inference::larql_vindex::VectorIndex,
         token_id: u32,
         backend: &dyn larql_compute::ComputeBackend,
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
         let hidden = self
             .inner
             .decode_step_quant(weights, ffn, index, token_id, backend)?;
         self.abs_position += 1;
         if self.maybe_emit_frame(weights, &hidden).is_err() {
-            return None;
+            return Err(EngineError::BackendFailure {
+                details: "boundary frame emit failed".into(),
+            });
         }
-        Some(hidden)
+        Ok(hidden)
     }
 }
 
@@ -511,8 +525,8 @@ mod tests {
             cpu_engine_backend(),
             Arc::new(FailingArchive),
         );
-        // chunk=2, prefill 2 → boundary; archive returns Err → engine None.
-        assert!(eng.prefill(&weights, &ffn, &[0u32, 1]).is_none());
+        // chunk=2, prefill 2 → boundary; archive returns Err → engine Err.
+        assert!(eng.prefill(&weights, &ffn, &[0u32, 1]).is_err());
     }
 
     #[test]
@@ -525,7 +539,7 @@ mod tests {
             cpu_engine_backend(),
             Arc::new(FailingArchive),
         );
-        assert!(eng.prefill(&weights, &ffn, &[0u32, 1, 2]).is_some());
+        assert!(eng.prefill(&weights, &ffn, &[0u32, 1, 2]).is_ok());
     }
 
     // ── Position tracking ────────────────────────────────────────────────────
@@ -718,9 +732,9 @@ mod tests {
             Arc::new(FailingArchive),
         );
         // Prefill with 1 token (no boundary crossed) succeeds.
-        assert!(eng.prefill(&weights, &ffn, &[0u32]).is_some());
-        // Decode lands on position 2 → boundary → archive fails → None.
-        assert!(eng.decode_step(&weights, &ffn, 1).is_none());
+        assert!(eng.prefill(&weights, &ffn, &[0u32]).is_ok());
+        // Decode lands on position 2 → boundary → archive fails → Err.
+        assert!(eng.decode_step(&weights, &ffn, 1).is_err());
     }
 
     #[test]

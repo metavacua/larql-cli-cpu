@@ -291,13 +291,17 @@ test catches it.
 
 ## 8. Open questions
 
-1. **Where does `Apollo`'s fallback live?** When the constellation
-   store misses, Apollo falls through to a `StandardEngine`-shaped
-   forward pass. Is that "two engines stacked" (with their own
-   contracts) or "one engine whose contract is
-   `task_level_retrieval` with `fallback_mode = standard`"? The
-   spec currently says the latter, but the implementation
-   ambiguity isn't fully settled.
+1. **Where does `Apollo`'s fallback live?** **Resolved 2026-05-24** —
+   Apollo moved to a sibling [`RetrievalEngine`] trait
+   (`larql-inference::kv_engine`) with `Result<T, EngineError>` returns.
+   A store miss surfaces as `EngineError::RetrievalMiss { reason }`
+   that the harness routes on per-error-kind. The accuracy harness
+   reports the row as `SkippedRetrievalMiss` (visible in
+   `served_rate < 1.0`); the bench harness aborts but surfaces the
+   typed error string. There is no implicit `fallback_mode = standard`
+   — callers that want a fallback now stack engines explicitly via
+   the [`AnyEngine::{Kv, Retrieval}`] dispatch enum. See the
+   2026-05-24 entry in `larql-kv/ROADMAP.md`.
 2. **`confidence_gated` is the most under-tested contract kind.**
    No engine in `larql-kv` uses it today. It's listed because the
    research direction is open (retrieval-with-fallback engines

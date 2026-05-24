@@ -135,7 +135,9 @@ fn generate_tokens(
     let ffn = larql_inference::ffn::NullFfn;
     let be = compute_backend.as_ref();
 
-    let mut hidden: Array2<f32> = engine.prefill_quant(weights, &ffn, index, prompt_ids, be)?;
+    let mut hidden: Array2<f32> = engine
+        .prefill_quant(weights, &ffn, index, prompt_ids, be)
+        .ok()?;
 
     // Sample the first decode token from the prefill-end hidden state.
     let mut generated = Vec::with_capacity(tokens);
@@ -146,7 +148,9 @@ fn generate_tokens(
     for _ in 1..tokens {
         hidden = engine
             .decode_step_quant(weights, &ffn, index, last_token, be)
-            .unwrap_or_else(|| panic!("decode_step_quant returned None on engine {engine_spec}"));
+            .unwrap_or_else(|err| {
+                panic!("decode_step_quant failed on engine {engine_spec}: {err}")
+            });
         let h_logits = larql_inference::forward::hidden_to_raw_logits(weights, &hidden);
         last_token = argmax(&h_logits);
         generated.push(last_token);

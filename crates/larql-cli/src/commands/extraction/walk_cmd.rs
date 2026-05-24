@@ -1130,7 +1130,7 @@ fn generate_stream(
     };
     let mut engine = kind.build(backend);
     let generated = larql_kv::generation::generate_with_engine(
-        engine.as_mut(),
+        &mut engine,
         weights,
         tokenizer,
         ffn,

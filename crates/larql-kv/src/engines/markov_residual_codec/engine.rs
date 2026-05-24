@@ -14,6 +14,7 @@
 //! - [`super::helpers`] — W8.2 doubling-capacity buffer helpers
 
 use larql_inference::ffn::FfnBackend;
+use larql_inference::kv_engine::EngineError;
 use larql_inference::model::ModelWeights;
 use larql_inference::{cpu_engine_backend, EngineBackend};
 use ndarray::Array2;
@@ -116,7 +117,10 @@ impl KvEngine for MarkovResidualCodecEngine {
         weights: &ModelWeights,
         _ffn: &dyn FfnBackend,
         token_ids: &[u32],
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
+        if token_ids.is_empty() {
+            return Err(EngineError::EmptyPrompt);
+        }
         let result = rs_prefill_codec(
             weights,
             token_ids,
@@ -126,7 +130,7 @@ impl KvEngine for MarkovResidualCodecEngine {
         );
         let hidden = result.hidden.clone();
         self.store = Some(result.store);
-        Some(hidden)
+        Ok(hidden)
     }
 
     fn decode_step(
@@ -134,11 +138,19 @@ impl KvEngine for MarkovResidualCodecEngine {
         weights: &ModelWeights,
         _ffn: &dyn FfnBackend,
         token_id: u32,
-    ) -> Option<Array2<f32>> {
-        let rs = self.store.take()?;
-        let (hidden, new_rs) = rs_decode_step_codec(weights, token_id, rs, self.backend.as_ref())?;
+    ) -> Result<Array2<f32>, EngineError> {
+        let rs = self
+            .store
+            .take()
+            .ok_or_else(|| EngineError::InvariantViolation {
+                what: "decode_step called before prefill (store missing)".into(),
+            })?;
+        let (hidden, new_rs) = rs_decode_step_codec(weights, token_id, rs, self.backend.as_ref())
+            .ok_or_else(|| EngineError::BackendFailure {
+            details: "rs_decode_step_codec returned None".into(),
+        })?;
         self.store = Some(new_rs);
-        Some(hidden)
+        Ok(hidden)
     }
 
     fn memory_bytes(&self) -> usize {
@@ -160,13 +172,16 @@ impl KvEngine for MarkovResidualCodecEngine {
         index: &larql_inference::larql_vindex::VectorIndex,
         token_ids: &[u32],
         backend: &dyn larql_compute::ComputeBackend,
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
+        if token_ids.is_empty() {
+            return Err(EngineError::EmptyPrompt);
+        }
         // W1-GPU path: try the dispatch route first (see
         // `MarkovResidualEngine::try_prefill_via_dispatch` for the design
         // notes). Same shape: prefill captures per-layer h_in / K_new /
         // V_new in one backend call; engine reads the dump.
         if let Some(hidden) = self.try_prefill_via_dispatch(weights, index, token_ids) {
-            return Some(hidden);
+            return Ok(hidden);
         }
         ensure_attn_tensors_dequantised(weights, index);
         let result = rs_prefill_codec_walk(
@@ -181,7 +196,7 @@ impl KvEngine for MarkovResidualCodecEngine {
         self.store = Some(result.store);
         self.kv_handle = None;
         self.abs_position = token_ids.len();
-        Some(hidden)
+        Ok(hidden)
     }
 
     fn decode_step_quant(
@@ -191,18 +206,31 @@ impl KvEngine for MarkovResidualCodecEngine {
         index: &larql_inference::larql_vindex::VectorIndex,
         token_id: u32,
         backend: &dyn larql_compute::ComputeBackend,
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
         if self.kv_handle.is_some() {
-            return self.decode_step_via_dispatch(weights, index, token_id);
+            return self
+                .decode_step_via_dispatch(weights, index, token_id)
+                .ok_or_else(|| EngineError::BackendFailure {
+                    details: "decode_step_via_dispatch returned None".into(),
+                });
         }
         ensure_attn_tensors_dequantised(weights, index);
-        let rs = self.store.take()?;
+        let rs = self
+            .store
+            .take()
+            .ok_or_else(|| EngineError::InvariantViolation {
+                what: "decode_step_quant called before prefill (store missing)".into(),
+            })?;
         let prof = self.profiling.then_some(&mut self.profile);
-        let (hidden, new_rs) =
-            rs_decode_step_codec_walk(weights, index, token_id, rs, backend, prof)?;
+        let (hidden, new_rs) = rs_decode_step_codec_walk(
+            weights, index, token_id, rs, backend, prof,
+        )
+        .ok_or_else(|| EngineError::BackendFailure {
+            details: "rs_decode_step_codec_walk returned None".into(),
+        })?;
         self.store = Some(new_rs);
         self.abs_position += 1;
-        Some(hidden)
+        Ok(hidden)
     }
 
     fn stage_summary(&self) -> Option<DecodeStageSummary> {
@@ -226,8 +254,11 @@ impl KvEngine for MarkovResidualCodecEngine {
         ffn: &dyn FfnBackend,
         index: &larql_inference::larql_vindex::VectorIndex,
         token_ids: &[u32],
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
         use larql_inference::layer_executor::ExecutorDispatchKind;
+        if token_ids.is_empty() {
+            return Err(EngineError::EmptyPrompt);
+        }
         // Per spec §3.4: this engine's state policy (codec cold tier)
         // requires per-layer dispatch. Transparent degrade on fused
         // executor until Phase 3's refusal contract lands.
@@ -235,6 +266,9 @@ impl KvEngine for MarkovResidualCodecEngine {
             return self.prefill_quant(weights, ffn, index, token_ids, executor.backend());
         }
         self.prefill_via_executor_impl(weights, executor, ffn, index, token_ids)
+            .ok_or_else(|| EngineError::BackendFailure {
+                details: "prefill_via_executor_impl returned None".into(),
+            })
     }
 
     fn decode_step_quant_via_executor(
@@ -244,12 +278,15 @@ impl KvEngine for MarkovResidualCodecEngine {
         ffn: &dyn FfnBackend,
         index: &larql_inference::larql_vindex::VectorIndex,
         token_id: u32,
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
         use larql_inference::layer_executor::ExecutorDispatchKind;
         if matches!(executor.dispatch_kind(), ExecutorDispatchKind::Fused) {
             return self.decode_step_quant(weights, ffn, index, token_id, executor.backend());
         }
         self.decode_step_via_executor_impl(weights, executor, ffn, index, token_id)
+            .ok_or_else(|| EngineError::BackendFailure {
+                details: "decode_step_via_executor_impl returned None".into(),
+            })
     }
 }
 
@@ -326,7 +363,7 @@ mod tests {
         let weights = make_test_weights();
         let ffn = WeightFfn { weights: &weights };
         let mut eng = MarkovResidualCodecEngine::new(None, ColdResidualCodec::Bf16);
-        assert!(eng.decode_step(&weights, &ffn, 0).is_none());
+        assert!(eng.decode_step(&weights, &ffn, 0).is_err());
     }
 
     #[test]
@@ -516,11 +553,11 @@ mod tests {
         let backend = larql_compute::cpu_backend();
         let ffn = NullFfn;
         let mut engine = MarkovResidualCodecEngine::new(None, ColdResidualCodec::Bf16);
-        // No prefill → store is None → decode_step_quant takes the None
-        // branch on `self.store.take()` and returns None.
+        // No prefill → store is None → decode_step_quant returns
+        // InvariantViolation at the `self.store.take()` guard.
         assert!(engine
             .decode_step_quant(&mut weights, &ffn, &index, 0, &*backend)
-            .is_none());
+            .is_err());
     }
 
     #[test]

@@ -224,7 +224,7 @@ where
 /// backend, window, ...)`. This is the parity gate for the unification
 /// migration (see `larql-inference/docs/specs/kv-engine-unification.md` §8.4).
 pub fn generate_with_engine<F>(
-    engine: &mut dyn crate::KvEngine,
+    engine: &mut crate::AnyEngine,
     weights: &ModelWeights,
     tokenizer: &larql_inference::tokenizers::Tokenizer,
     ffn: &dyn FfnBackend,
@@ -241,8 +241,8 @@ where
 
     // ── Phase 1: prefill ──
     let last_hidden = match engine.prefill(weights, ffn, prompt_ids) {
-        Some(h) => h,
-        None => return Vec::new(),
+        Ok(h) => h,
+        Err(_) => return Vec::new(),
     };
 
     // Sample first new token from the prefill-end hidden state.
@@ -265,8 +265,8 @@ where
     let mut current_id = first.0;
     for _step in 1..max_new_tokens {
         let h_step = match engine.decode_step(weights, ffn, current_id) {
-            Some(h) => h,
-            None => break,
+            Ok(h) => h,
+            Err(_) => break,
         };
         let (id, tok_str) = match argmax_next_token(weights, tokenizer, &h_step) {
             Some(t) => t,
@@ -664,29 +664,45 @@ mod tests {
             weights: &ModelWeights,
             ffn: &dyn FfnBackend,
             token_ids: &[u32],
-        ) -> Option<Array2<f32>> {
+        ) -> Result<Array2<f32>, larql_inference::kv_engine::EngineError> {
             if self.fail_prefill {
-                return None;
+                return Err(larql_inference::kv_engine::EngineError::BackendFailure {
+                    details: "test stub: fail_prefill set".into(),
+                });
             }
             let (hidden, cache) =
-                kv_prefill_run(weights, ffn, token_ids, None, None, &mut NoopHook)?;
+                kv_prefill_run(weights, ffn, token_ids, None, None, &mut NoopHook).ok_or_else(
+                    || larql_inference::kv_engine::EngineError::BackendFailure {
+                        details: "kv_prefill_run returned None".into(),
+                    },
+                )?;
             self.cache = Some(cache);
-            Some(hidden)
+            Ok(hidden)
         }
         fn decode_step(
             &mut self,
             weights: &ModelWeights,
             ffn: &dyn FfnBackend,
             token_id: u32,
-        ) -> Option<Array2<f32>> {
+        ) -> Result<Array2<f32>, larql_inference::kv_engine::EngineError> {
             self.decode_count += 1;
             if let Some(limit) = self.fail_decode_after {
                 if self.decode_count > limit {
-                    return None;
+                    return Err(larql_inference::kv_engine::EngineError::BackendFailure {
+                        details: "test stub: fail_decode_after exceeded".into(),
+                    });
                 }
             }
-            let cache = self.cache.as_mut()?;
-            kv_decode_step_run(weights, ffn, cache, token_id, None, &mut NoopHook)
+            let cache = self.cache.as_mut().ok_or_else(|| {
+                larql_inference::kv_engine::EngineError::InvariantViolation {
+                    what: "decode_step called before prefill".into(),
+                }
+            })?;
+            kv_decode_step_run(weights, ffn, cache, token_id, None, &mut NoopHook).ok_or_else(
+                || larql_inference::kv_engine::EngineError::BackendFailure {
+                    details: "kv_decode_step_run returned None".into(),
+                },
+            )
         }
         fn memory_bytes(&self) -> usize {
             0
@@ -707,7 +723,7 @@ mod tests {
         let weights = make_test_weights();
         let tokenizer = make_test_tokenizer(weights.vocab_size);
         let ffn = WeightFfn { weights: &weights };
-        let mut eng = fresh_stub();
+        let mut eng = crate::AnyEngine::Kv(Box::new(fresh_stub()));
         let out = generate_with_engine(&mut eng, &weights, &tokenizer, &ffn, &[], 5, |_, _| {});
         assert!(out.is_empty());
     }
@@ -717,7 +733,7 @@ mod tests {
         let weights = make_test_weights();
         let tokenizer = make_test_tokenizer(weights.vocab_size);
         let ffn = WeightFfn { weights: &weights };
-        let mut eng = fresh_stub();
+        let mut eng = crate::AnyEngine::Kv(Box::new(fresh_stub()));
         let out = generate_with_engine(
             &mut eng,
             &weights,
@@ -735,7 +751,7 @@ mod tests {
         let weights = make_test_weights();
         let tokenizer = make_test_tokenizer(weights.vocab_size);
         let ffn = WeightFfn { weights: &weights };
-        let mut eng = fresh_stub();
+        let mut eng = crate::AnyEngine::Kv(Box::new(fresh_stub()));
         let out = generate_with_engine(
             &mut eng,
             &weights,
@@ -753,7 +769,7 @@ mod tests {
         let weights = make_test_weights();
         let tokenizer = make_test_tokenizer(weights.vocab_size);
         let ffn = WeightFfn { weights: &weights };
-        let mut eng = fresh_stub();
+        let mut eng = crate::AnyEngine::Kv(Box::new(fresh_stub()));
         let mut callbacks = 0usize;
         let out = generate_with_engine(
             &mut eng,
@@ -773,8 +789,9 @@ mod tests {
         let weights = make_test_weights();
         let tokenizer = make_test_tokenizer(weights.vocab_size);
         let ffn = WeightFfn { weights: &weights };
-        let mut eng = fresh_stub();
-        eng.fail_prefill = true;
+        let mut stub = fresh_stub();
+        stub.fail_prefill = true;
+        let mut eng = crate::AnyEngine::Kv(Box::new(stub));
         let out = generate_with_engine(&mut eng, &weights, &tokenizer, &ffn, &[0u32], 3, |_, _| {});
         assert!(out.is_empty());
     }
@@ -784,8 +801,9 @@ mod tests {
         let weights = make_test_weights();
         let tokenizer = make_test_tokenizer(weights.vocab_size);
         let ffn = WeightFfn { weights: &weights };
-        let mut eng = fresh_stub();
-        eng.fail_decode_after = Some(1);
+        let mut stub = fresh_stub();
+        stub.fail_decode_after = Some(1);
+        let mut eng = crate::AnyEngine::Kv(Box::new(stub));
         let out = generate_with_engine(
             &mut eng,
             &weights,

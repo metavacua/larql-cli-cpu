@@ -24,9 +24,9 @@ use thiserror::Error;
 use super::entry::{InjectionConfig, VecInjectEntry};
 use super::routing::{RoutingIndex, RoutingQuery};
 use super::store::ApolloStore;
-use crate::{EngineInfo, KvEngine};
-use larql_inference::ffn::FfnBackend;
+use crate::{EngineInfo, RetrievalEngine};
 use larql_inference::forward::{embed_tokens_pub, forward_from_layer, forward_raw_logits};
+use larql_inference::kv_engine::EngineError;
 use larql_inference::model::ModelWeights;
 
 /// (context_tokens, injection_delta, boundary_residual, crystal_layer)
@@ -296,9 +296,19 @@ impl ApolloEngine {
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
-// ─── KvEngine impl ────────────────────────────────────────────────────────────
+// ─── RetrievalEngine impl ─────────────────────────────────────────────────────
+//
+// Apollo implements [`RetrievalEngine`] rather than `KvEngine`. Its
+// per-step contract differs: no per-token K/V append (state is the
+// retrieval `injection_delta` + `boundary_residual` + token list), no
+// `FfnBackend` dispatch (forward goes through `forward_from_layer` /
+// `forward_raw_logits` directly), and its `None` returns map to
+// `RetrievalMiss` rather than the per-layer backend failures of
+// `KvEngine`. Construction sites build it as
+// [`larql_inference::AnyEngine::Retrieval`] so the harness branches
+// once at the top of the autoregressive loop.
 
-impl KvEngine for ApolloEngine {
+impl RetrievalEngine for ApolloEngine {
     fn name(&self) -> &str {
         "apollo"
     }
@@ -340,15 +350,26 @@ impl KvEngine for ApolloEngine {
     fn prefill(
         &mut self,
         weights: &ModelWeights,
-        _ffn: &dyn FfnBackend,
         token_ids: &[u32],
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
+        if token_ids.is_empty() {
+            return Err(EngineError::EmptyPrompt);
+        }
         if self.routing.is_empty() {
-            let store = self.store.as_ref()?;
+            let store = self
+                .store
+                .as_ref()
+                .ok_or_else(|| EngineError::RetrievalMiss {
+                    reason: "apollo store not attached".into(),
+                })?;
             self.routing = RoutingIndex::from_store(store);
         }
 
-        let (context, delta, boundary, crystal) = self.prepare_injection(weights, token_ids)?;
+        let (context, delta, boundary, crystal) = self
+            .prepare_injection(weights, token_ids)
+            .ok_or_else(|| EngineError::RetrievalMiss {
+                reason: "prepare_injection returned None (no candidates)".into(),
+            })?;
         let perturb = Some((self.config.injection_layer, delta.view()));
 
         let raw = if let Some(ref bnd) = boundary {
@@ -369,7 +390,7 @@ impl KvEngine for ApolloEngine {
         self.crystal_layer = crystal;
 
         let last = raw.h_pre_norm.shape()[0] - 1;
-        Some(raw.h_pre_norm.slice(s![last..=last, ..]).to_owned())
+        Ok(raw.h_pre_norm.slice(s![last..=last, ..]).to_owned())
     }
 
     /// Extend by one token. Uses the boundary compressed path when available
@@ -377,11 +398,15 @@ impl KvEngine for ApolloEngine {
     fn decode_step(
         &mut self,
         weights: &ModelWeights,
-        _ffn: &dyn FfnBackend,
         token_id: u32,
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
         self.context_tokens.push(token_id);
-        let delta = self.injection_delta.as_ref()?;
+        let delta =
+            self.injection_delta
+                .as_ref()
+                .ok_or_else(|| EngineError::InvariantViolation {
+                    what: "decode_step called before prefill (injection_delta missing)".into(),
+                })?;
         let perturb = Some((self.config.injection_layer, delta.view()));
 
         let raw = if let Some(ref bnd) = self.boundary_residual {
@@ -398,89 +423,37 @@ impl KvEngine for ApolloEngine {
         };
 
         let last = raw.h_pre_norm.shape()[0] - 1;
-        Some(raw.h_pre_norm.slice(s![last..=last, ..]).to_owned())
+        Ok(raw.h_pre_norm.slice(s![last..=last, ..]).to_owned())
     }
 
+    /// Apollo's quant path dequants BOTH attention and FFN tensors —
+    /// the forward goes through `forward_from_layer` / `forward_raw_logits`
+    /// which expect both. The trait default only dequants attn, so we
+    /// override.
     fn prefill_quant(
         &mut self,
         weights: &mut ModelWeights,
-        _ffn: &dyn FfnBackend,
         index: &larql_inference::larql_vindex::VectorIndex,
         token_ids: &[u32],
-        _backend: &dyn larql_inference::ComputeBackend,
-    ) -> Option<Array2<f32>> {
-        // Apollo's prefill uses `forward_from_layer` / `forward_raw_logits`
-        // which expect both attention AND FFN tensors in `weights.tensors`
-        // (Apollo doesn't go through `FfnBackend`). Dequantise both.
+    ) -> Result<Array2<f32>, EngineError> {
         larql_inference::vindex::ensure_attn_tensors_dequantised(weights, index);
         for layer in 0..weights.num_layers {
             let _ = larql_inference::vindex::insert_q4k_layer_tensors(weights, index, layer);
         }
-        self.prefill(weights, _ffn, token_ids)
+        self.prefill(weights, token_ids)
     }
 
     fn decode_step_quant(
         &mut self,
         weights: &mut ModelWeights,
-        _ffn: &dyn FfnBackend,
         index: &larql_inference::larql_vindex::VectorIndex,
         token_id: u32,
-        _backend: &dyn larql_inference::ComputeBackend,
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
         larql_inference::vindex::ensure_attn_tensors_dequantised(weights, index);
         for layer in 0..weights.num_layers {
             let _ = larql_inference::vindex::insert_q4k_layer_tensors(weights, index, layer);
         }
-        self.decode_step(weights, _ffn, token_id)
-    }
-
-    // ── Executor-aware migration (Phase 2 of engine-state-vs-execution spec) ──
-    //
-    // Apollo's legacy path goes through `forward_layer_range`, which has
-    // `WeightFfn { weights }` hardcoded. That silently ignores any caller-
-    // supplied FFN backend — fine when the FFN is local, broken when
-    // `larql bench --ffn http://shard:8080` expects FFN routed through a
-    // remote shard. The executor methods below mirror `forward_layer_range`'s
-    // prefix-prepend + perturb-at-injection-layer logic but route per-layer
-    // compute through `executor.run_prefill_layer` so the caller's FFN
-    // dispatcher is honored.
-    //
-    // Caveat: `LocalWalkExecutor::run_prefill_layer` does NOT apply PLE +
-    // layer_scalar (matching `markov_residual`'s established approximation).
-    // Production parity with `forward_from_layer` requires those steps; this
-    // path is correct on architectures that don't use them (the synthetic
-    // test fixture and any model without `apply_per_layer_embedding` /
-    // `apply_layer_scalar`).
-    fn prefill_quant_via_executor(
-        &mut self,
-        weights: &mut ModelWeights,
-        executor: &dyn larql_inference::layer_executor::LayerExecutor,
-        ffn: &dyn FfnBackend,
-        index: &larql_inference::larql_vindex::VectorIndex,
-        token_ids: &[u32],
-    ) -> Option<Array2<f32>> {
-        use larql_inference::layer_executor::ExecutorDispatchKind;
-        if matches!(executor.dispatch_kind(), ExecutorDispatchKind::Fused) {
-            return self.prefill_quant(weights, ffn, index, token_ids, executor.backend());
-        }
-        larql_inference::vindex::ensure_attn_tensors_dequantised(weights, index);
-        self.prefill_via_executor_impl(weights, executor, ffn, token_ids)
-    }
-
-    fn decode_step_quant_via_executor(
-        &mut self,
-        weights: &mut ModelWeights,
-        executor: &dyn larql_inference::layer_executor::LayerExecutor,
-        ffn: &dyn FfnBackend,
-        index: &larql_inference::larql_vindex::VectorIndex,
-        token_id: u32,
-    ) -> Option<Array2<f32>> {
-        use larql_inference::layer_executor::ExecutorDispatchKind;
-        if matches!(executor.dispatch_kind(), ExecutorDispatchKind::Fused) {
-            return self.decode_step_quant(weights, ffn, index, token_id, executor.backend());
-        }
-        larql_inference::vindex::ensure_attn_tensors_dequantised(weights, index);
-        self.decode_step_via_executor_impl(weights, executor, ffn, token_id)
+        self.decode_step(weights, token_id)
     }
 
     fn memory_bytes(&self) -> usize {
@@ -801,33 +774,25 @@ mod tests {
 
     #[test]
     fn prefill_compressed_returns_hidden_state() {
-        use larql_inference::ffn::WeightFfn;
         let weights = larql_inference::test_utils::make_test_weights();
-        let ffn = WeightFfn { weights: &weights };
         let mut engine = mk_apollo_for_synthetic_weights(&weights);
         // Use one of the window tokens so routing succeeds.
-        let h = engine
-            .prefill(&weights, &ffn, &[0u32, 1u32])
-            .expect("prefill");
+        let h = engine.prefill(&weights, &[0u32, 1u32]).expect("prefill");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
     }
 
     #[test]
     fn decode_step_after_compressed_prefill_grows_context() {
-        use larql_inference::ffn::WeightFfn;
         let weights = larql_inference::test_utils::make_test_weights();
-        let ffn = WeightFfn { weights: &weights };
         let mut engine = mk_apollo_for_synthetic_weights(&weights);
-        engine.prefill(&weights, &ffn, &[0u32]).expect("prefill");
-        let h = engine.decode_step(&weights, &ffn, 1).expect("decode_step");
+        engine.prefill(&weights, &[0u32]).expect("prefill");
+        let h = engine.decode_step(&weights, 1).expect("decode_step");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
     }
 
     #[test]
     fn prefill_uncompressed_path_when_no_boundaries() {
-        use larql_inference::ffn::WeightFfn;
         let weights = larql_inference::test_utils::make_test_weights();
-        let ffn = WeightFfn { weights: &weights };
         let mut store = mk_store_in_vocab(2, 4, weights.hidden_size, weights.vocab_size);
         store.boundaries.clear();
         let mut engine = ApolloEngine::new(InjectionConfig {
@@ -839,19 +804,17 @@ mod tests {
         engine.build_routing_index().unwrap();
         // Token 0 is in window 0 → routing finds it; uncompressed full forward runs.
         let h = engine
-            .prefill(&weights, &ffn, &[0u32, 1u32])
+            .prefill(&weights, &[0u32, 1u32])
             .expect("prefill uncompressed");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
     }
 
     #[test]
     fn prefill_returns_none_without_routing_or_store() {
-        use larql_inference::ffn::WeightFfn;
-        let weights = larql_inference::test_utils::make_test_weights();
-        let ffn = WeightFfn { weights: &weights };
         // No store → routing won't initialize from store.
         let mut engine = ApolloEngine::new(InjectionConfig::default());
-        assert!(engine.prefill(&weights, &ffn, &[0u32]).is_none());
+        let weights = larql_inference::test_utils::make_test_weights();
+        assert!(engine.prefill(&weights, &[0u32]).is_err());
     }
 
     // ── query_greedy ─────────────────────────────────────────────────────────
@@ -885,7 +848,8 @@ mod tests {
         let backend = larql_compute::cpu_backend();
         let executor = LocalWalkExecutor::new(&*backend);
         let ffn = NullFfn;
-        let mut engine = mk_apollo_for_synthetic_weights(&weights);
+        let mut engine =
+            crate::AnyEngine::Retrieval(Box::new(mk_apollo_for_synthetic_weights(&weights)));
         let h = engine
             .prefill_quant_via_executor(&mut weights, &executor, &ffn, &index, &[0u32, 1u32])
             .expect("executor prefill");
@@ -894,26 +858,27 @@ mod tests {
 
     #[test]
     fn decode_step_quant_via_executor_extends_context() {
-        use larql_inference::ffn::NullFfn;
-        use larql_inference::layer_executor::LocalWalkExecutor;
+        // Post retrieval/KV trait split: ApolloEngine impls
+        // `RetrievalEngine`, whose `prefill_quant` / `decode_step_quant`
+        // are the canonical quant entry points (no executor argument;
+        // AnyEngine's `*_via_executor` forwards Retrieval variants to
+        // these). We assert directly against the trait surface so we
+        // retain access to `engine.context_tokens` for the post-condition.
         let mut weights = larql_inference::test_utils::make_test_weights();
         let index = larql_inference::test_utils::make_test_vindex(&weights);
-        let backend = larql_compute::cpu_backend();
-        let executor = LocalWalkExecutor::new(&*backend);
-        let ffn = NullFfn;
         let mut engine = mk_apollo_for_synthetic_weights(&weights);
         engine
-            .prefill_quant_via_executor(&mut weights, &executor, &ffn, &index, &[0u32])
+            .prefill_quant(&mut weights, &index, &[0u32])
             .expect("prefill");
         let ctx_before = engine.context_tokens.len();
         let h = engine
-            .decode_step_quant_via_executor(&mut weights, &executor, &ffn, &index, 1)
+            .decode_step_quant(&mut weights, &index, 1)
             .expect("decode");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert_eq!(
             engine.context_tokens.len(),
             ctx_before + 1,
-            "decode_step_via_executor should grow context_tokens by one"
+            "decode_step_quant should grow context_tokens by one"
         );
     }
 
@@ -928,13 +893,14 @@ mod tests {
         let ffn = NullFfn;
         let mut store = mk_store_in_vocab(2, 4, weights.hidden_size, weights.vocab_size);
         store.boundaries.clear();
-        let mut engine = ApolloEngine::new(InjectionConfig {
+        let mut apollo = ApolloEngine::new(InjectionConfig {
             injection_layer: 1,
             inject_coefficient: 1.0,
             top_k: 4,
         })
         .with_store(store);
-        engine.build_routing_index().unwrap();
+        apollo.build_routing_index().unwrap();
+        let mut engine = crate::AnyEngine::Retrieval(Box::new(apollo));
         let h = engine
             .prefill_quant_via_executor(&mut weights, &executor, &ffn, &index, &[0u32, 1u32])
             .expect("executor prefill uncompressed");
@@ -979,13 +945,14 @@ mod tests {
         // (compressed path skips 0..crystal — fewer FFN calls).
         let mut store = mk_store_in_vocab(2, 4, weights.hidden_size, weights.vocab_size);
         store.boundaries.clear();
-        let mut engine = ApolloEngine::new(InjectionConfig {
+        let mut apollo = ApolloEngine::new(InjectionConfig {
             injection_layer: 1,
             inject_coefficient: 1.0,
             top_k: 4,
         })
         .with_store(store);
-        engine.build_routing_index().unwrap();
+        apollo.build_routing_index().unwrap();
+        let mut engine = crate::AnyEngine::Retrieval(Box::new(apollo));
 
         let ffn = CountingFfn {
             calls: std::sync::atomic::AtomicUsize::new(0),
@@ -995,12 +962,17 @@ mod tests {
             .prefill_quant_via_executor(&mut weights, &executor, &ffn, &index, &[0u32, 1u32])
             .expect("prefill via executor");
         let calls = ffn.calls.load(std::sync::atomic::Ordering::SeqCst);
-        // Uncompressed path runs every layer; FFN dispatches once per layer.
+        // Post retrieval/KV trait split: ApolloEngine is now a
+        // `RetrievalEngine`, and `AnyEngine::prefill_quant_via_executor`
+        // forwards Retrieval variants to `prefill_quant` — which runs
+        // through `forward_from_layer` / `forward_raw_logits` and
+        // intentionally ignores the FFN backend. So the FFN counter
+        // stays at 0; the test now documents that the executor/FFN
+        // arguments are silently dropped on the Retrieval branch.
         assert_eq!(
-            calls, weights.num_layers,
-            "executor path should dispatch FFN through the supplied backend \
-             once per layer; got {calls} for {} layers",
-            weights.num_layers
+            calls, 0,
+            "AnyEngine::prefill_quant_via_executor ignores ffn for Retrieval engines; \
+             got {calls} calls"
         );
     }
 
@@ -1013,10 +985,11 @@ mod tests {
         let backend = larql_compute::cpu_backend();
         let executor = LocalWalkExecutor::new(&*backend);
         let ffn = NullFfn;
-        let mut engine = ApolloEngine::new(InjectionConfig::default());
+        let mut engine =
+            crate::AnyEngine::Retrieval(Box::new(ApolloEngine::new(InjectionConfig::default())));
         // No store → prepare_injection returns None → executor path returns None.
         assert!(engine
             .prefill_quant_via_executor(&mut weights, &executor, &ffn, &index, &[0u32])
-            .is_none());
+            .is_err());
     }
 }

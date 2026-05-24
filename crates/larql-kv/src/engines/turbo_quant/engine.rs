@@ -40,6 +40,7 @@ use larql_inference::attention::{
 };
 use larql_inference::ffn::{BackendFfn, FfnBackend};
 use larql_inference::forward::{embed_tokens_pub, run_ffn};
+use larql_inference::kv_engine::EngineError;
 use larql_inference::model::ModelWeights;
 use larql_inference::vindex::{WalkFfn, WalkFfnConfig};
 
@@ -331,14 +332,20 @@ impl KvEngine for TurboQuantEngine {
         weights: &ModelWeights,
         _ffn: &dyn FfnBackend,
         token_ids: &[u32],
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
+        if token_ids.is_empty() {
+            return Err(EngineError::EmptyPrompt);
+        }
         let num_layers = weights.num_layers;
         let be = Some(self.backend.as_compute());
         let mut h = embed_tokens_pub(weights, token_ids);
         self.layers.clear();
 
         for layer in 0..num_layers {
-            let (h_post_attn, k, v) = run_attention_with_kv_backend(weights, &h, layer, be)?;
+            let (h_post_attn, k, v) = run_attention_with_kv_backend(weights, &h, layer, be)
+                .ok_or_else(|| EngineError::BackendFailure {
+                    details: "run_attention_with_kv_backend returned None".into(),
+                })?;
             self.layers
                 .push(CompressedLayer::compress(&(k, v), &self.tq));
 
@@ -351,7 +358,7 @@ impl KvEngine for TurboQuantEngine {
         }
 
         self.abs_position = token_ids.len();
-        Some(last_row(&h))
+        Ok(last_row(&h))
     }
 
     fn decode_step(
@@ -359,7 +366,7 @@ impl KvEngine for TurboQuantEngine {
         weights: &ModelWeights,
         _ffn: &dyn FfnBackend,
         token_id: u32,
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
         let num_layers = weights.num_layers;
         let abs_position = self.abs_position;
         let mut h = embed_tokens_pub(weights, &[token_id]);
@@ -376,7 +383,10 @@ impl KvEngine for TurboQuantEngine {
                 Some(&prior_kv),
                 abs_position,
                 Some(self.backend.as_ref()),
-            )?;
+            )
+            .ok_or_else(|| EngineError::BackendFailure {
+                details: "run_attention_block_decode_step_backend returned None".into(),
+            })?;
 
             // Append-only codec path: encode just the new row head-by-
             // head and push onto the existing compressed buffer.
@@ -418,7 +428,7 @@ impl KvEngine for TurboQuantEngine {
         }
 
         self.abs_position += 1;
-        Some(last_row(&h))
+        Ok(last_row(&h))
     }
 
     fn memory_bytes(&self) -> usize {
@@ -446,16 +456,21 @@ impl KvEngine for TurboQuantEngine {
         index: &VectorIndex,
         token_ids: &[u32],
         backend: &dyn ComputeBackend,
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
+        if token_ids.is_empty() {
+            return Err(EngineError::EmptyPrompt);
+        }
         if let Some(hidden) = self.try_prefill_via_dispatch(weights, index, token_ids) {
-            return Some(hidden);
+            return Ok(hidden);
         }
         self.kv_handle = None;
-        let out = self.prefill_quant_cpu(weights, index, token_ids, backend);
-        if out.is_some() {
-            self.abs_position = token_ids.len();
-        }
-        out
+        let out = self
+            .prefill_quant_cpu(weights, index, token_ids, backend)
+            .ok_or_else(|| EngineError::BackendFailure {
+                details: "prefill_quant_cpu returned None".into(),
+            })?;
+        self.abs_position = token_ids.len();
+        Ok(out)
     }
 
     fn decode_step_quant(
@@ -465,11 +480,18 @@ impl KvEngine for TurboQuantEngine {
         index: &VectorIndex,
         token_id: u32,
         backend: &dyn ComputeBackend,
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
         if self.kv_handle.is_some() {
-            return self.decode_step_via_dispatch(weights, index, token_id);
+            return self
+                .decode_step_via_dispatch(weights, index, token_id)
+                .ok_or_else(|| EngineError::BackendFailure {
+                    details: "decode_step_via_dispatch returned None".into(),
+                });
         }
         self.decode_step_quant_cpu(weights, index, token_id, backend)
+            .ok_or_else(|| EngineError::BackendFailure {
+                details: "decode_step_quant_cpu returned None".into(),
+            })
     }
 
     // ── Executor-aware migration (Phase 2 of engine-state-vs-execution spec) ──
@@ -489,8 +511,11 @@ impl KvEngine for TurboQuantEngine {
         ffn: &dyn FfnBackend,
         index: &VectorIndex,
         token_ids: &[u32],
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
         use larql_inference::layer_executor::ExecutorDispatchKind;
+        if token_ids.is_empty() {
+            return Err(EngineError::EmptyPrompt);
+        }
         if matches!(executor.dispatch_kind(), ExecutorDispatchKind::Fused) {
             return self.prefill_quant(weights, ffn, index, token_ids, executor.backend());
         }
@@ -500,13 +525,17 @@ impl KvEngine for TurboQuantEngine {
         self.layers.clear();
 
         for layer in 0..num_layers {
-            let (h_out, kv) = executor.run_prefill_layer(weights, layer, &h, ffn)?;
+            let (h_out, kv) = executor
+                .run_prefill_layer(weights, layer, &h, ffn)
+                .ok_or_else(|| EngineError::BackendFailure {
+                    details: "executor.run_prefill_layer returned None".into(),
+                })?;
             self.layers.push(CompressedLayer::compress(&kv, &self.tq));
             h = h_out;
         }
 
         self.abs_position = token_ids.len();
-        Some(last_row(&h))
+        Ok(last_row(&h))
     }
 
     fn decode_step_quant_via_executor(
@@ -516,7 +545,7 @@ impl KvEngine for TurboQuantEngine {
         ffn: &dyn FfnBackend,
         index: &VectorIndex,
         token_id: u32,
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
         use larql_inference::layer_executor::ExecutorDispatchKind;
         if matches!(executor.dispatch_kind(), ExecutorDispatchKind::Fused) {
             return self.decode_step_quant(weights, ffn, index, token_id, executor.backend());
@@ -528,8 +557,11 @@ impl KvEngine for TurboQuantEngine {
 
         for layer in 0..num_layers {
             let prior_kv = self.layers[layer].decompress(&self.tq);
-            let (h_out, updated_kv) =
-                executor.run_decode_layer(weights, layer, &h, &prior_kv, abs_position, ffn)?;
+            let (h_out, updated_kv) = executor
+                .run_decode_layer(weights, layer, &h, &prior_kv, abs_position, ffn)
+                .ok_or_else(|| EngineError::BackendFailure {
+                    details: "executor.run_decode_layer returned None".into(),
+                })?;
             let arch = &*weights.arch;
             let kv_dim = arch.num_kv_heads_for_layer(layer) * arch.head_dim_for_layer(layer);
             let head_dim = detect_head_dim(kv_dim);
@@ -544,7 +576,7 @@ impl KvEngine for TurboQuantEngine {
         }
 
         self.abs_position += 1;
-        Some(last_row(&h))
+        Ok(last_row(&h))
     }
 }
 

@@ -4,6 +4,19 @@
 wiring). W1-GPU integration is deferred (Apollo's forward pass
 already skips most layers, so the dispatch route gives a smaller
 relative win than for the cached-K/V engines).
+
+> **2026-05-24 — Apollo implements [`RetrievalEngine`], not
+> [`KvEngine`].** The per-step contract diverges from the K/V cache
+> engines (no per-token K/V append, no `FfnBackend` dispatch — state
+> is `injection_delta` + `boundary_residual` + token list). The
+> sibling trait extraction in `larql-inference::kv_engine` moves
+> Apollo off the K/V trait surface; the harness wraps it in
+> [`AnyEngine::Retrieval`] alongside the K/V engines. Store misses
+> surface as `EngineError::RetrievalMiss { reason }` (recoverable;
+> the accuracy harness reports `served_rate < 1.0`). See
+> [`kv-engine-unification.md`](./kv-engine-unification.md) and the
+> 2026-05-24 entry in [`larql-kv/ROADMAP.md`](../../../larql-kv/ROADMAP.md).
+
 **Audience:** LARQL contributors.
 
 ---

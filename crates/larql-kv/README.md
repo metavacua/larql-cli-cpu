@@ -23,7 +23,7 @@ GPU→CPU state bridge entirely (W10 mask cascade, default-on).
 | `unlimited-context` | KV (within window) + checkpoints | **derivative** | exact within window | 94.2 |
 | `turbo-quant` | quantised K/V | canonical (destructive) | bounded KL | 85.0 |
 | `boundary-kv` | K/V + boundary frames | canonical | exact logits | composes `standard` |
-| `apollo` | boundary retrieval store | n/a (retrieval) | task-level | orthogonal |
+| `apollo` *(RetrievalEngine)* | boundary retrieval store | n/a (retrieval) | task-level | orthogonal |
 
 Gemma 3 4B Q4K, Metal, M3 Max, 50 decode tokens, W10 default-on
 (2026-05-21). The 13% gap between the four derivative-K/V engines
@@ -34,13 +34,32 @@ for the prediction; task #31 is the falsification path.
 
 ### Trait location
 
-The `KvEngine` trait + `EngineInfo` + `DecodeStageSummary` live in
-`larql-inference::kv_engine`; this crate re-exports them so
-`larql_kv::KvEngine` continues to work as the public surface. The
-trait lives upstream so `larql-inference`'s decode dispatch
-(`generate_with_engine`) can reference it without a circular dep.
-See [`crates/larql-inference/docs/specs/kv-engine-unification.md`](../larql-inference/docs/specs/kv-engine-unification.md)
+The `KvEngine` + `RetrievalEngine` traits, the `EngineError` /
+`EngineInfo` / `DecodeStageSummary` types, and the
+`AnyEngine::{Kv, Retrieval}` dispatch enum all live in
+`larql-inference::kv_engine`; this crate re-exports them
+(`larql_kv::KvEngine` / `RetrievalEngine` / `AnyEngine` /
+`EngineError`) so callers don't need to depend on `larql-inference`
+directly. The traits live upstream so `larql-inference`'s decode
+dispatch (`generate_with_engine`) can reference them without a
+circular dep. See
+[`crates/larql-inference/docs/specs/kv-engine-unification.md`](../larql-inference/docs/specs/kv-engine-unification.md)
 for the dep-graph rationale.
+
+**Two trait surfaces:**
+
+| Trait | For | Per-step contract |
+|---|---|---|
+| `KvEngine` | per-token K/V cache engines (`standard`, `no-cache`, `markov-rs`, `markov-rs-codec`, `unlimited-context`, `turbo-quant`, `boundary-kv`, `boundary-per-layer`) | append K/V per layer; dispatches FFN through `&dyn FfnBackend`; state reconstructible to K/V tensors |
+| `RetrievalEngine` | retrieval-injection engines (`apollo`, future Mode 5) | no per-token K/V append; no `FfnBackend` dispatch; state is residual delta + token list |
+
+Both return `Result<Array2<f32>, EngineError>` from `prefill` /
+`decode_step` (and the `*_quant` variants). `EngineError` carries
+five variants — `EmptyPrompt`, `BackendUnavailable`,
+`RetrievalMiss { reason }`, `InvariantViolation { what }`,
+`BackendFailure { details }` — and the typed error replaces the
+historical `Option<T>` that collapsed all five into a silent
+`None`. See the 2026-05-24 entry in [`ROADMAP.md`](ROADMAP.md).
 
 ## Full engine catalog
 
@@ -111,25 +130,33 @@ markov-bounded` flag maps to `Standard { window_size: Some(N) }`, **not**
 ## Usage
 
 ```rust
-use larql_kv::{EngineKind, KvEngine};
-use larql_compute::default_backend;
-use larql_inference::ffn::WeightFfn;
+use larql_kv::{AnyEngine, EngineKind};
+use larql_inference::{cpu_engine_backend, ffn::WeightFfn};
 
 // Parse a CLI engine spec.
 let kind = EngineKind::from_name("standard:window=512").unwrap();
 
-// Build an engine bound to a compute backend.
-let mut engine: Box<dyn KvEngine> = kind.build(default_backend());
+// Build an engine bound to a compute backend. Returns AnyEngine —
+// the dispatch enum that wraps either a KvEngine (per-token K/V
+// cache) or a RetrievalEngine (Apollo). Callers reach the prefill /
+// decode_step methods through AnyEngine's forwarding methods, which
+// pattern-match the variant internally.
+let mut engine: AnyEngine = kind.build(cpu_engine_backend());
 
 // FFN router — `WeightFfn` reads weights locally; pass any FfnBackend
-// impl (e.g. `RemoteWalkBackend` for remote-FFN dispatch).
+// impl (e.g. `RemoteWalkBackend` for remote-FFN dispatch). Retrieval
+// engines ignore this parameter; per-token K/V engines use it.
 let ffn = WeightFfn { weights: &weights };
 
-// Prefill, then decode autoregressively. Prefer the
-// `larql_inference::forward::generate_with_engine` helper, which drives
-// the same prefill + sample + decode loop legacy callers use.
-let generated = larql_inference::forward::generate_with_engine(
-    engine.as_mut(),
+// Prefill, then decode autoregressively. Both methods return
+// `Result<Array2<f32>, EngineError>`; the bench / accuracy harnesses
+// route on the typed error kind (see EngineError::is_recoverable).
+let hidden = engine.prefill(&weights, &ffn, &prompt_tokens)?;
+let next = engine.decode_step(&weights, &ffn, last_token)?;
+
+// Or use the helper that drives the full prefill + sample + decode loop.
+let generated = larql_kv::generation::generate_with_engine(
+    &mut engine,
     &weights,
     &tokenizer,
     &ffn,
@@ -139,10 +166,12 @@ let generated = larql_inference::forward::generate_with_engine(
 );
 ```
 
-The engines also expose Q4K-quantised entry points
-(`prefill_q4k` / `decode_step_q4k`) that route through the Metal
-`decode_token` pipeline when a Q4K `VectorIndex` and a Metal backend are
-available, falling back to the f32 path otherwise.
+The engines also expose quantised entry points
+(`prefill_quant` / `decode_step_quant`) that route through the
+`VectorIndex` for backend-fastest decode (Metal Q4K kernel when
+available, CPU f32 fallback otherwise). The methods are
+quant-agnostic — they dispatch on whatever format the vindex
+carries (`Q4_K`, `Q6_K`, future formats).
 
 ## CLI selectors
 

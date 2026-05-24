@@ -19,6 +19,80 @@
 use crate::ffn::FfnBackend;
 use crate::ModelWeights;
 use ndarray::Array2;
+use thiserror::Error;
+
+// ─── EngineError ──────────────────────────────────────────────────────────────
+
+/// Typed failure mode for engine `prefill` / `decode_step` calls.
+///
+/// Replaces the historical `Option<T>` return semantics that collapsed
+/// "empty prompt", "backend doesn't support this", "retrieval miss",
+/// "engine invariant violated" and "backend operation failed" into a
+/// single opaque `None`. Two consumers (the accuracy harness and the
+/// bench harness) used to route that `None` incompatibly — the
+/// accuracy runner silently dropped the row via `filter_map` while the
+/// bench aborted with `"engine prefill failed"`. This taxonomy lets
+/// both routes branch on error *kind*; see `docs/state-policy.md`.
+///
+/// The variants split error reasons along their alerting axis:
+///
+/// - [`EmptyPrompt`](Self::EmptyPrompt) — caller-side input bug;
+///   surfaces in CLI validation rather than a runtime alert.
+/// - [`BackendUnavailable`](Self::BackendUnavailable) — the engine's
+///   backend does not implement the requested capability (e.g. a
+///   Metal kernel that hasn't been ported, an asked-for Q4K matvec on
+///   a CPU build without BLAS). Falls back to a different code path
+///   *if* one exists; otherwise surfaces as a configuration error.
+/// - [`RetrievalMiss { reason }`](Self::RetrievalMiss) — a retrieval
+///   engine (Apollo, future Mode 5) could not serve this query against
+///   its store. Expected, recoverable; surfaces in the harness as a
+///   `served_rate < 1.0` column rather than an alert.
+/// - [`InvariantViolation { what }`](Self::InvariantViolation) — the
+///   engine was driven outside its state-machine contract (e.g.
+///   `decode_step` called before `prefill`). Indicates a harness-level
+///   dispatch bug; production observability should alert immediately.
+/// - [`BackendFailure { details }`](Self::BackendFailure) — the inner
+///   backend or compute kernel returned a runtime failure. Indicates a
+///   data condition or environmental issue (corrupt weights, OOM, GPU
+///   driver error); production observability should log + investigate
+///   but not alert with the same urgency as `InvariantViolation`.
+///
+/// `InvariantViolation` and `BackendFailure` are deliberately kept as
+/// two top-level variants rather than collapsed into a single
+/// `InternalError { kind }`. Sub-tagged enums lose the alert-routing
+/// distinction when the consumer writes `match err { InternalError(_) => ... }`.
+///
+/// The enum is **exhaustive** (no `#[non_exhaustive]`). New variants
+/// are breaking changes on purpose — defaulting a new condition into
+/// an existing arm reproduces the silent-drop problem one layer down.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum EngineError {
+    #[error("engine called with empty prompt")]
+    EmptyPrompt,
+    #[error("backend does not support this operation")]
+    BackendUnavailable,
+    #[error("retrieval miss: {reason}")]
+    RetrievalMiss { reason: String },
+    #[error("engine invariant violated: {what}")]
+    InvariantViolation { what: String },
+    #[error("backend operation failed: {details}")]
+    BackendFailure { details: String },
+}
+
+impl EngineError {
+    /// `true` for variants the harness should treat as recoverable
+    /// (skip + log + continue), `false` for variants that indicate a
+    /// dispatch bug or kernel failure (abort + investigate).
+    ///
+    /// `EmptyPrompt` / `BackendUnavailable` / `RetrievalMiss` are
+    /// recoverable; `InvariantViolation` / `BackendFailure` are not.
+    pub fn is_recoverable(&self) -> bool {
+        matches!(
+            self,
+            Self::EmptyPrompt | Self::BackendUnavailable | Self::RetrievalMiss { .. }
+        )
+    }
+}
 
 // ─── EngineInfo ───────────────────────────────────────────────────────────────
 
@@ -183,12 +257,15 @@ pub trait KvEngine: Send {
     /// parameter.
     ///
     /// Returns the hidden state at the final token position (shape `[1, hidden_dim]`).
+    ///
+    /// Failure modes surface as typed [`EngineError`] variants — see
+    /// the enum's docs for the routing taxonomy.
     fn prefill(
         &mut self,
         weights: &ModelWeights,
         ffn: &dyn FfnBackend,
         token_ids: &[u32],
-    ) -> Option<Array2<f32>>;
+    ) -> Result<Array2<f32>, EngineError>;
 
     /// Run one autoregressive decode step for a single new token.
     /// Returns the hidden state (shape `[1, hidden_dim]`).
@@ -197,7 +274,7 @@ pub trait KvEngine: Send {
         weights: &ModelWeights,
         ffn: &dyn FfnBackend,
         token_id: u32,
-    ) -> Option<Array2<f32>>;
+    ) -> Result<Array2<f32>, EngineError>;
 
     /// Bytes of persistent engine state (excludes model weights).
     fn memory_bytes(&self) -> usize;
@@ -233,7 +310,7 @@ pub trait KvEngine: Send {
         index: &larql_vindex::VectorIndex,
         token_ids: &[u32],
         backend: &dyn larql_compute::ComputeBackend,
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
         let _ = (index, backend);
         self.prefill(weights, ffn, token_ids) // default: f32 fallback
     }
@@ -249,7 +326,7 @@ pub trait KvEngine: Send {
         index: &larql_vindex::VectorIndex,
         token_id: u32,
         backend: &dyn larql_compute::ComputeBackend,
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
         let _ = (index, backend);
         self.decode_step(weights, ffn, token_id) // default: f32 fallback
     }
@@ -266,7 +343,7 @@ pub trait KvEngine: Send {
         executor: &dyn crate::layer_executor::LayerExecutor,
         ffn: &dyn FfnBackend,
         token_ids: &[u32],
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
         let _ = executor;
         self.prefill(weights, ffn, token_ids)
     }
@@ -279,7 +356,7 @@ pub trait KvEngine: Send {
         executor: &dyn crate::layer_executor::LayerExecutor,
         ffn: &dyn FfnBackend,
         token_id: u32,
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
         let _ = executor;
         self.decode_step(weights, ffn, token_id)
     }
@@ -299,7 +376,7 @@ pub trait KvEngine: Send {
         ffn: &dyn FfnBackend,
         index: &larql_vindex::VectorIndex,
         token_ids: &[u32],
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
         self.prefill_quant(weights, ffn, index, token_ids, executor.backend())
     }
 
@@ -312,8 +389,287 @@ pub trait KvEngine: Send {
         ffn: &dyn FfnBackend,
         index: &larql_vindex::VectorIndex,
         token_id: u32,
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
         self.decode_step_quant(weights, ffn, index, token_id, executor.backend())
+    }
+}
+
+// ─── RetrievalEngine trait ────────────────────────────────────────────────────
+
+/// Engines whose state is **not** an autoregressive K/V cache.
+///
+/// Sibling trait to [`KvEngine`]. Both surfaces share the
+/// [`EngineInfo`] / [`EngineError`] / [`DecodeStageSummary`] vocabulary
+/// but diverge on the per-step contract:
+///
+/// | `KvEngine`                          | `RetrievalEngine`                      |
+/// |-------------------------------------|----------------------------------------|
+/// | per-token K/V append per layer      | retrieval against a pre-built store    |
+/// | dispatches FFN through `FfnBackend` | does not consult an FFN router         |
+/// | state reconstructible to K/V tensors| state is residual delta + token list   |
+///
+/// Apollo (boundary-residual + injection delta) lands here; Mode 5 /
+/// Graph-Grounded engines will too. The trait deliberately drops the
+/// per-step K/V append assumption and the `FfnBackend` parameter that
+/// `KvEngine::prefill` carries — both went unused on the retrieval
+/// side (`_ffn` in the Apollo impl) and forced harnesses to construct
+/// a router they then ignored.
+///
+/// Returns [`Result<T, EngineError>`] instead of `Option<T>` for the
+/// same reasons as `KvEngine`'s post-2026-05-24 migration: silent
+/// `None` propagation through `filter_map` masked Apollo's
+/// store-miss rate, and the bench `panic!` on the same `None` made
+/// retrieval-miss prompts crash a run that ought to have logged a
+/// skip. See [`EngineError`] for the variant taxonomy.
+pub trait RetrievalEngine: Send {
+    fn name(&self) -> &str;
+
+    /// Runtime diagnostics: engine name, backend, config, description.
+    fn info(&self) -> EngineInfo;
+
+    /// Run the prefill forward pass over the prompt tokens, consulting
+    /// the engine's retrieval store. Returns the hidden state at the
+    /// final token position (shape `[1, hidden_dim]`).
+    fn prefill(
+        &mut self,
+        weights: &ModelWeights,
+        token_ids: &[u32],
+    ) -> Result<Array2<f32>, EngineError>;
+
+    /// One autoregressive decode step for the next token, applying any
+    /// retrieval-engine-specific state update (e.g. injection-delta
+    /// accumulation). Returns the hidden state (shape `[1, hidden_dim]`).
+    fn decode_step(
+        &mut self,
+        weights: &ModelWeights,
+        token_id: u32,
+    ) -> Result<Array2<f32>, EngineError>;
+
+    /// Prefill against a Q4K-quantised vindex. Default impl dequantises
+    /// the attention tensors into `weights.tensors` and delegates to
+    /// [`prefill`](Self::prefill); engines that also need the FFN
+    /// tensors dequantised (e.g. Apollo, which runs its forward through
+    /// `forward_raw_logits` rather than an `FfnBackend` router) override
+    /// to insert those too.
+    ///
+    /// `weights` is `&mut` because the dequant step lazily populates
+    /// `weights.tensors`. Production callers reuse the populated
+    /// tensors across subsequent decode steps; the cost is one-time per
+    /// engine session.
+    fn prefill_quant(
+        &mut self,
+        weights: &mut ModelWeights,
+        index: &larql_vindex::VectorIndex,
+        token_ids: &[u32],
+    ) -> Result<Array2<f32>, EngineError> {
+        crate::vindex::ensure_attn_tensors_dequantised(weights, index);
+        self.prefill(weights, token_ids)
+    }
+
+    /// One decode step against a Q4K-quantised vindex. Default impl
+    /// dequantises the attention tensors and delegates to
+    /// [`decode_step`](Self::decode_step).
+    fn decode_step_quant(
+        &mut self,
+        weights: &mut ModelWeights,
+        index: &larql_vindex::VectorIndex,
+        token_id: u32,
+    ) -> Result<Array2<f32>, EngineError> {
+        crate::vindex::ensure_attn_tensors_dequantised(weights, index);
+        self.decode_step(weights, token_id)
+    }
+
+    /// Bytes of persistent engine state (excludes model weights).
+    fn memory_bytes(&self) -> usize;
+
+    /// Token count in the active window (varies by engine type).
+    fn window_tokens(&self) -> usize {
+        0
+    }
+
+    /// Cold-tier bytes (store / archive past the hot window).
+    fn cold_bytes(&self) -> usize {
+        0
+    }
+
+    /// Per-stage timing summary. Returns `None` if profiling was not enabled.
+    fn stage_summary(&self) -> Option<DecodeStageSummary> {
+        None
+    }
+}
+
+// ─── AnyEngine ────────────────────────────────────────────────────────────────
+
+/// Sum type that holds either a [`KvEngine`] or a [`RetrievalEngine`].
+///
+/// Construction sites (the engine builder in
+/// `larql-kv::EngineBuilder::build`, the bench / accuracy harnesses)
+/// parse a spec into one or the other; the autoregressive loop calls
+/// uniform `prefill` / `decode_step` (et al.) methods on `AnyEngine`,
+/// which pattern-match internally on the variant.
+///
+/// Each forwarding method takes the superset of arguments from both
+/// trait surfaces. For [`RetrievalEngine`] engines (Apollo, future
+/// Mode 5) the FFN-routing and compute-backend arguments are simply
+/// ignored — `RetrievalEngine` runs its forward through
+/// `forward_from_layer` / `forward_raw_logits` and doesn't need them.
+/// This is intentional: keeping the harness call site uniform across
+/// new engine families is more important than enforcing argument
+/// minimality at the type level. Variant-specific behaviour still
+/// surfaces through the [`EngineError`] enum (e.g. `RetrievalMiss`
+/// only arrives from retrieval engines).
+pub enum AnyEngine {
+    Kv(Box<dyn KvEngine>),
+    Retrieval(Box<dyn RetrievalEngine>),
+}
+
+impl AnyEngine {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Kv(e) => e.name(),
+            Self::Retrieval(e) => e.name(),
+        }
+    }
+
+    pub fn info(&self) -> EngineInfo {
+        match self {
+            Self::Kv(e) => e.info(),
+            Self::Retrieval(e) => e.info(),
+        }
+    }
+
+    pub fn memory_bytes(&self) -> usize {
+        match self {
+            Self::Kv(e) => e.memory_bytes(),
+            Self::Retrieval(e) => e.memory_bytes(),
+        }
+    }
+
+    pub fn window_tokens(&self) -> usize {
+        match self {
+            Self::Kv(e) => e.window_tokens(),
+            Self::Retrieval(e) => e.window_tokens(),
+        }
+    }
+
+    pub fn cold_bytes(&self) -> usize {
+        match self {
+            Self::Kv(e) => e.cold_bytes(),
+            Self::Retrieval(e) => e.cold_bytes(),
+        }
+    }
+
+    pub fn stage_summary(&self) -> Option<DecodeStageSummary> {
+        match self {
+            Self::Kv(e) => e.stage_summary(),
+            Self::Retrieval(e) => e.stage_summary(),
+        }
+    }
+
+    pub fn is_kv(&self) -> bool {
+        matches!(self, Self::Kv(_))
+    }
+
+    pub fn is_retrieval(&self) -> bool {
+        matches!(self, Self::Retrieval(_))
+    }
+
+    // ── Forwarding methods (variant-specific dispatch) ──────────────────────
+
+    /// Prefill. KvEngine variants consult `ffn`; retrieval variants
+    /// ignore it.
+    pub fn prefill(
+        &mut self,
+        weights: &ModelWeights,
+        ffn: &dyn FfnBackend,
+        token_ids: &[u32],
+    ) -> Result<Array2<f32>, EngineError> {
+        match self {
+            Self::Kv(e) => e.prefill(weights, ffn, token_ids),
+            Self::Retrieval(e) => e.prefill(weights, token_ids),
+        }
+    }
+
+    /// One autoregressive decode step. Same routing as [`prefill`].
+    pub fn decode_step(
+        &mut self,
+        weights: &ModelWeights,
+        ffn: &dyn FfnBackend,
+        token_id: u32,
+    ) -> Result<Array2<f32>, EngineError> {
+        match self {
+            Self::Kv(e) => e.decode_step(weights, ffn, token_id),
+            Self::Retrieval(e) => e.decode_step(weights, token_id),
+        }
+    }
+
+    /// Prefill against a quantised vindex. KvEngine variants take a
+    /// `ComputeBackend` for kernel routing; retrieval variants ignore
+    /// it (they dequantise + run on f32 internally).
+    pub fn prefill_quant(
+        &mut self,
+        weights: &mut ModelWeights,
+        ffn: &dyn FfnBackend,
+        index: &larql_vindex::VectorIndex,
+        token_ids: &[u32],
+        backend: &dyn larql_compute::ComputeBackend,
+    ) -> Result<Array2<f32>, EngineError> {
+        match self {
+            Self::Kv(e) => e.prefill_quant(weights, ffn, index, token_ids, backend),
+            Self::Retrieval(e) => e.prefill_quant(weights, index, token_ids),
+        }
+    }
+
+    /// One decode step against a quantised vindex. Same routing as
+    /// [`prefill_quant`].
+    pub fn decode_step_quant(
+        &mut self,
+        weights: &mut ModelWeights,
+        ffn: &dyn FfnBackend,
+        index: &larql_vindex::VectorIndex,
+        token_id: u32,
+        backend: &dyn larql_compute::ComputeBackend,
+    ) -> Result<Array2<f32>, EngineError> {
+        match self {
+            Self::Kv(e) => e.decode_step_quant(weights, ffn, index, token_id, backend),
+            Self::Retrieval(e) => e.decode_step_quant(weights, index, token_id),
+        }
+    }
+
+    /// Prefill via a caller-supplied [`crate::layer_executor::LayerExecutor`].
+    /// Falls back to [`prefill_quant`](Self::prefill_quant) for
+    /// [`RetrievalEngine`] variants (which don't drive per-layer
+    /// executor loops).
+    pub fn prefill_quant_via_executor(
+        &mut self,
+        weights: &mut ModelWeights,
+        executor: &dyn crate::layer_executor::LayerExecutor,
+        ffn: &dyn FfnBackend,
+        index: &larql_vindex::VectorIndex,
+        token_ids: &[u32],
+    ) -> Result<Array2<f32>, EngineError> {
+        match self {
+            Self::Kv(e) => e.prefill_quant_via_executor(weights, executor, ffn, index, token_ids),
+            Self::Retrieval(e) => e.prefill_quant(weights, index, token_ids),
+        }
+    }
+
+    /// One decode step via a caller-supplied `LayerExecutor`. Same
+    /// fall-back semantics as [`prefill_quant_via_executor`].
+    pub fn decode_step_quant_via_executor(
+        &mut self,
+        weights: &mut ModelWeights,
+        executor: &dyn crate::layer_executor::LayerExecutor,
+        ffn: &dyn FfnBackend,
+        index: &larql_vindex::VectorIndex,
+        token_id: u32,
+    ) -> Result<Array2<f32>, EngineError> {
+        match self {
+            Self::Kv(e) => {
+                e.decode_step_quant_via_executor(weights, executor, ffn, index, token_id)
+            }
+            Self::Retrieval(e) => e.decode_step_quant(weights, index, token_id),
+        }
     }
 }
 
@@ -437,18 +793,18 @@ mod tests {
             _weights: &ModelWeights,
             _ffn: &dyn FfnBackend,
             _token_ids: &[u32],
-        ) -> Option<Array2<f32>> {
+        ) -> Result<Array2<f32>, EngineError> {
             self.prefill_calls += 1;
-            Some(Array2::zeros((1, 4)))
+            Ok(Array2::zeros((1, 4)))
         }
         fn decode_step(
             &mut self,
             _weights: &ModelWeights,
             _ffn: &dyn FfnBackend,
             _token_id: u32,
-        ) -> Option<Array2<f32>> {
+        ) -> Result<Array2<f32>, EngineError> {
             self.decode_calls += 1;
-            Some(Array2::zeros((1, 4)))
+            Ok(Array2::zeros((1, 4)))
         }
         fn memory_bytes(&self) -> usize {
             0
@@ -502,23 +858,23 @@ mod tests {
 
         // prefill_via_executor → prefill
         let out = engine.prefill_via_executor(&weights, &exec, &ffn, &[0, 1]);
-        assert!(out.is_some());
+        assert!(out.is_ok());
         assert_eq!(engine.prefill_calls, 1);
 
         // decode_step_via_executor → decode_step
         let out = engine.decode_step_via_executor(&weights, &exec, &ffn, 2);
-        assert!(out.is_some());
+        assert!(out.is_ok());
         assert_eq!(engine.decode_calls, 1);
 
         // prefill_quant_via_executor → prefill_quant → prefill (default fallback)
         let mut weights_q = crate::test_utils::make_test_weights();
         let out = engine.prefill_quant_via_executor(&mut weights_q, &exec, &ffn, &index, &[0, 1]);
-        assert!(out.is_some());
+        assert!(out.is_ok());
         assert_eq!(engine.prefill_calls, 2);
 
         // decode_step_quant_via_executor → decode_step_quant → decode_step
         let out = engine.decode_step_quant_via_executor(&mut weights_q, &exec, &ffn, &index, 3);
-        assert!(out.is_some());
+        assert!(out.is_ok());
         assert_eq!(engine.decode_calls, 2);
     }
 
@@ -535,17 +891,164 @@ mod tests {
 
         let mut weights_q4k = crate::test_utils::make_test_weights();
         let out = engine.prefill_quant(&mut weights_q4k, &ffn, &index, &[1, 2, 3], &*backend);
-        assert!(out.is_some());
+        assert!(out.is_ok());
         assert_eq!(
             engine.prefill_calls, 1,
             "default prefill_quant must dispatch to prefill"
         );
 
         let out = engine.decode_step_quant(&mut weights_q4k, &ffn, &index, 4, &*backend);
-        assert!(out.is_some());
+        assert!(out.is_ok());
         assert_eq!(
             engine.decode_calls, 1,
             "default decode_step_quant must dispatch to decode_step"
         );
+    }
+
+    // ─── EngineError ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn engine_error_is_recoverable_classifies_variants() {
+        assert!(EngineError::EmptyPrompt.is_recoverable());
+        assert!(EngineError::BackendUnavailable.is_recoverable());
+        assert!(EngineError::RetrievalMiss {
+            reason: "no store".into()
+        }
+        .is_recoverable());
+        assert!(!EngineError::InvariantViolation {
+            what: "decode before prefill".into()
+        }
+        .is_recoverable());
+        assert!(!EngineError::BackendFailure {
+            details: "kernel oom".into()
+        }
+        .is_recoverable());
+    }
+
+    #[test]
+    fn engine_error_display_includes_reason_payload() {
+        let err = EngineError::RetrievalMiss {
+            reason: "no store attached".into(),
+        };
+        assert!(err.to_string().contains("no store attached"));
+        let err = EngineError::InvariantViolation {
+            what: "decode before prefill".into(),
+        };
+        assert!(err.to_string().contains("decode before prefill"));
+        let err = EngineError::BackendFailure {
+            details: "kernel returned None".into(),
+        };
+        assert!(err.to_string().contains("kernel returned None"));
+    }
+
+    #[test]
+    fn engine_error_empty_prompt_and_backend_unavailable_render() {
+        assert_eq!(
+            EngineError::EmptyPrompt.to_string(),
+            "engine called with empty prompt"
+        );
+        assert!(EngineError::BackendUnavailable
+            .to_string()
+            .contains("does not support"));
+    }
+
+    // ─── RetrievalEngine + AnyEngine ──────────────────────────────────────────
+
+    struct StubRetrievalEngine {
+        prefill_calls: usize,
+        decode_calls: usize,
+        last_token: Option<u32>,
+    }
+
+    impl RetrievalEngine for StubRetrievalEngine {
+        fn name(&self) -> &str {
+            "stub-retrieval"
+        }
+        fn info(&self) -> EngineInfo {
+            EngineInfo {
+                name: self.name().into(),
+                description: "test fixture".into(),
+                backend: "cpu".into(),
+                config: String::new(),
+            }
+        }
+        fn prefill(
+            &mut self,
+            _weights: &ModelWeights,
+            token_ids: &[u32],
+        ) -> Result<Array2<f32>, EngineError> {
+            self.prefill_calls += 1;
+            if token_ids.is_empty() {
+                return Err(EngineError::EmptyPrompt);
+            }
+            Ok(Array2::zeros((1, 4)))
+        }
+        fn decode_step(
+            &mut self,
+            _weights: &ModelWeights,
+            token_id: u32,
+        ) -> Result<Array2<f32>, EngineError> {
+            self.decode_calls += 1;
+            self.last_token = Some(token_id);
+            Ok(Array2::zeros((1, 4)))
+        }
+        fn memory_bytes(&self) -> usize {
+            16
+        }
+    }
+
+    #[test]
+    fn retrieval_engine_propagates_empty_prompt_error() {
+        let weights = crate::test_utils::make_test_weights();
+        let mut engine = StubRetrievalEngine {
+            prefill_calls: 0,
+            decode_calls: 0,
+            last_token: None,
+        };
+        let err = engine.prefill(&weights, &[]).unwrap_err();
+        assert_eq!(err, EngineError::EmptyPrompt);
+    }
+
+    #[test]
+    fn retrieval_engine_defaults_zero_window_and_cold_bytes() {
+        let engine = StubRetrievalEngine {
+            prefill_calls: 0,
+            decode_calls: 0,
+            last_token: None,
+        };
+        assert_eq!(engine.window_tokens(), 0);
+        assert_eq!(engine.cold_bytes(), 0);
+        assert!(engine.stage_summary().is_none());
+    }
+
+    #[test]
+    fn any_engine_delegates_uniform_methods_to_inner() {
+        let kv: Box<dyn KvEngine> = Box::new(DefaultsOnlyEngine {
+            prefill_calls: 0,
+            decode_calls: 0,
+        });
+        let any = AnyEngine::Kv(kv);
+        assert!(any.is_kv());
+        assert!(!any.is_retrieval());
+        assert_eq!(any.name(), "defaults-only");
+        assert_eq!(any.memory_bytes(), 0);
+        assert_eq!(any.window_tokens(), 0);
+        assert_eq!(any.cold_bytes(), 0);
+        assert!(any.stage_summary().is_none());
+        let info = any.info();
+        assert_eq!(info.name, "defaults-only");
+
+        let retrieval: Box<dyn RetrievalEngine> = Box::new(StubRetrievalEngine {
+            prefill_calls: 0,
+            decode_calls: 0,
+            last_token: None,
+        });
+        let any = AnyEngine::Retrieval(retrieval);
+        assert!(any.is_retrieval());
+        assert!(!any.is_kv());
+        assert_eq!(any.name(), "stub-retrieval");
+        assert_eq!(any.memory_bytes(), 16);
+        let info = any.info();
+        assert_eq!(info.name, "stub-retrieval");
     }
 }
