@@ -43,11 +43,19 @@ pub struct AccuracyArgs {
     /// Model: vindex directory, `hf://owner/name`, or a cache shorthand.
     pub model: String,
 
-    /// Comma-separated engine specs (same syntax as `larql bench --engine`).
-    /// Default: `standard,markov-rs,unlimited-context,turbo-quant`.
+    /// Comma-separated KV engine specs (same syntax as `larql bench --engine`).
+    /// Default: `standard,markov-rs,unlimited-context,turbo-quant,apollo`.
+    ///
+    /// Apollo is in the default set as of this slice — its store-miss
+    /// rows surface as `SkippedRetrievalMiss` outcomes with a visible
+    /// `served_rate < 1.0`, which is diagnostic rather than
+    /// silently-distorted (cf. Item 1 schema fix in the ROADMAP).
+    /// Without a constellation store loaded, Apollo will show a 0%
+    /// served rate on every corpus — the row is honest about being
+    /// unable to serve, not silently dropped or mis-attributed.
     #[arg(
         long,
-        default_value = "standard,markov-rs,unlimited-context,turbo-quant"
+        default_value = "standard,markov-rs,unlimited-context,turbo-quant,apollo"
     )]
     pub engines: String,
 
