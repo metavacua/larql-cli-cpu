@@ -3,22 +3,18 @@
 //! and [`StrategySplit`].
 
 use super::super::prompts::KnowledgeSource;
+use larql_inference::kv_engine::EngineError;
 
-/// Outcome of attempting to score a prompt against a `KvEngine`.
+/// Outcome of attempting to score a prompt against an engine.
 ///
-/// **Interim taxonomy — see `larql-kv/ROADMAP.md` "P0 — sibling trait
-/// extraction for non-K/V engines."** The variant set mirrors the typed
-/// `EngineError` enum that the trait extraction will land, so migration
-/// to the typed surface is a flat projection when the refactor ships.
-///
-/// Today, only `Served`, `SkippedEmptyPrompt`, and `SkippedInternalError`
-/// are constructible from `score_one` — `KvEngine::prefill` returns
-/// `Option<T>` and the harness cannot distinguish a retrieval miss from
-/// a backend-unavailable error from any other failure. The two
-/// currently-unconstructible variants (`SkippedRetrievalMiss`,
-/// `SkippedBackendUnavailable`) are present so the serde schema stays
-/// stable across the trait-extraction migration; their construction
-/// paths arrive with the typed `Result<T, EngineError>` trait surface.
+/// Mirrors the [`larql_inference::EngineError`] taxonomy: each error
+/// variant maps to a specific `Skipped*` outcome (see
+/// [`From<&EngineError>`](#impl-From<%26EngineError>-for-ScoreOutcome)).
+/// The 1:1 mapping preserves the alerting distinction the harness needs
+/// — `SkippedInvariantViolation` and `SkippedBackendFailure` are
+/// different conditions (the first is a dispatch bug, the second is a
+/// runtime / data condition) and collapsing them would mask that in
+/// downstream observability.
 ///
 /// Exhaustive — adding a variant later is a deliberate schema change
 /// that breaks every consumer until updated. **Do not add
@@ -30,25 +26,39 @@ pub enum ScoreOutcome {
     /// Engine produced a measurable score for this prompt.
     Served,
     /// Prompt tokenised to zero ids (empty input, tokenizer failure,
-    /// all-out-of-vocab characters).
+    /// all-out-of-vocab characters), or the engine itself reported
+    /// [`EngineError::EmptyPrompt`].
     SkippedEmptyPrompt,
-    /// Engine returned `None` from a retrieval-style miss. **Not
-    /// constructible today** — requires the `RetrievalEngine` sibling
-    /// trait extraction. Today these failures surface as
-    /// `SkippedInternalError`.
+    /// Engine reported [`EngineError::RetrievalMiss`] — a retrieval
+    /// engine (Apollo, future Mode 5) could not serve this query
+    /// against its store. Recoverable; surfaces as `served_rate < 1.0`
+    /// rather than a runtime error.
     SkippedRetrievalMiss,
-    /// Engine returned `None` because a required backend (Q4K, Metal)
-    /// is unavailable. **Not constructible today** — requires the
-    /// trait extraction's typed error surface. Today these failures
-    /// surface as `SkippedInternalError`.
+    /// Engine reported [`EngineError::BackendUnavailable`] — the
+    /// underlying backend (e.g. Metal Q4K) doesn't implement a code
+    /// path the engine asked for and no fallback exists.
     SkippedBackendUnavailable,
-    /// Engine returned `None` for an opaque internal reason. Today this
-    /// collapses all engine-side failure modes (invariant violations
-    /// like decode-before-prefill, backend kernel failures, retrieval
-    /// misses, backend-unavailable) into one bucket because
-    /// `KvEngine::prefill`'s `Option<T>` return type cannot
-    /// distinguish them.
-    SkippedInternalError,
+    /// Engine reported [`EngineError::InvariantViolation`] — the engine
+    /// was driven outside its state-machine contract (decode_step
+    /// before prefill, missing store, layer-count mismatch). Indicates
+    /// a harness-level dispatch bug.
+    SkippedInvariantViolation,
+    /// Engine reported [`EngineError::BackendFailure`] — the inner
+    /// backend or compute kernel returned a runtime failure (corrupt
+    /// weights, OOM, GPU driver error).
+    SkippedBackendFailure,
+}
+
+impl From<&EngineError> for ScoreOutcome {
+    fn from(err: &EngineError) -> Self {
+        match err {
+            EngineError::EmptyPrompt => Self::SkippedEmptyPrompt,
+            EngineError::RetrievalMiss { .. } => Self::SkippedRetrievalMiss,
+            EngineError::BackendUnavailable => Self::SkippedBackendUnavailable,
+            EngineError::InvariantViolation { .. } => Self::SkippedInvariantViolation,
+            EngineError::BackendFailure { .. } => Self::SkippedBackendFailure,
+        }
+    }
 }
 
 impl ScoreOutcome {
@@ -370,7 +380,8 @@ mod tests {
         assert!(!ScoreOutcome::SkippedEmptyPrompt.is_served());
         assert!(!ScoreOutcome::SkippedRetrievalMiss.is_served());
         assert!(!ScoreOutcome::SkippedBackendUnavailable.is_served());
-        assert!(!ScoreOutcome::SkippedInternalError.is_served());
+        assert!(!ScoreOutcome::SkippedInvariantViolation.is_served());
+        assert!(!ScoreOutcome::SkippedBackendFailure.is_served());
     }
 
     #[test]
@@ -394,8 +405,12 @@ mod tests {
                 r#"{"status":"skipped_backend_unavailable"}"#,
             ),
             (
-                ScoreOutcome::SkippedInternalError,
-                r#"{"status":"skipped_internal_error"}"#,
+                ScoreOutcome::SkippedInvariantViolation,
+                r#"{"status":"skipped_invariant_violation"}"#,
+            ),
+            (
+                ScoreOutcome::SkippedBackendFailure,
+                r#"{"status":"skipped_backend_failure"}"#,
             ),
         ];
         for (outcome, expected_json) in &cases {
@@ -404,6 +419,36 @@ mod tests {
             let round: ScoreOutcome = serde_json::from_str(&json).unwrap();
             assert_eq!(round, *outcome, "round-trip {:?}", outcome);
         }
+    }
+
+    #[test]
+    fn score_outcome_from_engine_error_maps_each_variant() {
+        assert_eq!(
+            ScoreOutcome::from(&EngineError::EmptyPrompt),
+            ScoreOutcome::SkippedEmptyPrompt
+        );
+        assert_eq!(
+            ScoreOutcome::from(&EngineError::BackendUnavailable),
+            ScoreOutcome::SkippedBackendUnavailable
+        );
+        assert_eq!(
+            ScoreOutcome::from(&EngineError::RetrievalMiss {
+                reason: "no store".into()
+            }),
+            ScoreOutcome::SkippedRetrievalMiss
+        );
+        assert_eq!(
+            ScoreOutcome::from(&EngineError::InvariantViolation {
+                what: "decode before prefill".into()
+            }),
+            ScoreOutcome::SkippedInvariantViolation
+        );
+        assert_eq!(
+            ScoreOutcome::from(&EngineError::BackendFailure {
+                details: "kernel oom".into()
+            }),
+            ScoreOutcome::SkippedBackendFailure
+        );
     }
 
     // ── EvalLabels ───────────────────────────────────────────────────────────
@@ -566,9 +611,9 @@ mod tests {
             EvalLabels::for_kv_engine("Apollo"),
             "Osaka".into(),
             "Tokyo".into(),
-            ScoreOutcome::SkippedInternalError,
+            ScoreOutcome::SkippedBackendFailure,
         );
-        assert_eq!(skipped.outcome, ScoreOutcome::SkippedInternalError);
+        assert_eq!(skipped.outcome, ScoreOutcome::SkippedBackendFailure);
         assert!(skipped.followed_context.is_none());
         assert!(skipped.parametric_fallback.is_none());
     }

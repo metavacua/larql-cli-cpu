@@ -8,7 +8,7 @@ use larql_inference::model::ModelWeights;
 use larql_inference::tokenizers::Tokenizer;
 
 use super::types::ScoreOutcome;
-use crate::KvEngine;
+use crate::AnyEngine;
 
 /// Outcome of a single [`score_one`] attempt: either `Served` with the
 /// three score components, or `Skipped` with the reason. Private — the
@@ -32,7 +32,7 @@ pub(super) enum ScoreResult {
 /// `ConflictScore` variant; today's drivers build a row in both cases
 /// (replacing the historical `filter_map` silent-drop behaviour).
 pub(super) fn score_one(
-    engine: &mut dyn KvEngine,
+    engine: &mut AnyEngine,
     weights: &ModelWeights,
     ffn: &dyn FfnBackend,
     tokenizer: &Tokenizer,
@@ -49,12 +49,14 @@ pub(super) fn score_one(
     }
 
     let hidden = match engine.prefill(weights, ffn, &prompt_ids) {
-        Some(h) => h,
-        None => return ScoreResult::Skipped(ScoreOutcome::SkippedInternalError),
+        Ok(h) => h,
+        Err(err) => return ScoreResult::Skipped(ScoreOutcome::from(&err)),
     };
     let logits = hidden_to_raw_logits(weights, &hidden);
 
-    // Argmax → top-1 string for the match check.
+    // Argmax → top-1 string for the match check. A non-finite-only
+    // logit vector signals a backend numerical failure, not an engine
+    // invariant violation.
     let (top1_id, _) = match logits
         .iter()
         .enumerate()
@@ -62,7 +64,7 @@ pub(super) fn score_one(
         .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
     {
         Some(t) => t,
-        None => return ScoreResult::Skipped(ScoreOutcome::SkippedInternalError),
+        None => return ScoreResult::Skipped(ScoreOutcome::SkippedBackendFailure),
     };
     let predicted = tokenizer
         .decode(&[top1_id as u32], true)
@@ -240,6 +242,7 @@ mod tests {
     // that bypasses the real engine dispatch and returns either None
     // (for branch 3) or a controlled hidden state (for branch 5).
 
+    use crate::KvEngine;
     use larql_inference::ffn::WeightFfn;
     use larql_inference::EngineInfo;
     use ndarray::Array2;
@@ -268,16 +271,24 @@ mod tests {
             _weights: &larql_inference::model::ModelWeights,
             _ffn: &dyn larql_inference::ffn::FfnBackend,
             _token_ids: &[u32],
-        ) -> Option<Array2<f32>> {
-            self.prefill_result.clone()
+        ) -> Result<Array2<f32>, larql_inference::kv_engine::EngineError> {
+            self.prefill_result.clone().ok_or_else(|| {
+                larql_inference::kv_engine::EngineError::BackendFailure {
+                    details: "test stub returned None".into(),
+                }
+            })
         }
         fn decode_step(
             &mut self,
             _weights: &larql_inference::model::ModelWeights,
             _ffn: &dyn larql_inference::ffn::FfnBackend,
             _token_id: u32,
-        ) -> Option<Array2<f32>> {
-            self.prefill_result.clone()
+        ) -> Result<Array2<f32>, larql_inference::kv_engine::EngineError> {
+            self.prefill_result.clone().ok_or_else(|| {
+                larql_inference::kv_engine::EngineError::BackendFailure {
+                    details: "test stub returned None".into(),
+                }
+            })
         }
         fn memory_bytes(&self) -> usize {
             0
@@ -313,11 +324,11 @@ mod tests {
         let weights = make_test_weights();
         let tokenizer = make_test_tokenizer(weights.vocab_size);
         let ffn = WeightFfn { weights: &weights };
-        let mut engine = MockEngine {
+        let mut engine = AnyEngine::Kv(Box::new(MockEngine {
             prefill_result: None,
-        };
+        }));
         let result = score_one(
-            &mut engine as &mut dyn crate::KvEngine,
+            &mut engine,
             &weights,
             &ffn,
             &tokenizer,
@@ -325,9 +336,9 @@ mod tests {
             "Paris",
         );
         match result {
-            ScoreResult::Skipped(ScoreOutcome::SkippedInternalError) => {}
+            ScoreResult::Skipped(ScoreOutcome::SkippedBackendFailure) => {}
             other => panic!(
-                "expected SkippedInternalError when engine returns None, got {:?}",
+                "expected SkippedBackendFailure when engine returns None, got {:?}",
                 std::mem::discriminant(&other)
             ),
         }
@@ -349,11 +360,11 @@ mod tests {
         let hidden = Array2::<f32>::from_shape_fn((1, weights.hidden_size), |(_, j)| {
             0.01 * (j as f32 + 1.0)
         });
-        let mut engine = MockEngine {
+        let mut engine = AnyEngine::Kv(Box::new(MockEngine {
             prefill_result: Some(hidden),
-        };
+        }));
         let result = score_one(
-            &mut engine as &mut dyn crate::KvEngine,
+            &mut engine,
             &weights,
             &ffn,
             &tokenizer,

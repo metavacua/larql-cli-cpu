@@ -494,7 +494,11 @@ in expected ROI order.
   path, the per-engine optimization workstreams (W1-W6) are
   unfalsifiable. Wire it before starting W1.
 
-### P0 — sibling trait extraction for non-K/V engines (Apollo, Mode 5)
+### P0 — sibling trait extraction for non-K/V engines (Apollo, Mode 5) — **LANDED 2026-05-24**
+
+**Status:** Closed. See the "Closed (recent)" entry for the migration
+summary. Section retained below as the canonical motivation /
+decision record.
 
 **Problem.** The `KvEngine` trait surface assumes per-step K/V append,
 FFN dispatched through `FfnBackend`, and state reconstructible to
@@ -779,6 +783,83 @@ were implementation).
   spec) makes composition cleaner.
 
 ## Closed (recent)
+
+- **2026-05-24 — Sibling trait extraction LANDED.** `KvEngine`
+  `Option<T>` returns are gone; the typed `EngineError` enum lives in
+  `larql-inference::kv_engine` alongside the new `RetrievalEngine`
+  trait + `AnyEngine` dispatch enum. The two-harness silent-drop /
+  panic disagreement (`accuracy_suite/runner.rs` vs
+  `bench/engine_runtime.rs`) is resolved at the type level.
+
+  **Trait surface:** all 8 `KvEngine` impls (`standard`, `no_cache`,
+  `markov_residual`, `markov_residual_codec`, `unlimited_context`,
+  `turbo_quant`, `boundary_kv`, `boundary_per_layer`) return
+  `Result<Array2<f32>, EngineError>` on `prefill` / `decode_step` /
+  `*_quant` / `*_via_executor`. Apollo moves to the new
+  `RetrievalEngine` trait (`prefill(weights, token_ids)` /
+  `decode_step(weights, token_id)` — no `FfnBackend`, no per-step K/V).
+
+  **EngineError variants** (exhaustive, no `#[non_exhaustive]`,
+  thiserror): `EmptyPrompt`, `BackendUnavailable`, `RetrievalMiss
+  { reason }`, `InvariantViolation { what }`, `BackendFailure
+  { details }`. Per Finding 2, `InvariantViolation` and `BackendFailure`
+  are kept as two top-level variants to preserve the alert-routing
+  distinction (a dispatch bug vs a kernel/data failure). The accuracy
+  harness's `ScoreOutcome` mirror followed suit:
+  `SkippedInternalError` → `SkippedInvariantViolation` +
+  `SkippedBackendFailure` (load-bearing JSON schema change for
+  downstream observability).
+
+  **AnyEngine** (`AnyEngine::Kv(Box<dyn KvEngine>) |
+  Retrieval(Box<dyn RetrievalEngine>)`) is the harness boundary type.
+  Forwarding methods (`prefill` / `decode_step` / `prefill_quant` /
+  `decode_step_quant` / `*_via_executor`) take the superset of args
+  from both surfaces and ignore the irrelevant ones on the retrieval
+  arm. This intentionally walks back the original "don't lift a common
+  shape" plan — the harness scalability won out, since the alternative
+  is N×2 match arms per call site as more retrieval engines land.
+
+  **Bench harness merged.** `run_engine` + `run_engine_q4k` collapsed
+  into one `run_engine(weights, index: Option<&VectorIndex>, ...)`.
+  When `index = Some` the dispatch goes through `prefill_quant`
+  (quant-agnostic — the vindex's format flows through the engine);
+  when `None` the dense `prefill` path runs. FFN selection: dense
+  defaults to `WeightFfn`, quant defaults to `NullFfn` (preserves the
+  pre-merge Q4K behaviour). `--ffn-policy` honored on dense, logged
+  as not-yet-honored on quant due to the `&mut weights` vs
+  `&weights`-borrowing-router conflict (unchanged from pre-merge).
+
+  **Coverage debt:** one re-introduced baseline at
+  `markov_residual/engine.rs` (89.5% vs 90% floor). The remaining
+  uncovered lines are all `.ok_or_else(|| BackendFailure)?`
+  constructions that only fire when an internal helper
+  (`rs_decode_step_walk`, `recompute_kv`, `executor.run_*_layer`)
+  returns None. Triggering those requires the mock `EngineBackend`
+  infrastructure that the 2026-05-24 coverage-clearance explicitly
+  deferred; the baseline tracks the debt rather than gold-plating
+  ahead of need.
+
+  **Outcomes.** Test count larql-kv lib: 712 → 726 (+14). Workspace
+  builds clean. `make larql-kv-ci` passes (fmt + clippy + tests +
+  fresh coverage policy with 1 baseline). Apollo's `executor.rs`
+  deleted (~150 lines of dead code from the old KvEngine `*_via_executor`
+  impls). Closes [`docs/state-policy.md`](docs/state-policy.md) §8
+  Open Question 1 ("Where does Apollo's fallback live?"); also closes
+  the interim `ffn_backend` JSON limitation flagged in Item 1 of the
+  2026-05-24 accuracy harness work.
+
+  **Follow-ups** *(deferred to keep this PR atomic)*:
+  - Mode 5 / Graph-Grounded engine lands as a `RetrievalEngine` impl
+    (was blocked on this refactor).
+  - Q4K `--ffn-policy` honoring (was waiting on the same
+    `&mut weights` borrow conflict — still present after the merge
+    because the trait surface still takes `&mut weights` for lazy
+    dequant).
+  - `RemoteWalk` build path (~200 lines, standalone — was the second
+    blocked item).
+  - `markov_residual/engine.rs` coverage debt + mock `EngineBackend`
+    infrastructure (deferred per "Sub-project A" of the previous
+    coverage push).
 
 - **2026-05-24 — Coverage debt CLEARED.** All six files below the
   90% per-file floor lifted; `make larql-kv-coverage-policy` passes

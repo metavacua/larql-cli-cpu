@@ -421,7 +421,7 @@ mod tests {
                 KnowledgeSource::Parametric,
                 EvalLabels::for_kv_engine("Apollo"),
                 "Rome".into(),
-                ScoreOutcome::SkippedInternalError,
+                ScoreOutcome::SkippedBackendFailure,
             ),
         ];
         let splits = compute_strategy_split(&scores, &[]);
@@ -442,7 +442,7 @@ mod tests {
             KnowledgeSource::Parametric,
             EvalLabels::for_kv_engine("Apollo"),
             "Paris".into(),
-            ScoreOutcome::SkippedInternalError,
+            ScoreOutcome::SkippedBackendFailure,
         )];
         let splits = compute_strategy_split(&scores, &[]);
         let s = &splits[0];

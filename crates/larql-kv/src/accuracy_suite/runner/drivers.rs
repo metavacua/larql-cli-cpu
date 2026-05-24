@@ -12,7 +12,7 @@ use super::super::needle::{build_haystack, needle_found, NeedleTest};
 use super::super::prompts::{KnowledgeSource, TestPrompt};
 use super::scoring::{score_one, ScoreResult};
 use super::types::{ConflictScore, EvalLabels, PromptScore};
-use crate::KvEngine;
+use crate::AnyEngine;
 
 /// Drive a `KvEngine` factory through the parametric corpus.
 ///
@@ -28,14 +28,14 @@ pub fn evaluate_parametric<F>(
     prompts: &[TestPrompt],
 ) -> Vec<PromptScore>
 where
-    F: FnMut() -> Box<dyn KvEngine>,
+    F: FnMut() -> AnyEngine,
 {
     prompts
         .iter()
         .map(|p| {
             let mut engine = build_engine();
             match score_one(
-                engine.as_mut(),
+                &mut engine,
                 weights,
                 ffn,
                 tokenizer,
@@ -83,7 +83,7 @@ pub fn evaluate_in_context<F>(
     needles: &[NeedleTest],
 ) -> Vec<PromptScore>
 where
-    F: FnMut() -> Box<dyn KvEngine>,
+    F: FnMut() -> AnyEngine,
 {
     needles
         .iter()
@@ -93,7 +93,7 @@ where
             let row_prompt = format!("[needle@{}tok] {}", n.context_tokens, n.query_text);
             let mut engine = build_engine();
             match score_one(
-                engine.as_mut(),
+                &mut engine,
                 weights,
                 ffn,
                 tokenizer,
@@ -146,14 +146,14 @@ pub fn evaluate_conflict<F>(
     prompts: &[super::super::conflict::ConflictPrompt],
 ) -> Vec<ConflictScore>
 where
-    F: FnMut() -> Box<dyn KvEngine>,
+    F: FnMut() -> AnyEngine,
 {
     prompts
         .iter()
         .map(|p| {
             let mut engine = build_engine();
             match score_one(
-                engine.as_mut(),
+                &mut engine,
                 weights,
                 ffn,
                 tokenizer,
@@ -209,8 +209,8 @@ mod tests {
             category: "factual",
             knowledge_source: KnowledgeSource::Parametric,
         }];
-        let build_engine = || -> Box<dyn crate::KvEngine> {
-            Box::new(crate::engines::no_cache::NoCacheEngine::new())
+        let build_engine = || -> crate::AnyEngine {
+            crate::AnyEngine::Kv(Box::new(crate::engines::no_cache::NoCacheEngine::new()))
         };
         let scores = evaluate_parametric(
             build_engine,
@@ -241,8 +241,8 @@ mod tests {
             needle_answer: "",
             query_text: "",
         }];
-        let build_engine = || -> Box<dyn crate::KvEngine> {
-            Box::new(crate::engines::no_cache::NoCacheEngine::new())
+        let build_engine = || -> crate::AnyEngine {
+            crate::AnyEngine::Kv(Box::new(crate::engines::no_cache::NoCacheEngine::new()))
         };
         let scores = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             evaluate_in_context(
@@ -269,6 +269,7 @@ mod tests {
     // engine whose `prefill` returns Some(hidden). MockEngine returns
     // a controlled hidden state regardless of the input tokens.
 
+    use crate::KvEngine;
     use larql_inference::EngineInfo;
     use ndarray::Array2;
 
@@ -293,16 +294,16 @@ mod tests {
             _w: &larql_inference::model::ModelWeights,
             _f: &dyn larql_inference::ffn::FfnBackend,
             _ids: &[u32],
-        ) -> Option<Array2<f32>> {
-            Some(self.hidden.clone())
+        ) -> Result<Array2<f32>, larql_inference::kv_engine::EngineError> {
+            Ok(self.hidden.clone())
         }
         fn decode_step(
             &mut self,
             _w: &larql_inference::model::ModelWeights,
             _f: &dyn larql_inference::ffn::FfnBackend,
             _id: u32,
-        ) -> Option<Array2<f32>> {
-            Some(self.hidden.clone())
+        ) -> Result<Array2<f32>, larql_inference::kv_engine::EngineError> {
+            Ok(self.hidden.clone())
         }
         fn memory_bytes(&self) -> usize {
             0
@@ -339,10 +340,10 @@ mod tests {
         let tokenizer = make_test_tokenizer(weights.vocab_size);
         let ffn = WeightFfn { weights: &weights };
         let hidden = mock_hidden(&weights);
-        let build_engine = move || -> Box<dyn crate::KvEngine> {
-            Box::new(MockEngine {
+        let build_engine = move || -> crate::AnyEngine {
+            crate::AnyEngine::Kv(Box::new(MockEngine {
                 hidden: hidden.clone(),
-            })
+            }))
         };
         let prompts = vec![super::super::super::prompts::TestPrompt {
             text: "non-empty prompt text",
@@ -376,10 +377,10 @@ mod tests {
         let tokenizer = make_test_tokenizer(weights.vocab_size);
         let ffn = WeightFfn { weights: &weights };
         let hidden = mock_hidden(&weights);
-        let build_engine = move || -> Box<dyn crate::KvEngine> {
-            Box::new(MockEngine {
+        let build_engine = move || -> crate::AnyEngine {
+            crate::AnyEngine::Kv(Box::new(MockEngine {
                 hidden: hidden.clone(),
-            })
+            }))
         };
         // Small context to keep the haystack builder fast.
         let needles = vec![NeedleTest {
@@ -412,10 +413,10 @@ mod tests {
         let tokenizer = make_test_tokenizer(weights.vocab_size);
         let ffn = WeightFfn { weights: &weights };
         let hidden = mock_hidden(&weights);
-        let build_engine = move || -> Box<dyn crate::KvEngine> {
-            Box::new(MockEngine {
+        let build_engine = move || -> crate::AnyEngine {
+            crate::AnyEngine::Kv(Box::new(MockEngine {
                 hidden: hidden.clone(),
-            })
+            }))
         };
         let prompts = vec![super::super::super::conflict::ConflictPrompt {
             prompt: "City fact",
@@ -455,8 +456,8 @@ mod tests {
             category: "factual",
             knowledge_source: KnowledgeSource::Conflict,
         }];
-        let build_engine = || -> Box<dyn crate::KvEngine> {
-            Box::new(crate::engines::no_cache::NoCacheEngine::new())
+        let build_engine = || -> crate::AnyEngine {
+            crate::AnyEngine::Kv(Box::new(crate::engines::no_cache::NoCacheEngine::new()))
         };
         let scores = evaluate_conflict(
             build_engine,

@@ -29,6 +29,7 @@ use crate::engines::markov_residual::ensure_attn_tensors_dequantised;
 use crate::{EngineInfo, KvEngine};
 use larql_inference::attention::SharedKV;
 use larql_inference::ffn::FfnBackend;
+use larql_inference::kv_engine::EngineError;
 use larql_inference::model::ModelWeights;
 
 // ─── EngineStats ─────────────────────────────────────────────────────────────
@@ -433,9 +434,19 @@ impl KvEngine for UnlimitedContextEngine {
         weights: &ModelWeights,
         _ffn: &dyn FfnBackend,
         token_ids: &[u32],
-    ) -> Option<Array2<f32>> {
-        self.process(weights, token_ids)?;
-        self.last_hidden.clone()
+    ) -> Result<Array2<f32>, EngineError> {
+        if token_ids.is_empty() {
+            return Err(EngineError::EmptyPrompt);
+        }
+        self.process(weights, token_ids)
+            .ok_or_else(|| EngineError::BackendFailure {
+                details: "process returned None during prefill".into(),
+            })?;
+        self.last_hidden
+            .clone()
+            .ok_or_else(|| EngineError::BackendFailure {
+                details: "last_hidden missing after prefill".into(),
+            })
     }
 
     fn decode_step(
@@ -443,9 +454,16 @@ impl KvEngine for UnlimitedContextEngine {
         weights: &ModelWeights,
         _ffn: &dyn FfnBackend,
         token_id: u32,
-    ) -> Option<Array2<f32>> {
-        self.process(weights, &[token_id])?;
-        self.last_hidden.clone()
+    ) -> Result<Array2<f32>, EngineError> {
+        self.process(weights, &[token_id])
+            .ok_or_else(|| EngineError::BackendFailure {
+                details: "process returned None during decode_step".into(),
+            })?;
+        self.last_hidden
+            .clone()
+            .ok_or_else(|| EngineError::BackendFailure {
+                details: "last_hidden missing after decode_step".into(),
+            })
     }
 
     fn memory_bytes(&self) -> usize {
@@ -483,14 +501,24 @@ impl KvEngine for UnlimitedContextEngine {
         index: &VectorIndex,
         token_ids: &[u32],
         backend: &dyn ComputeBackend,
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
+        if token_ids.is_empty() {
+            return Err(EngineError::EmptyPrompt);
+        }
         if let Some(hidden) = self.try_prefill_via_dispatch(weights, index, token_ids) {
-            return Some(hidden);
+            return Ok(hidden);
         }
         self.kv_handle = None;
         ensure_attn_tensors_dequantised(weights, index);
-        self.process_quant(weights, index, token_ids, backend)?;
-        self.last_hidden.clone()
+        self.process_quant(weights, index, token_ids, backend)
+            .ok_or_else(|| EngineError::BackendFailure {
+                details: "process_quant returned None during prefill_quant".into(),
+            })?;
+        self.last_hidden
+            .clone()
+            .ok_or_else(|| EngineError::BackendFailure {
+                details: "last_hidden missing after prefill_quant".into(),
+            })
     }
 
     fn decode_step_quant(
@@ -500,13 +528,24 @@ impl KvEngine for UnlimitedContextEngine {
         index: &VectorIndex,
         token_id: u32,
         backend: &dyn ComputeBackend,
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
         if self.kv_handle.is_some() {
-            return self.decode_step_via_dispatch(weights, index, token_id);
+            return self
+                .decode_step_via_dispatch(weights, index, token_id)
+                .ok_or_else(|| EngineError::BackendFailure {
+                    details: "decode_step_via_dispatch returned None".into(),
+                });
         }
         ensure_attn_tensors_dequantised(weights, index);
-        self.process_quant(weights, index, &[token_id], backend)?;
-        self.last_hidden.clone()
+        self.process_quant(weights, index, &[token_id], backend)
+            .ok_or_else(|| EngineError::BackendFailure {
+                details: "process_quant returned None during decode_step_quant".into(),
+            })?;
+        self.last_hidden
+            .clone()
+            .ok_or_else(|| EngineError::BackendFailure {
+                details: "last_hidden missing after decode_step_quant".into(),
+            })
     }
 
     // ── Executor-aware migration (Phase 2 of engine-state-vs-execution spec) ──
@@ -527,8 +566,11 @@ impl KvEngine for UnlimitedContextEngine {
         ffn: &dyn FfnBackend,
         index: &VectorIndex,
         token_ids: &[u32],
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
         use larql_inference::layer_executor::ExecutorDispatchKind;
+        if token_ids.is_empty() {
+            return Err(EngineError::EmptyPrompt);
+        }
         // Spec §3.4: this engine's state policy (windowed checkpoints) is
         // expressible against per-layer dispatch only. Transparent degrade
         // on fused executors until the Phase 3 refusal contract lands.
@@ -536,8 +578,16 @@ impl KvEngine for UnlimitedContextEngine {
             return self.prefill_quant(weights, ffn, index, token_ids, executor.backend());
         }
         ensure_attn_tensors_dequantised(weights, index);
-        self.process_via_executor(weights, executor, ffn, token_ids)?;
-        self.last_hidden.clone()
+        self.process_via_executor(weights, executor, ffn, token_ids)
+            .ok_or_else(|| EngineError::BackendFailure {
+                details: "process_via_executor returned None during prefill_quant_via_executor"
+                    .into(),
+            })?;
+        self.last_hidden
+            .clone()
+            .ok_or_else(|| EngineError::BackendFailure {
+                details: "last_hidden missing after prefill_quant_via_executor".into(),
+            })
     }
 
     fn decode_step_quant_via_executor(
@@ -547,14 +597,22 @@ impl KvEngine for UnlimitedContextEngine {
         ffn: &dyn FfnBackend,
         index: &VectorIndex,
         token_id: u32,
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
         use larql_inference::layer_executor::ExecutorDispatchKind;
         if matches!(executor.dispatch_kind(), ExecutorDispatchKind::Fused) {
             return self.decode_step_quant(weights, ffn, index, token_id, executor.backend());
         }
         ensure_attn_tensors_dequantised(weights, index);
-        self.process_via_executor(weights, executor, ffn, &[token_id])?;
-        self.last_hidden.clone()
+        self.process_via_executor(weights, executor, ffn, &[token_id])
+            .ok_or_else(|| EngineError::BackendFailure {
+                details: "process_via_executor returned None during decode_step_quant_via_executor"
+                    .into(),
+            })?;
+        self.last_hidden
+            .clone()
+            .ok_or_else(|| EngineError::BackendFailure {
+                details: "last_hidden missing after decode_step_quant_via_executor".into(),
+            })
     }
 }
 

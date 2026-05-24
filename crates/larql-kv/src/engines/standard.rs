@@ -21,6 +21,7 @@ use larql_inference::kv_dispatch::helpers::{
     kv_decode_step_via_dispatch, kv_decode_step_via_dispatch_async, kv_prefill_via_dispatch,
     kv_prefill_via_dispatch_async,
 };
+use larql_inference::kv_engine::EngineError;
 use larql_inference::model::ModelWeights;
 use larql_inference::{cpu_engine_backend, EngineBackend, KvHandle};
 
@@ -115,7 +116,7 @@ impl StandardEngine {
         ffn: &dyn FfnBackend,
         token_ids: &[u32],
         index: Option<&larql_inference::larql_vindex::VectorIndex>,
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
         let (hidden, handles) = match &self.backend {
             BackendSlot::Sync(b) => kv_prefill_via_dispatch(
                 b.as_ref(),
@@ -124,7 +125,10 @@ impl StandardEngine {
                 token_ids,
                 self.window_size,
                 index,
-            )?,
+            )
+            .ok_or_else(|| EngineError::BackendFailure {
+                details: "kv_prefill_via_dispatch returned None".into(),
+            })?,
             BackendSlot::Async(b) => kv_prefill_via_dispatch_async(
                 b.as_ref(),
                 weights,
@@ -132,11 +136,14 @@ impl StandardEngine {
                 token_ids,
                 self.window_size,
                 index,
-            )?,
+            )
+            .ok_or_else(|| EngineError::BackendFailure {
+                details: "kv_prefill_via_dispatch_async returned None".into(),
+            })?,
         };
         self.handles = Some(handles);
         self.abs_position = token_ids.len();
-        Some(hidden)
+        Ok(hidden)
     }
 
     /// Shared decode-step body — both `decode_step` (index=None) and
@@ -147,8 +154,13 @@ impl StandardEngine {
         ffn: &dyn FfnBackend,
         token_id: u32,
         index: Option<&larql_inference::larql_vindex::VectorIndex>,
-    ) -> Option<Array2<f32>> {
-        let handles = self.handles.as_mut()?;
+    ) -> Result<Array2<f32>, EngineError> {
+        let handles = self
+            .handles
+            .as_mut()
+            .ok_or_else(|| EngineError::InvariantViolation {
+                what: "decode_step called before prefill (handles missing)".into(),
+            })?;
         let hidden = match &self.backend {
             BackendSlot::Sync(b) => kv_decode_step_via_dispatch(
                 b.as_ref(),
@@ -159,7 +171,10 @@ impl StandardEngine {
                 self.abs_position,
                 self.window_size,
                 index,
-            )?,
+            )
+            .ok_or_else(|| EngineError::BackendFailure {
+                details: "kv_decode_step_via_dispatch returned None".into(),
+            })?,
             BackendSlot::Async(b) => kv_decode_step_via_dispatch_async(
                 b.as_ref(),
                 weights,
@@ -169,10 +184,13 @@ impl StandardEngine {
                 self.abs_position,
                 self.window_size,
                 index,
-            )?,
+            )
+            .ok_or_else(|| EngineError::BackendFailure {
+                details: "kv_decode_step_via_dispatch_async returned None".into(),
+            })?,
         };
         self.abs_position += 1;
-        Some(hidden)
+        Ok(hidden)
     }
 }
 
@@ -203,7 +221,10 @@ impl KvEngine for StandardEngine {
         weights: &ModelWeights,
         ffn: &dyn FfnBackend,
         token_ids: &[u32],
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
+        if token_ids.is_empty() {
+            return Err(EngineError::EmptyPrompt);
+        }
         self.do_prefill(weights, ffn, token_ids, None)
     }
 
@@ -212,7 +233,7 @@ impl KvEngine for StandardEngine {
         weights: &ModelWeights,
         ffn: &dyn FfnBackend,
         token_id: u32,
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
         self.do_decode_step(weights, ffn, token_id, None)
     }
 
@@ -223,7 +244,10 @@ impl KvEngine for StandardEngine {
         index: &larql_inference::larql_vindex::VectorIndex,
         token_ids: &[u32],
         _backend: &dyn larql_inference::ComputeBackend,
-    ) -> Option<Array2<f32>> {
+    ) -> Result<Array2<f32>, EngineError> {
+        if token_ids.is_empty() {
+            return Err(EngineError::EmptyPrompt);
+        }
         // Try the backend's coarse (fused) prefill intent first — this
         // is the production-speed Q4K path on CPU (~24 tok/s on Gemma
         // 3 4B vs ~0.4 tok/s through per-layer dispatch). Quant-agnostic:
@@ -237,7 +261,7 @@ impl KvEngine for StandardEngine {
             // wraps the backend's whole-model cache (not per-layer).
             self.handles = Some(vec![handle]);
             self.abs_position = token_ids.len();
-            return Some(hidden);
+            return Ok(hidden);
         }
         // Backend doesn't have a coarse path (e.g. f32 model, or
         // hybrid-MoE / cross-layer-KV models that don't fit the cached
@@ -253,8 +277,13 @@ impl KvEngine for StandardEngine {
         index: &larql_inference::larql_vindex::VectorIndex,
         token_id: u32,
         _backend: &dyn larql_inference::ComputeBackend,
-    ) -> Option<Array2<f32>> {
-        let handles = self.handles.as_mut()?;
+    ) -> Result<Array2<f32>, EngineError> {
+        let handles = self
+            .handles
+            .as_mut()
+            .ok_or_else(|| EngineError::InvariantViolation {
+                what: "decode_step called before prefill (handles missing)".into(),
+            })?;
         // If prefill_quant used the coarse path, `handles` is a one-element
         // vec carrying the backend's whole-model cache. Try the coarse
         // decode step first.
@@ -278,7 +307,7 @@ impl KvEngine for StandardEngine {
             };
             if let Some(h) = coarse {
                 self.abs_position += 1;
-                return Some(h);
+                return Ok(h);
             }
         }
         // Per-layer dispatch fallback.
@@ -401,7 +430,7 @@ mod tests {
         let weights = make_test_weights();
         let ffn = WeightFfn { weights: &weights };
         let mut engine = StandardEngine::new(None);
-        assert!(engine.decode_step(&weights, &ffn, 0).is_none());
+        assert!(engine.decode_step(&weights, &ffn, 0).is_err());
     }
 
     // ── Step 4 parity gate ─────────────────────────────────────────────────
@@ -443,16 +472,8 @@ mod tests {
         max: usize,
         window: Option<usize>,
     ) -> Vec<u32> {
-        let mut engine = StandardEngine::new(window);
-        generate_with_engine(
-            &mut engine as &mut dyn crate::KvEngine,
-            weights,
-            tokenizer,
-            ffn,
-            prompt,
-            max,
-            |_, _| {},
-        )
+        let mut engine = crate::AnyEngine::Kv(Box::new(StandardEngine::new(window)));
+        generate_with_engine(&mut engine, weights, tokenizer, ffn, prompt, max, |_, _| {})
     }
 
     // The five parity tests below assert bit-exact equality between
@@ -536,16 +557,10 @@ mod tests {
         window: Option<usize>,
     ) -> Vec<u32> {
         let backend: Box<dyn AsyncComputeBackend> = Box::new(CpuBackend);
-        let mut engine = StandardEngine::with_async_backend(window, backend);
-        generate_with_engine(
-            &mut engine as &mut dyn crate::KvEngine,
-            weights,
-            tokenizer,
-            ffn,
-            prompt,
-            max,
-            |_, _| {},
-        )
+        let mut engine = crate::AnyEngine::Kv(Box::new(StandardEngine::with_async_backend(
+            window, backend,
+        )));
+        generate_with_engine(&mut engine, weights, tokenizer, ffn, prompt, max, |_, _| {})
     }
 
     #[cfg(not(windows))]
@@ -757,10 +772,10 @@ mod tests {
         let backend = larql_compute::cpu_backend();
         let ffn = NullFfn;
         let mut engine = StandardEngine::new(None);
-        // self.handles is None → decode_step_quant returns None at
-        // `self.handles.as_mut()?`.
+        // self.handles is None → decode_step_quant returns an
+        // InvariantViolation error at the `self.handles.as_mut()` guard.
         assert!(engine
             .decode_step_quant(&mut weights, &ffn, &index, 0, &*backend)
-            .is_none());
+            .is_err());
     }
 }
