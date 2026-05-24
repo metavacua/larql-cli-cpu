@@ -51,7 +51,10 @@ pub use predict::types::{
 // ── Re-exports: preserve all `crate::forward::*` paths ──
 
 pub use embed::embed_tokens_pub;
-pub use hooks::{CompositeHook, LayerHook, NoopHook, RecordHook, SteerHook, ZeroAblateHook};
+pub use hooks::{
+    AttnZeroHook, CompositeHook, FFNZeroHook, LayerHook, NoopHook, RecordHook, SteerHook,
+    ZeroAblateHook,
+};
 pub use infer_patched::{
     apply_knn_override, infer_patched, infer_patched_q4k, walk_trace_from_residuals,
     InferPatchedResult, KnnOverride, KNN_COSINE_THRESHOLD,

@@ -582,8 +582,7 @@ where
                 ScoreResult::Served { predicted, .. } => {
                     let lower = predicted.to_lowercase();
                     let followed = lower.contains(&p.override_answer.to_lowercase());
-                    let fallback =
-                        !followed && lower.contains(&p.parametric_answer.to_lowercase());
+                    let fallback = !followed && lower.contains(&p.parametric_answer.to_lowercase());
                     ConflictScore::served(
                         p.prompt.to_string(),
                         strategy_name.to_string(),

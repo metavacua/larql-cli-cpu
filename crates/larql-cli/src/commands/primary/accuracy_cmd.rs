@@ -22,7 +22,8 @@
 
 use clap::Args;
 use larql_inference::cpu_engine_backend;
-use larql_inference::ffn::WeightFfn;
+use larql_inference::ffn::{FfnBackend, WeightFfn};
+use larql_inference::ffn_policy::{FfnBackendKind, FfnLayerPolicy};
 use larql_inference::InferenceModel;
 use larql_kv::accuracy_suite::conflict::{conflict_20, conflict_quick};
 use larql_kv::accuracy_suite::needle::{needle_tests, NeedleTest};
@@ -75,12 +76,38 @@ pub struct AccuracyArgs {
     /// Verbose: log per-prompt scores as they arrive.
     #[arg(short, long)]
     pub verbose: bool,
+
+    /// FFN dispatch policy. Same spec language as
+    /// [`larql_inference::ffn_policy::FfnLayerPolicy::from_spec`].
+    /// Default (when omitted): uniform `dense` — every layer uses
+    /// `WeightFfn`, byte-identical to pre-flag behaviour.
+    ///
+    /// Examples:
+    ///
+    ///   --ffn dense
+    ///   --ffn walk:k=100
+    ///   --ffn '{walk:k=100}@layers=14-27;{dense}@otherwise'
+    ///
+    /// Specs that include `walk:k=...` require a vindex; the vindex
+    /// is loaded lazily only when the parsed policy contains a Walk
+    /// binding. `dense` / `null` work without a vindex.
+    #[arg(long, value_name = "SPEC")]
+    pub ffn: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
 struct AccuracyReport {
     model: String,
-    engines: Vec<String>,
+    /// KV engines the suite ran (the axis larql-kv handles —
+    /// `standard`, `markov-rs`, `apollo`, etc.). Field name kept
+    /// explicit so downstream consumers can disambiguate from the
+    /// FFN axis.
+    kv_engines: Vec<String>,
+    /// FFN backends the suite ran (the axis larql-inference's
+    /// `ffn_policy` module handles — `dense`, `walk:k=100`, braced
+    /// per-layer specs, etc.). When `--ffn` was omitted this is a
+    /// single-element vec `["dense (default)"]`.
+    ffn_backends: Vec<String>,
     parametric_n: usize,
     needle_n: usize,
     conflict_n: usize,
@@ -92,16 +119,21 @@ struct AccuracyReport {
 pub fn run(args: AccuracyArgs) -> Result<(), Box<dyn std::error::Error>> {
     let model_path = cache::resolve_model(&args.model)?;
 
-    let engine_specs: Vec<String> = EngineKind::split_specs(&args.engines);
-    if engine_specs.is_empty() {
-        return Err("no engines selected: pass --engines standard,markov-rs,...".into());
+    // ── KV engines ────────────────────────────────────────────────────
+    // The --engines flag (kept for CLI backward compat) refers to KV
+    // engines — the axis larql-kv handles. We use the explicit
+    // kv_engine_* naming internally so cross-product code stays
+    // unambiguous about which axis is which.
+    let kv_engine_specs: Vec<String> = EngineKind::split_specs(&args.engines);
+    if kv_engine_specs.is_empty() {
+        return Err("no KV engines selected: pass --engines standard,markov-rs,...".into());
     }
-    let engine_kinds: Vec<(String, EngineKind)> = engine_specs
+    let kv_engine_kinds: Vec<(String, EngineKind)> = kv_engine_specs
         .iter()
         .map(|spec| {
             EngineKind::from_name(spec)
                 .map(|kind| (spec.to_string(), kind))
-                .ok_or_else(|| format!("unknown engine spec: {spec}"))
+                .ok_or_else(|| format!("unknown KV engine spec: {spec}"))
         })
         .collect::<Result<_, _>>()?;
 
@@ -110,13 +142,96 @@ pub fn run(args: AccuracyArgs) -> Result<(), Box<dyn std::error::Error>> {
     let model = InferenceModel::load(&args.model)?;
     let weights = model.weights();
     let tokenizer = model.tokenizer();
-    let ffn = WeightFfn { weights };
     eprintln!(
         "loaded weights in {:.1}s — vocab={}, layers={}, hidden={}",
         load_start.elapsed().as_secs_f64(),
         weights.vocab_size,
         weights.num_layers,
         weights.hidden_size,
+    );
+
+    // ── FFN backends ──────────────────────────────────────────────────
+    // Parse --ffn as a comma-separated list of policy specs. A single
+    // spec works too (just becomes a 1-element list). When omitted,
+    // the list is empty and dispatch falls through to a uniform
+    // `WeightFfn` — byte-identical to pre-flag behaviour for
+    // backward compat with existing accuracy invocations.
+    //
+    // Cross-product: every `kv_engine × ffn_backend` combination
+    // becomes one row in the result table when the FFN list has
+    // multiple entries.
+    let ffn_specs: Vec<String> = match &args.ffn {
+        Some(spec) => {
+            let specs = FfnLayerPolicy::split_specs(spec);
+            if specs.is_empty() {
+                return Err("--ffn: empty spec list".into());
+            }
+            specs
+        }
+        None => Vec::new(),
+    };
+    let validated_policies: Vec<_> = ffn_specs
+        .iter()
+        .map(|spec| {
+            FfnLayerPolicy::from_spec(spec)
+                .map_err(|e| format!("--ffn parse {spec:?}: {e}"))?
+                .validate_for(weights.num_layers)
+                .map_err(|e| format!("--ffn validation {spec:?}: {e}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Vindex loaded lazily — only when *any* validated policy has a
+    // Walk binding. dense/null/remote-walk specs don't need one.
+    let needs_vindex = validated_policies.iter().any(|v| {
+        v.policy()
+            .bindings()
+            .iter()
+            .any(|(_, k)| matches!(k, FfnBackendKind::Walk { .. }))
+    });
+    let vindex = if needs_vindex {
+        let mut cb = larql_vindex::SilentLoadCallbacks;
+        Some(
+            larql_vindex::VectorIndex::load_vindex(&model_path, &mut cb)
+                .map_err(|e| format!("vindex load (required by --ffn walk): {e}"))?,
+        )
+    } else {
+        None
+    };
+    let weight_ffn = WeightFfn { weights };
+    let routers: Vec<_> = validated_policies
+        .iter()
+        .zip(ffn_specs.iter())
+        .map(|(v, spec)| {
+            v.build_router(weights, vindex.as_ref())
+                .map_err(|e| format!("--ffn build {spec:?}: {e}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Build (label, &dyn FfnBackend) dispatch pairs. The default
+    // (--ffn omitted) is one pair: ("dense (default)", &weight_ffn).
+    // Explicit --ffn yields one pair per spec. Strategy tagging in
+    // the loop below uses these labels.
+    let ffn_dispatch: Vec<(String, &dyn FfnBackend)> = if ffn_specs.is_empty() {
+        vec![(
+            "dense (default)".to_string(),
+            &weight_ffn as &dyn FfnBackend,
+        )]
+    } else {
+        ffn_specs
+            .iter()
+            .zip(routers.iter())
+            .map(|(label, r)| (label.clone(), r as &dyn FfnBackend))
+            .collect()
+    };
+
+    eprintln!(
+        "KV engines: {} | FFN backends: {}",
+        kv_engine_specs.join(", "),
+        ffn_dispatch
+            .iter()
+            .map(|(l, _)| l.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
     );
 
     // ── Choose corpora ────────────────────────────────────────────────
@@ -149,140 +264,155 @@ pub fn run(args: AccuracyArgs) -> Result<(), Box<dyn std::error::Error>> {
         conflicts.len(),
     );
 
-    // ── Drive each engine ─────────────────────────────────────────────
+    // ── Drive each kv_engine × ffn_backend combination ───────────────
     let mut all_scores: Vec<PromptScore> = Vec::new();
     let mut all_conflicts: Vec<ConflictScore> = Vec::new();
 
-    for (spec, kind) in &engine_kinds {
-        eprintln!("\n── {spec} ──");
-        let strategy_name = kind.display_name().to_string();
+    // Cross-product flattening: outer loop KV engine, inner loop FFN
+    // backend. Strategy name is just the KV engine when --ffn was
+    // omitted (single default entry, backward-compat), else
+    // `kv_engine@ffn_label` so cross-product rows are distinguishable
+    // in the JSON's strategy column. The dedicated `ffn_backend`
+    // column in PromptScore is a separate (not-yet-shipped) schema
+    // refinement — see ROADMAP "P0 — sibling trait extraction" for
+    // the broader trait-extraction plan that lands typed ffn metadata.
+    let tag_strategy = !ffn_specs.is_empty();
+    for (kv_spec, kv_kind) in &kv_engine_kinds {
+        for (ffn_label, ffn) in &ffn_dispatch {
+            let strategy_name = if tag_strategy {
+                format!("{}@{}", kv_kind.display_name(), ffn_label)
+            } else {
+                kv_kind.display_name().to_string()
+            };
+            eprintln!("\n── KV engine: {kv_spec} | FFN backend: {ffn_label} ──");
+            let ffn: &dyn FfnBackend = *ffn;
 
-        let t0 = Instant::now();
-        let param_scores = evaluate_parametric(
-            || kind.clone().build(cpu_engine_backend()),
-            weights,
-            &ffn,
-            tokenizer,
-            &strategy_name,
-            &parametric_prompts,
-        );
-        let p_match = param_scores
-            .iter()
-            .filter(|s| s.top1_match == Some(true))
-            .count();
-        let p_served = param_scores.iter().filter(|s| s.outcome.is_served()).count();
-        eprintln!(
-            "  parametric: {} in {:.1}s",
-            fmt_served_summary(p_match, p_served, param_scores.len()),
-            t0.elapsed().as_secs_f64(),
-        );
-        if args.verbose {
-            for s in &param_scores {
-                eprintln!(
-                    "    [{}] {} → {} (bits={})",
-                    score_mark(s.outcome, s.top1_match),
-                    truncate(&s.prompt, 60),
-                    fmt_opt_str(s.predicted_top1.as_deref()),
-                    fmt_opt_bits(s.bits_per_token),
-                );
-            }
-        }
-        all_scores.extend(param_scores);
-
-        if !needles.is_empty() {
             let t0 = Instant::now();
-            let needle_scores = evaluate_in_context(
-                || kind.clone().build(cpu_engine_backend()),
+            let param_scores = evaluate_parametric(
+                || kv_kind.clone().build(cpu_engine_backend()),
                 weights,
-                &ffn,
+                ffn,
                 tokenizer,
                 &strategy_name,
-                &needles,
+                &parametric_prompts,
             );
-            let n_match = needle_scores
+            let p_match = param_scores
                 .iter()
                 .filter(|s| s.top1_match == Some(true))
                 .count();
-            let n_served = needle_scores
+            let p_served = param_scores
                 .iter()
                 .filter(|s| s.outcome.is_served())
                 .count();
             eprintln!(
-                "  in-context: {} in {:.1}s",
-                fmt_served_summary(n_match, n_served, needle_scores.len()),
+                "  parametric: {} in {:.1}s",
+                fmt_served_summary(p_match, p_served, param_scores.len()),
                 t0.elapsed().as_secs_f64(),
             );
             if args.verbose {
-                for s in &needle_scores {
+                for s in &param_scores {
                     eprintln!(
                         "    [{}] {} → {} (bits={})",
                         score_mark(s.outcome, s.top1_match),
-                        s.prompt,
+                        truncate(&s.prompt, 60),
                         fmt_opt_str(s.predicted_top1.as_deref()),
                         fmt_opt_bits(s.bits_per_token),
                     );
                 }
             }
-            all_scores.extend(needle_scores);
-        }
+            all_scores.extend(param_scores);
 
-        if !conflicts.is_empty() {
-            let t0 = Instant::now();
-            let conflict_scores = evaluate_conflict(
-                || kind.clone().build(cpu_engine_backend()),
-                weights,
-                &ffn,
-                tokenizer,
-                &strategy_name,
-                &conflicts,
-            );
-            let followed = conflict_scores
-                .iter()
-                .filter(|s| s.followed_context == Some(true))
-                .count();
-            let fallback = conflict_scores
-                .iter()
-                .filter(|s| s.parametric_fallback == Some(true))
-                .count();
-            let served = conflict_scores
-                .iter()
-                .filter(|s| s.outcome.is_served())
-                .count();
-            let other = served - followed - fallback;
-            let skipped = conflict_scores.len() - served;
-            if skipped == 0 {
+            if !needles.is_empty() {
+                let t0 = Instant::now();
+                let needle_scores = evaluate_in_context(
+                    || kv_kind.clone().build(cpu_engine_backend()),
+                    weights,
+                    ffn,
+                    tokenizer,
+                    &strategy_name,
+                    &needles,
+                );
+                let n_match = needle_scores
+                    .iter()
+                    .filter(|s| s.top1_match == Some(true))
+                    .count();
+                let n_served = needle_scores
+                    .iter()
+                    .filter(|s| s.outcome.is_served())
+                    .count();
                 eprintln!(
+                    "  in-context: {} in {:.1}s",
+                    fmt_served_summary(n_match, n_served, needle_scores.len()),
+                    t0.elapsed().as_secs_f64(),
+                );
+                if args.verbose {
+                    for s in &needle_scores {
+                        eprintln!(
+                            "    [{}] {} → {} (bits={})",
+                            score_mark(s.outcome, s.top1_match),
+                            s.prompt,
+                            fmt_opt_str(s.predicted_top1.as_deref()),
+                            fmt_opt_bits(s.bits_per_token),
+                        );
+                    }
+                }
+                all_scores.extend(needle_scores);
+            }
+
+            if !conflicts.is_empty() {
+                let t0 = Instant::now();
+                let conflict_scores = evaluate_conflict(
+                    || kv_kind.clone().build(cpu_engine_backend()),
+                    weights,
+                    ffn,
+                    tokenizer,
+                    &strategy_name,
+                    &conflicts,
+                );
+                let followed = conflict_scores
+                    .iter()
+                    .filter(|s| s.followed_context == Some(true))
+                    .count();
+                let fallback = conflict_scores
+                    .iter()
+                    .filter(|s| s.parametric_fallback == Some(true))
+                    .count();
+                let served = conflict_scores
+                    .iter()
+                    .filter(|s| s.outcome.is_served())
+                    .count();
+                let other = served - followed - fallback;
+                let skipped = conflict_scores.len() - served;
+                if skipped == 0 {
+                    eprintln!(
                     "  conflict: {followed} followed / {fallback} fallback / {other} other in {:.1}s",
                     t0.elapsed().as_secs_f64(),
                 );
-            } else {
-                eprintln!(
+                } else {
+                    eprintln!(
                     "  conflict: {followed} followed / {fallback} fallback / {other} other / {skipped} skipped ({served}/{} served) in {:.1}s",
                     conflict_scores.len(),
                     t0.elapsed().as_secs_f64(),
                 );
-            }
-            if args.verbose {
-                for s in &conflict_scores {
-                    let verdict = match (
-                        s.outcome,
-                        s.followed_context,
-                        s.parametric_fallback,
-                    ) {
-                        (ScoreOutcome::Served, Some(true), _) => "FOLLOW".to_string(),
-                        (ScoreOutcome::Served, _, Some(true)) => "FALLBACK".to_string(),
-                        (ScoreOutcome::Served, _, _) => "OTHER".to_string(),
-                        (other, _, _) => format!("SKIP:{:?}", other),
-                    };
-                    eprintln!(
-                        "    [{verdict}] override={:?} param={:?} got={}",
-                        s.override_answer,
-                        s.parametric_answer,
-                        fmt_opt_str(s.predicted_top1.as_deref()),
-                    );
                 }
+                if args.verbose {
+                    for s in &conflict_scores {
+                        let verdict = match (s.outcome, s.followed_context, s.parametric_fallback) {
+                            (ScoreOutcome::Served, Some(true), _) => "FOLLOW".to_string(),
+                            (ScoreOutcome::Served, _, Some(true)) => "FALLBACK".to_string(),
+                            (ScoreOutcome::Served, _, _) => "OTHER".to_string(),
+                            (other, _, _) => format!("SKIP:{:?}", other),
+                        };
+                        eprintln!(
+                            "    [{verdict}] override={:?} param={:?} got={}",
+                            s.override_answer,
+                            s.parametric_answer,
+                            fmt_opt_str(s.predicted_top1.as_deref()),
+                        );
+                    }
+                }
+                all_conflicts.extend(conflict_scores);
             }
-            all_conflicts.extend(conflict_scores);
         }
     }
 
@@ -293,7 +423,8 @@ pub fn run(args: AccuracyArgs) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(path) = &args.output_file {
         let report = AccuracyReport {
             model: args.model.clone(),
-            engines: engine_specs.iter().map(|s| s.to_string()).collect(),
+            kv_engines: kv_engine_specs.iter().map(|s| s.to_string()).collect(),
+            ffn_backends: ffn_dispatch.iter().map(|(l, _)| l.clone()).collect(),
             parametric_n: parametric_prompts.len(),
             needle_n: needles.len(),
             conflict_n: conflicts.len(),
@@ -414,10 +545,7 @@ mod tests {
         assert_eq!(score_mark(ScoreOutcome::Served, Some(false)), "✗");
         assert_eq!(score_mark(ScoreOutcome::Served, None), "✗");
         assert_eq!(score_mark(ScoreOutcome::SkippedEmptyPrompt, None), "·");
-        assert_eq!(
-            score_mark(ScoreOutcome::SkippedInternalError, None),
-            "·"
-        );
+        assert_eq!(score_mark(ScoreOutcome::SkippedInternalError, None), "·");
     }
 
     #[test]

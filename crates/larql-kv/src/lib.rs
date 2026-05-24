@@ -832,8 +832,9 @@ mod compliance_tests {
         // parser actually accepts. Catches the failure mode where
         // someone adds a variant to one side without the other.
         for name in EngineKind::supported_names() {
-            let kind = EngineKind::from_name(name)
-                .unwrap_or_else(|| panic!("supported_names lists {name:?} but from_name rejected it"));
+            let kind = EngineKind::from_name(name).unwrap_or_else(|| {
+                panic!("supported_names lists {name:?} but from_name rejected it")
+            });
             assert_eq!(
                 kind.display_name(),
                 *name,

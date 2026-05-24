@@ -70,8 +70,15 @@ fn parametric_corpus_runs_through_standard_engine() {
         assert_eq!(s.knowledge_source, KnowledgeSource::Parametric);
         // Standard engine never skips a real prompt — every row must
         // be Served and carry the score fields.
-        assert!(s.outcome.is_served(), "standard engine must serve, got {:?}", s.outcome);
-        let predicted = s.predicted_top1.as_deref().expect("served row has predicted_top1");
+        assert!(
+            s.outcome.is_served(),
+            "standard engine must serve, got {:?}",
+            s.outcome
+        );
+        let predicted = s
+            .predicted_top1
+            .as_deref()
+            .expect("served row has predicted_top1");
         assert!(!predicted.is_empty(), "empty predicted_top1");
         let bits = s.bits_per_token.expect("served row has bits_per_token");
         // Real models on real prompts should produce finite bits.
@@ -143,9 +150,15 @@ fn conflict_corpus_runs_through_standard_engine() {
     );
     assert_eq!(scores.len(), prompts.len());
     for s in &scores {
-        assert!(s.outcome.is_served(), "standard engine must serve, got {:?}", s.outcome);
+        assert!(
+            s.outcome.is_served(),
+            "standard engine must serve, got {:?}",
+            s.outcome
+        );
         let followed = s.followed_context.expect("served row has followed_context");
-        let fallback = s.parametric_fallback.expect("served row has parametric_fallback");
+        let fallback = s
+            .parametric_fallback
+            .expect("served row has parametric_fallback");
         assert!(
             !(followed && fallback),
             "followed and fallback are mutually exclusive by construction"
@@ -153,8 +166,14 @@ fn conflict_corpus_runs_through_standard_engine() {
     }
     eprintln!(
         "conflict scores: follow={} fallback={} other={}",
-        scores.iter().filter(|s| s.followed_context == Some(true)).count(),
-        scores.iter().filter(|s| s.parametric_fallback == Some(true)).count(),
+        scores
+            .iter()
+            .filter(|s| s.followed_context == Some(true))
+            .count(),
+        scores
+            .iter()
+            .filter(|s| s.parametric_fallback == Some(true))
+            .count(),
         scores
             .iter()
             .filter(|s| {
