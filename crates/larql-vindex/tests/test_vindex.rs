@@ -2280,7 +2280,7 @@ fn gguf_key_normalization() {
 
 #[test]
 fn gguf_config_from_metadata() {
-    use larql_models::loading::gguf::{GgufFile, GgufValue};
+    use larql_models::loading::gguf::{GgufFile, GgufValue, ShardInfo};
     let gguf = GgufFile {
         metadata: {
             let mut m = std::collections::HashMap::new();
@@ -2300,6 +2300,10 @@ fn gguf_config_from_metadata() {
         tensor_infos: vec![],
         data_offset: 0,
         path: std::path::PathBuf::new(),
+        shards: vec![ShardInfo {
+            path: std::path::PathBuf::new(),
+            data_offset: 0,
+        }],
     };
     let config = gguf.to_config_json();
     assert_eq!(config["model_type"], "llama");
