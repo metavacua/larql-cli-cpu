@@ -245,10 +245,8 @@ impl<'a> StreamingContext<'a> {
 ///
 /// Returns `Ok(None)` when no GGUF is present — caller falls back to
 /// the safetensors discovery path.
-fn detect_gguf_entry(model_dir: &Path) -> Result<Option<PathBuf>, VindexError> {
-    if model_dir.is_file()
-        && model_dir.extension().is_some_and(|e| e == "gguf")
-    {
+pub(super) fn detect_gguf_entry(model_dir: &Path) -> Result<Option<PathBuf>, VindexError> {
+    if model_dir.is_file() && model_dir.extension().is_some_and(|e| e == "gguf") {
         return Ok(Some(model_dir.to_path_buf()));
     }
     if !model_dir.is_dir() {
@@ -276,7 +274,7 @@ fn detect_gguf_entry(model_dir: &Path) -> Result<Option<PathBuf>, VindexError> {
     let mut largest: Option<(u64, PathBuf)> = None;
     for p in gguf_files {
         let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
-        if largest.as_ref().map_or(true, |(s, _)| size > *s) {
+        if largest.as_ref().is_none_or(|(s, _)| size > *s) {
             largest = Some((size, p));
         }
     }

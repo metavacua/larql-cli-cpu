@@ -92,18 +92,15 @@ impl<'a> StreamingContext<'a> {
                     .packed_gate_up_scales_key(layer)
                     .unwrap_or_default();
 
-                if let (Some(blocks_info), Some(scales_info)) = (
-                    tensor_index.get(&blocks_key),
-                    tensor_index.get(&scales_key),
-                ) {
-                    let blocks_st = safetensors::SafeTensors::deserialize(
-                        &shard_mmaps[blocks_info.0].mmap,
-                    )
-                    .map_err(|e| VindexError::Parse(e.to_string()))?;
-                    let scales_st = safetensors::SafeTensors::deserialize(
-                        &shard_mmaps[scales_info.0].mmap,
-                    )
-                    .map_err(|e| VindexError::Parse(e.to_string()))?;
+                if let (Some(blocks_info), Some(scales_info)) =
+                    (tensor_index.get(&blocks_key), tensor_index.get(&scales_key))
+                {
+                    let blocks_st =
+                        safetensors::SafeTensors::deserialize(&shard_mmaps[blocks_info.0].mmap)
+                            .map_err(|e| VindexError::Parse(e.to_string()))?;
+                    let scales_st =
+                        safetensors::SafeTensors::deserialize(&shard_mmaps[scales_info.0].mmap)
+                            .map_err(|e| VindexError::Parse(e.to_string()))?;
 
                     let blocks_view = blocks_st
                         .tensor(&blocks_info.1)

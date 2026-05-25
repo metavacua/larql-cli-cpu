@@ -243,6 +243,13 @@ pub fn write_model_weights_kquant_with_opts(
     let start = std::time::Instant::now();
 
     let arch = source.arch();
+    if arch.uses_mla() {
+        return Err(VindexError::UnsupportedArchitecture {
+            family: arch.family().to_string(),
+            feature: "multi-head latent attention (MLA)".into(),
+            surface: SURFACE_Q4K_WEIGHT_WRITER.into(),
+        });
+    }
     ensure_standard_attention_supported(arch, SURFACE_Q4K_WEIGHT_WRITER)?;
     let num_layers = source.num_layers();
 

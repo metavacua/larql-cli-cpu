@@ -84,6 +84,7 @@ impl TensorSource {
     /// Borrow the safetensors backing data for raw-pair access (MXFP4
     /// expert gate_up/down). Returns `None` for the GGUF variant — GGUF
     /// has no MXFP4-packed format.
+    #[allow(clippy::type_complexity)]
     pub(super) fn safetensors_view(
         &self,
     ) -> Option<(&[MmapShard], &HashMap<String, (usize, String)>)> {
@@ -113,7 +114,6 @@ impl TensorSource {
             TensorSource::Gguf(_) => None,
         }
     }
-
 }
 
 impl GgufTensorSource {
@@ -222,13 +222,13 @@ impl GgufTensorSource {
         let shard_idx = info.shard_idx();
         let mmap = &self.shard_mmaps[shard_idx];
         let data_offset = self.gguf.shards[shard_idx].data_offset;
-        let abs_offset = data_offset
-            .checked_add(info.offset())
-            .ok_or_else(|| VindexError::Parse(format!(
+        let abs_offset = data_offset.checked_add(info.offset()).ok_or_else(|| {
+            VindexError::Parse(format!(
                 "gguf tensor {}: data_offset {data_offset} + offset {} overflows",
                 info.name(),
                 info.offset(),
-            )))?;
+            ))
+        })?;
 
         let dims = info.dims();
         let n_elements: u64 = dims.iter().product();
@@ -248,12 +248,12 @@ impl GgufTensorSource {
                 info.name(),
             ))
         })?;
-        let end = abs_offset_usize
-            .checked_add(data_size)
-            .ok_or_else(|| VindexError::Parse(format!(
+        let end = abs_offset_usize.checked_add(data_size).ok_or_else(|| {
+            VindexError::Parse(format!(
                 "gguf tensor {}: offset+size overflows",
                 info.name(),
-            )))?;
+            ))
+        })?;
         if end > mmap.len() {
             return Err(VindexError::Parse(format!(
                 "gguf tensor {} out of bounds: end {end} > shard len {}",
@@ -263,8 +263,9 @@ impl GgufTensorSource {
         }
 
         let raw = &mmap[abs_offset_usize..end];
-        let floats = larql_models::quant::ggml::dequantize(raw, info.tensor_type(), n_elements_usize)
-            .map_err(|e| VindexError::Parse(e.to_string()))?;
+        let floats =
+            larql_models::quant::ggml::dequantize(raw, info.tensor_type(), n_elements_usize)
+                .map_err(|e| VindexError::Parse(e.to_string()))?;
 
         // GGUF dim ordering: dims[0] = columns (innermost/fastest),
         // dims[1] = rows (outermost). Raw bytes are contiguous along

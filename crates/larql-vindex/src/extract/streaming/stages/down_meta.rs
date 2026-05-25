@@ -72,10 +72,9 @@ impl<'a> StreamingContext<'a> {
                 };
                 let blocks_key = self.arch.packed_down_blocks_key(layer).unwrap_or_default();
                 let scales_key = self.arch.packed_down_scales_key(layer).unwrap_or_default();
-                if let (Some(bi), Some(si)) = (
-                    tensor_index.get(&blocks_key),
-                    tensor_index.get(&scales_key),
-                ) {
+                if let (Some(bi), Some(si)) =
+                    (tensor_index.get(&blocks_key), tensor_index.get(&scales_key))
+                {
                     let bst = safetensors::SafeTensors::deserialize(&shard_mmaps[bi.0].mmap)
                         .map_err(|e| VindexError::Parse(e.to_string()))?;
                     let sst = safetensors::SafeTensors::deserialize(&shard_mmaps[si.0].mmap)
