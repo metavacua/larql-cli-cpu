@@ -1,9 +1,11 @@
 # Multi-Modal Support in LARQL
 
-> **Status:** Exploratory design note. Nothing here is committed.
-> Written to think against, not to implement from.
+> **Status:** Phase 0+1 shipped (PR #143, 2026-05-24). Phase 2 shipped
+> (PR #144, 2026-05-25). Phases 3–6 remain design-only.
 
-LARQL today is text-in / text-out. This note maps what it would take to
+LARQL supports embed-splice vision input for Gemma 3 (SigLIP, Phase 1)
+and Granite Vision (SigLIP2 + MLP GELU + AnyRes tiling, Phase 2). This
+note maps the original design and what it would take to extend to
 accept vision and audio inputs in a way that survives across model
 families — Gemma 3/4, Llama 3.2 Vision, Qwen2-VL / Qwen2-Audio,
 Granite Vision — without quietly pinning the architecture to whichever
@@ -375,14 +377,14 @@ vindex, layer graph, KV cache shape, lm_head, sampler — all unchanged.
 
 ## Phased rollout
 
-**Phase 0 — trait + plumbing, no encoder code.** Land `Encoder`,
+**Phase 0 — trait + plumbing, no encoder code. SHIPPED (PR #143, 2026-05-24).** Land `Encoder`,
 `Connector`, `MultiModalProtocol`, `EmbeddingPlan`, `PositionScheme::Mrope`
 (behind a stub). Re-route `forward/trace.rs` through `embed_plan(...)`.
 Text-only tests stay green; Shannon gate still passes. *No model
 behavior changes.* This is the load-bearing PR — once it lands, every
 subsequent encoder is additive.
 
-**Phase 1 — Gemma 3 4B + SigLIP, prefix-only.** Smallest interesting
+**Phase 1 — Gemma 3 4B + SigLIP, prefix-only. SHIPPED (PR #143, 2026-05-24).** Smallest interesting
 end-to-end. Load SigLIP from safetensors, project, prepend to text.
 `larql run --image foo.jpg "describe"`. CPU encoder, Metal LM. Validates
 the `Encoder` and `Connector` trait surface against one concrete model
@@ -390,7 +392,7 @@ the `Encoder` and `Connector` trait surface against one concrete model
 PaliGemma-quality captions. Gemma 3 specifically because we already
 have its zone map characterised — see Open Question #11. Time: ~1 week.
 
-**Phase 2 — Granite Vision (SigLIP2 + MLP connector + AnyRes).**
+**Phase 2 — Granite Vision (SigLIP2 + MLP connector + AnyRes). SHIPPED (PR #144, 2026-05-25).**
 *This is the splice stress test, not Phase 3.* Granite's per-tile
 mechanism puts **N splice points per image** (one per AnyRes tile)
 into the input sequence, where Gemma 3's `<start_of_image>` sandwich
