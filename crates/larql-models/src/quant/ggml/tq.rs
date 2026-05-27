@@ -28,8 +28,8 @@
 use crate::ModelError;
 
 use super::{
-    check_block_input, I2_S_BLOCK_BYTES, I2_S_BLOCK_ELEMS, K_QUANT_BLOCK_ELEMS,
-    TQ1_0_BLOCK_BYTES, TQ2_0_BLOCK_BYTES,
+    check_block_input, I2_S_BLOCK_BYTES, I2_S_BLOCK_ELEMS, K_QUANT_BLOCK_ELEMS, TQ1_0_BLOCK_BYTES,
+    TQ2_0_BLOCK_BYTES,
 };
 
 // ── f16 helpers ────────────────────────────────────────────────────────────────
@@ -269,8 +269,8 @@ pub fn dequantize_tq1_0(data: &[u8], n_elements: usize) -> Result<Vec<f32>, Mode
 
         // qh: 16 elements via 4 digits × 4 bytes.
         for &p3 in &TQ1_POW3[..4] {
-            for m in 0..TQ1_QH_BYTES {
-                let q = qh[m].wrapping_mul(p3) as u16;
+            for &byte in &qh[..TQ1_QH_BYTES] {
+                let q = byte.wrapping_mul(p3) as u16;
                 let xi = ((q * 3) >> 8) as i32;
                 out.push((xi - 1) as f32 * d);
             }
@@ -381,17 +381,10 @@ pub fn quantize_tq1_0(values: &[f32]) -> Result<Vec<u8>, ModelError> {
 
 /// Decode I2_S bytes to f32 trits at unit scale.
 pub fn dequantize_i2_s(data: &[u8], n_elements: usize) -> Result<Vec<f32>, ModelError> {
-    let n_blocks = check_block_input(
-        "I2_S",
-        data,
-        n_elements,
-        I2_S_BLOCK_ELEMS,
-        I2_S_BLOCK_BYTES,
-    )?;
+    let n_blocks = check_block_input("I2_S", data, n_elements, I2_S_BLOCK_ELEMS, I2_S_BLOCK_BYTES)?;
 
     let mut out = Vec::with_capacity(n_elements);
-    for block in 0..n_blocks {
-        let b = data[block];
+    for &b in &data[..n_blocks] {
         for slot in 0..4 {
             let bits = (b >> (2 * slot)) & 0b11;
             let v: f32 = match bits {
@@ -555,13 +548,15 @@ mod tests {
         // A 256-element zero block decoded via the public dispatch.
         let bytes = vec![0u8; TQ2_0_BLOCK_BYTES];
         let result =
-            super::super::dequantize(&bytes, super::super::TYPE_TQ2_0, K_QUANT_BLOCK_ELEMS).unwrap();
+            super::super::dequantize(&bytes, super::super::TYPE_TQ2_0, K_QUANT_BLOCK_ELEMS)
+                .unwrap();
         // Stored 0 → -1 with d=0 → still 0.
         assert!(result.iter().all(|&v| v == 0.0));
 
         let bytes = vec![0u8; TQ1_0_BLOCK_BYTES];
         let result =
-            super::super::dequantize(&bytes, super::super::TYPE_TQ1_0, K_QUANT_BLOCK_ELEMS).unwrap();
+            super::super::dequantize(&bytes, super::super::TYPE_TQ1_0, K_QUANT_BLOCK_ELEMS)
+                .unwrap();
         assert!(result.iter().all(|&v| v == 0.0));
     }
 
@@ -624,8 +619,7 @@ mod tests {
     #[test]
     fn i2_s_dispatch_via_dequantize() {
         let bytes = vec![0b01_10_00_01u8];
-        let result =
-            super::super::dequantize(&bytes, super::super::TYPE_I2_S, 4).unwrap();
+        let result = super::super::dequantize(&bytes, super::super::TYPE_I2_S, 4).unwrap();
         assert_eq!(result, vec![1.0, 0.0, -1.0, 1.0]);
     }
 
