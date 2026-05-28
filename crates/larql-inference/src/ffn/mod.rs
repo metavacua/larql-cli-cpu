@@ -28,7 +28,9 @@ pub use larql_compute::ffn::{
 
 // ── Re-exports ──
 
-pub use moe_remote::{MoeRouterWeights, RemoteMoeBackend, RemoteMoeError, ShardConfig};
+pub use moe_remote::{
+    MoeRouterWeights, RemoteMoeBackend, RemoteMoeError, RemoteMoeFfn, ShardConfig,
+};
 pub use remote::{
     LayerShardedBackend, RemoteFfnConfig, RemoteFfnError, RemoteLatencyStats, RemoteWalkBackend,
     WirePreference,

@@ -85,6 +85,35 @@ pub(crate) fn w10_enabled() -> bool {
     }
 }
 
+/// Per-layer FFN dispatch for engine forward loops, MoE-aware.
+///
+/// On a hybrid-MoE arch, when a `moe_ffn` hook is supplied (e.g.
+/// `RemoteMoeFfn` for `--moe-shards`), call its
+/// [`FfnBackend::forward_moe_full_layer`] — it returns the full layer output
+/// (dense `h1` + experts `h2` + combine), dispatching experts to the shards.
+/// Otherwise fall back to the engine's own dense FFN (`dense_ffn`), preserving
+/// prior behaviour for dense models and the no-hook path exactly.
+///
+/// Lets the per-layer / windowed engines (unlimited_context, markov_residual,
+/// turbo_quant, …) ride remote MoE without touching their KV state policy —
+/// only the FFN step changes.
+pub(crate) fn layer_ffn_or_moe(
+    weights: &larql_inference::ModelWeights,
+    h_post_attn: &ndarray::Array2<f32>,
+    layer: usize,
+    dense_ffn: &dyn larql_inference::ffn::FfnBackend,
+    moe_ffn: Option<&dyn larql_inference::ffn::FfnBackend>,
+) -> ndarray::Array2<f32> {
+    if weights.arch.is_hybrid_moe() {
+        if let Some(mf) = moe_ffn {
+            if let Some(h_out) = mf.forward_moe_full_layer(layer, h_post_attn) {
+                return h_out;
+            }
+        }
+    }
+    larql_inference::forward::run_ffn(weights, h_post_attn, layer, dense_ffn, false).0
+}
+
 std::thread_local! {
     /// Per-thread override for [`w10_enabled`]. `Some(true)` simulates
     /// `LARQL_W10_DISABLE=1` (cascade off); `Some(false)` simulates the

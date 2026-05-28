@@ -27,6 +27,29 @@ use crate::ffn::FfnBackend;
 use crate::forward::{embed_tokens_pub, run_ffn};
 use crate::model::ModelWeights;
 
+/// Per-layer FFN dispatch for the KV-cached engine path, MoE-aware.
+///
+/// On hybrid-MoE architectures, try the backend's
+/// [`FfnBackend::forward_moe_full_layer`] hook first — it returns the full
+/// layer output (dense `h1` + experts `h2` + combine + outer-norm). A
+/// remote-MoE backend ([`crate::ffn::RemoteMoeFfn`]) implements it to
+/// dispatch experts to the shards, giving CPU `--moe-shards` a real KV
+/// cache. When the hook declines (`None`) — or the model is dense — fall
+/// back to the standard dense FFN, preserving prior behaviour exactly.
+fn ffn_or_moe_layer(
+    weights: &ModelWeights,
+    h_post_attn: &Array2<f32>,
+    layer: usize,
+    ffn: &dyn FfnBackend,
+) -> Array2<f32> {
+    if weights.arch.is_hybrid_moe() {
+        if let Some(h_out) = ffn.forward_moe_full_layer(layer, h_post_attn) {
+            return h_out;
+        }
+    }
+    run_ffn(weights, h_post_attn, layer, ffn, false).0
+}
+
 /// Prefill the K/V cache through every layer using `backend`'s
 /// [`KvDispatch::attention_prefill`] intent. Returns the last row of
 /// the post-FFN hidden state plus per-layer K/V handles.
@@ -90,8 +113,7 @@ pub fn kv_prefill_from_hidden_via_dispatch(
         }
         handles.push(handle);
 
-        let (h_out, _) = run_ffn(weights, &h_post_attn, layer, ffn, false);
-        h = h_out;
+        h = ffn_or_moe_layer(weights, &h_post_attn, layer, ffn);
     }
 
     Some((last_row_as_2d(&h), handles))
@@ -139,8 +161,7 @@ pub fn kv_decode_step_via_dispatch(
         if let Some(w) = window {
             backend.clip_kv(handle, w);
         }
-        let (h_out, _) = run_ffn(weights, &h_post_attn, layer, ffn, false);
-        h_step = h_out;
+        h_step = ffn_or_moe_layer(weights, &h_post_attn, layer, ffn);
     }
 
     Some(h_step)
@@ -218,8 +239,7 @@ pub fn kv_prefill_from_hidden_via_dispatch_async(
         handles.push(handle);
 
         let h_post_attn = backend.read_hidden(h_post_attn_handle);
-        let (h_out, _) = run_ffn(weights, &h_post_attn, layer, ffn, false);
-        h = h_out;
+        h = ffn_or_moe_layer(weights, &h_post_attn, layer, ffn);
     }
 
     backend.flush().ok()?;
@@ -264,8 +284,7 @@ pub fn kv_decode_step_via_dispatch_async(
             backend.clip_kv(handle, w);
         }
         let h_post_attn = backend.read_hidden(h_post_attn_handle);
-        let (h_out, _) = run_ffn(weights, &h_post_attn, layer, ffn, false);
-        h_step = h_out;
+        h_step = ffn_or_moe_layer(weights, &h_post_attn, layer, ffn);
     }
 
     backend.flush().ok()?;

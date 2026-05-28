@@ -19,7 +19,7 @@ pub use kquant_forward::{
     generate_kquant_cpu_constrained, generate_kquant_cpu_constrained_streaming,
     generate_kquant_cpu_constrained_streaming_sampled, generate_kquant_cpu_remote,
     insert_q4k_layer_tensors, is_end_of_turn, kquant_ffn_forward_layer,
-    kquant_ffn_forward_layer_q8k, predict_kquant, predict_kquant_decode_step,
+    kquant_ffn_forward_layer_q8k, moe_ffn_block_cpu, predict_kquant, predict_kquant_decode_step,
     predict_kquant_decode_step_direct, predict_kquant_decode_step_direct_with_state,
     predict_kquant_hidden, predict_kquant_hidden_hooked, predict_kquant_hidden_with_ffn,
     predict_kquant_hidden_with_mapped_head_residual_delta,

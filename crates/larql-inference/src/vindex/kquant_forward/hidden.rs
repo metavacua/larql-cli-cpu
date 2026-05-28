@@ -125,11 +125,6 @@ fn run_moe_layer_cpu(
     shared_kv: Option<&SharedKV>,
     moe_remote: Option<&crate::ffn::RemoteMoeBackend>,
 ) -> Option<(Array2<f32>, Option<SharedKV>)> {
-    let arch = &*weights.arch;
-    let norm_offset = arch.norm_weight_offset();
-    let eps = arch.norm_eps();
-    let hidden = h.ncols();
-
     let (h_post_attn, kv_out) = if let Some(shared) = shared_kv {
         let (h_pa, _, _) =
             crate::attention::run_attention_block_shared(weights, h, layer, false, Some(shared))?;
@@ -140,6 +135,38 @@ fn run_moe_layer_cpu(
         (h_pa, Some((k_rope, v_final)))
     };
 
+    let h_out = moe_ffn_block_cpu(weights, &h_post_attn, layer, ffn, ple_input, moe_remote);
+    Some((h_out, kv_out))
+}
+
+/// CPU MoE FFN block for one hybrid-MoE layer, given the **post-attention**
+/// hidden state. Computes the dense FFN contribution (`h1`), the expert
+/// contribution (`h2` — remote via `moe_remote` when set, else local
+/// `cpu_moe_forward`), combines + outer-norms, and applies PLE +
+/// layer-scalar. Returns the full layer output (the new residual).
+///
+/// Factored out of [`run_moe_layer_cpu`] so the KvEngine layer can drive it
+/// via `RemoteMoeFfn::forward_moe_full_layer` (CPU remote-MoE with a real KV
+/// cache); the attention half stays with the engine. The body is an exact
+/// move from `run_moe_layer_cpu` — keep it byte-equivalent for parity.
+///
+/// `ple_input` is `None` on the engine path (callers must guard out
+/// PLE-using architectures — see the larql-kv "MoE-aware KV engines"
+/// roadmap item); the full-recompute path passes the precomputed per-layer
+/// input so PLE models stay correct there.
+pub fn moe_ffn_block_cpu(
+    weights: &ModelWeights,
+    h_post_attn: &Array2<f32>,
+    layer: usize,
+    ffn: &dyn crate::ffn::FfnBackend,
+    ple_input: Option<&Array2<f32>>,
+    moe_remote: Option<&crate::ffn::RemoteMoeBackend>,
+) -> Array2<f32> {
+    let arch = &*weights.arch;
+    let norm_offset = arch.norm_weight_offset();
+    let eps = arch.norm_eps();
+    let hidden = h_post_attn.ncols();
+
     if let Some(dir) = crate::forward::dump_config::DumpConfig::get().layer_dir() {
         let slice = h_post_attn.as_slice().unwrap_or(&[]);
         let bytes: Vec<u8> = slice.iter().flat_map(|v| v.to_le_bytes()).collect();
@@ -147,17 +174,22 @@ fn run_moe_layer_cpu(
         let _ = std::fs::write(&path, &bytes);
     }
 
-    let (h_post_ffn_dense, _) = crate::forward::run_ffn(weights, &h_post_attn, layer, ffn, false);
-    let h1 = &h_post_ffn_dense - &h_post_attn;
+    let _t_dense = std::time::Instant::now();
+    let (h_post_ffn_dense, _) = crate::forward::run_ffn(weights, h_post_attn, layer, ffn, false);
+    crate::decode_stages::record_dense(_t_dense.elapsed().as_nanos());
+    let h1 = &h_post_ffn_dense - h_post_attn;
 
     let seq_len = h_post_attn.nrows();
     let mut h2 = Array2::<f32>::zeros((seq_len, hidden));
 
     if let Some(remote) = moe_remote {
         if let Some(router) = build_moe_router_weights(weights, arch, layer) {
-            match remote.forward_moe_seq(layer, &h_post_attn, &router, norm_offset, eps) {
+            let _t_expert = std::time::Instant::now();
+            let out = remote.forward_moe_seq(layer, h_post_attn, &router, norm_offset, eps);
+            crate::decode_stages::record_expert(_t_expert.elapsed().as_nanos());
+            match out {
                 Ok(out) => h2 = out,
-                Err(e) => eprintln!("[run_moe_layer_cpu] remote dispatch error L{layer}: {e}"),
+                Err(e) => eprintln!("[moe_ffn_block_cpu] remote dispatch error L{layer}: {e}"),
             }
         }
     } else {
@@ -173,12 +205,11 @@ fn run_moe_layer_cpu(
                 }
             }
         } else {
-            let mut out = h_post_ffn_dense;
+            let out = h_post_ffn_dense;
             let mut h_ple =
                 crate::forward::ple::apply_per_layer_embedding(weights, &out, layer, ple_input);
             crate::forward::layer::apply_layer_scalar(weights, &mut h_ple, layer);
-            out = h_ple;
-            return Some((out, kv_out));
+            return h_ple;
         }
     }
 
@@ -237,7 +268,7 @@ fn run_moe_layer_cpu(
         }
     }
 
-    Some((h_out, kv_out))
+    h_out
 }
 
 #[cfg(test)]

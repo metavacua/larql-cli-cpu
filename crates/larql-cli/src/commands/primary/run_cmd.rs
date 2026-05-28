@@ -335,6 +335,7 @@ pub fn run(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
             &args.moe_dispatch,
             args.moe_predispatch_iters,
             args.metal,
+            args.engine.as_deref(),
         );
     }
 
@@ -465,7 +466,40 @@ fn run_with_moe_shards(
     dispatch: &str,
     predispatch_iters: usize,
     metal: bool,
+    engine_spec: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Remote MoE needs an engine that dispatches FFN per-layer through the
+    // `ffn` trait (where `RemoteMoeFfn` hooks the experts): `standard` and
+    // `boundary_kv` (which wraps a StandardEngine and adds compressed-residual
+    // boundary frames — same dispatch, wire-efficient cold-context). The
+    // compression engines (markov_residual / turbo_quant / unlimited_context /
+    // boundary_per_layer) route FFN through the backend's fused coarse path, and
+    // apollo/no_cache re-forward — none have a remote-expert hook, so they'd
+    // silently drop experts. Reject them clearly.
+    if let Some(spec) = engine_spec {
+        let kind = larql_kv::EngineKind::from_name(spec)
+            .ok_or_else(|| format!("unknown --engine `{spec}`"))?;
+        if !matches!(
+            kind,
+            larql_kv::EngineKind::Standard { .. }
+                | larql_kv::EngineKind::BoundaryKv { .. }
+                | larql_kv::EngineKind::UnlimitedContext { .. }
+                | larql_kv::EngineKind::MarkovResidual { .. }
+                | larql_kv::EngineKind::MarkovResidualCodec { .. }
+                | larql_kv::EngineKind::TurboQuant { .. }
+                | larql_kv::EngineKind::BoundaryPerLayer { .. }
+        ) {
+            return Err(format!(
+                "`--engine {}` is not supported with remote MoE (--moe-shards). Supported: \
+                 standard, boundary, unlimited-context, markov-rs, markov-residual-codec, \
+                 turbo-quant, boundary-per-layer (they dispatch FFN per-layer through the ffn \
+                 trait where experts hook in). `no-cache` / `apollo` re-forward and would \
+                 multiply expert round-trips. See larql-kv ROADMAP §\"MoE-aware KV engines (C1)\".",
+                kind.display_name()
+            )
+            .into());
+        }
+    }
     use larql_inference::ffn::moe_remote::{parse_unit_manifest, RemoteMoeBackend, ShardConfig};
     use larql_inference::{
         generate_kquant_cpu_remote, generate_with_remote_moe, generate_with_remote_moe_batch,
@@ -618,26 +652,102 @@ fn run_with_moe_shards(
                 "  note: --moe-dispatch batch is GPU-only; using sequential CPU expert dispatch"
             );
         }
-        let started = std::time::Instant::now();
-        let toks = generate_kquant_cpu_remote(
-            &mut weights,
-            &tokenizer,
-            &prompt_ids,
-            max_tokens,
-            &index,
-            &remote,
-        );
-        let total_ms = started.elapsed().as_secs_f64() * 1000.0;
-        let strings: Vec<String> = toks.into_iter().map(|(s, _)| s).collect();
-        // The CPU remote path has no per-token timer yet; report the run
-        // average across the produced tokens so the tok/s banner stays sane.
-        let per = if strings.is_empty() {
-            0.0
+        // CPU remote-MoE. Default: the KV-cached engine path — dequantize the
+        // client weights (attn + dense FFN; experts stay remote) to f32 once,
+        // then drive a StandardEngine with `RemoteMoeFfn` so attention is
+        // KV-cached and only MoE experts round-trip to the shards. ~10× faster
+        // than full-recompute and byte-identical output (verified on
+        // Gemma-4-26B-A4B, 2 shards).
+        //
+        // Falls back to the standalone full-recompute path (closes #146) for
+        // Per-Layer-Embedding archs (the engine path doesn't apply PLE) or when
+        // `LARQL_MOE_FULL_RECOMPUTE=1` is set as an escape hatch.
+        let uses_ple = weights.arch.per_layer_input_gate_key(0).is_some();
+        let force_recompute = std::env::var("LARQL_MOE_FULL_RECOMPUTE").is_ok();
+        if uses_ple || force_recompute {
+            if uses_ple {
+                eprintln!(
+                    "  note: model uses Per-Layer Embeddings — full-recompute CPU path (no KV cache)"
+                );
+            }
+            let started = std::time::Instant::now();
+            let toks = generate_kquant_cpu_remote(
+                &mut weights,
+                &tokenizer,
+                &prompt_ids,
+                max_tokens,
+                &index,
+                &remote,
+            );
+            let total_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let strings: Vec<String> = toks.into_iter().map(|(s, _)| s).collect();
+            let n = strings.len();
+            let per = if n == 0 { 0.0 } else { total_ms / n as f64 };
+            (strings, vec![per; n])
         } else {
-            total_ms / strings.len() as f64
-        };
-        let decode_ms = vec![per; strings.len()];
-        (strings, decode_ms)
+            // Dequantize attn + dense FFN to f32 for every layer, kept resident
+            // for the whole generation (experts are not loaded on the client).
+            for layer in 0..weights.num_layers {
+                larql_inference::vindex::insert_q4k_layer_tensors(&mut weights, &index, layer)
+                    .map_err(|e| format!("failed to dequantize layer {layer} to f32: {e}"))?;
+            }
+            let moe_ffn = larql_inference::ffn::RemoteMoeFfn {
+                weights: &weights,
+                remote: &remote,
+            };
+            // Build the chosen MoE-capable engine (validated above): `standard`
+            // or `boundary_kv`. Drive through `generate_with_engine` (not
+            // `generate_cached`): it routes prefill/decode through
+            // `engine.prefill/decode_step` → the MoE-aware `kv_*_via_dispatch`
+            // path. `generate_cached` uses the legacy `kv_prefill_run` path,
+            // which has no MoE hook (experts never dispatched).
+            let kind = engine_spec
+                .and_then(larql_kv::EngineKind::from_name)
+                .unwrap_or(larql_kv::EngineKind::Standard { window_size: None });
+            eprintln!("  Engine:     {} (CPU, KV-cached)", kind.display_name());
+            let mut engine = kind.build(larql_inference::cpu_engine_backend());
+            let mut strings: Vec<String> = Vec::new();
+            // Capture a timestamp per emitted token so the banner reports TRUE
+            // steady-state decode (inter-token intervals), not total/n which
+            // conflates model-load + prefill into the per-token number.
+            let mut tok_times: Vec<std::time::Instant> = Vec::new();
+            let started = std::time::Instant::now();
+            let _ids = larql_kv::generation::generate_with_engine(
+                &mut engine,
+                &weights,
+                &tokenizer,
+                &moe_ffn,
+                &prompt_ids,
+                max_tokens,
+                |_id, tok| {
+                    strings.push(tok.to_string());
+                    tok_times.push(std::time::Instant::now());
+                },
+            );
+            // Time-to-first-token (prefill) is the gap start→first emit; decode
+            // is the gap between consecutive emits.
+            if let Some(first) = tok_times.first() {
+                eprintln!(
+                    "  prefill (TTFT):  {:.0} ms",
+                    first.duration_since(started).as_secs_f64() * 1000.0
+                );
+            }
+            let decode_ms: Vec<f64> = tok_times
+                .windows(2)
+                .map(|w| w[1].duration_since(w[0]).as_secs_f64() * 1000.0)
+                .collect();
+            if larql_inference::decode_stages::is_enabled() {
+                let (dense_ms, expert_ms) = larql_inference::decode_stages::snapshot_ms();
+                // Accumulated over prefill + decode (every moe_ffn_block_cpu call).
+                // The dense:expert ratio = client local-compute vs server expert
+                // dispatch; "everything else" (attention, router, lm_head) is the
+                // remainder of wall-time.
+                eprintln!(
+                    "  [stages] client dense FFN: {dense_ms:.0} ms | remote experts: {expert_ms:.0} ms"
+                );
+            }
+            (strings, decode_ms)
+        }
     };
 
     for tok in &tokens {
