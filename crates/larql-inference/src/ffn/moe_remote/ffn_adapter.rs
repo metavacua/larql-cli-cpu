@@ -20,10 +20,15 @@ use crate::vindex::moe_ffn_block_cpu;
 
 /// `FfnBackend` for CPU remote-MoE decode through a `KvEngine`.
 ///
-/// `weights` must already hold the dense FFN tensors as **f32** — the
-/// caller pre-dequantizes the client's Q4K FFN before constructing this,
-/// because the dense `h1` contribution runs through [`WeightFfn`], which
-/// reads `weights.tensors`.
+/// The dense `h1` contribution runs through [`WeightFfn`] (f32 dense FFN over
+/// `weights.tensors` — the caller pre-dequantizes the client's Q4K FFN), and
+/// the expert `h2` contribution dispatches to the remote shards via
+/// `forward_moe_seq`.
+///
+/// (A `WalkFfn`-based Q4K-direct `h1` was tried 2026-05-29 and reverted: its
+/// dense mode runs the per-position sparse-walk machinery → ~8.5× slower than
+/// f32 BLAS. The genuine Q4K-direct dense kernel is
+/// `kquant_ffn_forward_layer_q8k`; see the bottleneck-diagnosis follow-up.)
 ///
 /// PLE is **not** applied on this path (`moe_ffn_block_cpu` is called with
 /// `ple_input = None`), so callers must route Per-Layer-Embedding
@@ -36,9 +41,6 @@ pub struct RemoteMoeFfn<'a> {
 
 impl<'a> FfnBackend for RemoteMoeFfn<'a> {
     fn forward(&self, layer: usize, x: &Array2<f32>) -> Array2<f32> {
-        // Dense-FFN fallback for any non-MoE layer. Pure hybrid-MoE models
-        // route every layer through `forward_moe_full_layer`; this keeps the
-        // trait contract total for mixed stacks.
         WeightFfn {
             weights: self.weights,
         }
@@ -71,5 +73,51 @@ impl<'a> FfnBackend for RemoteMoeFfn<'a> {
             None,
             Some(self.remote),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::make_test_gemma4_moe_weights;
+    use ndarray::Array2;
+
+    /// `forward_moe_full_layer` runs the MoE FFN block: dense `h1` + experts
+    /// via the (disconnected → zero) remote + combine. Asserts a full, finite
+    /// layer output of the right shape.
+    #[test]
+    fn forward_moe_full_layer_returns_finite_combined_output() {
+        let weights = make_test_gemma4_moe_weights();
+        let remote = RemoteMoeBackend::new_disconnected();
+        let ffn = RemoteMoeFfn {
+            weights: &weights,
+            remote: &remote,
+        };
+        let h_post_attn = Array2::<f32>::from_elem((2, weights.hidden_size), 0.1);
+        let out = ffn
+            .forward_moe_full_layer(0, &h_post_attn)
+            .expect("RemoteMoeFfn always returns Some");
+        assert_eq!(out.shape(), &[2, weights.hidden_size]);
+        assert!(out.iter().all(|v| v.is_finite()));
+    }
+
+    /// `forward` / `forward_with_activation` run the dense FFN fallback;
+    /// `name` is stable.
+    #[test]
+    fn dense_fallbacks_and_name() {
+        let weights = make_test_gemma4_moe_weights();
+        let remote = RemoteMoeBackend::new_disconnected();
+        let ffn = RemoteMoeFfn {
+            weights: &weights,
+            remote: &remote,
+        };
+        assert_eq!(ffn.name(), "remote-moe");
+        let x = Array2::<f32>::from_elem((2, weights.hidden_size), 0.1);
+        let dense = ffn.forward(0, &x);
+        assert_eq!(dense.shape()[0], 2);
+        assert!(dense.iter().all(|v| v.is_finite()));
+        let (out, act) = ffn.forward_with_activation(0, &x);
+        assert_eq!(out.shape()[0], 2);
+        assert_eq!(act.shape()[0], 2);
     }
 }

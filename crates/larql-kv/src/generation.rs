@@ -283,6 +283,72 @@ where
     generated
 }
 
+/// Like [`generate_with_engine`] but drives the engine's **resident-weights
+/// quant** path (`prefill_resident` / `decode_step_resident`), threading the
+/// `index` so a backend with a Q4K-direct attention kernel
+/// (`LARQL_Q4K_DIRECT_ATTN`) reads packed bytes instead of `weights.tensors`.
+///
+/// Takes `&ModelWeights` (immutable) — the caller must have already made the
+/// client weights f32-resident (so no lazy dequant / `&mut` is needed), which
+/// lets `ffn` borrow the same `&weights` concurrently (the moe-shards path's
+/// `RemoteMoeFfn`). With `LARQL_Q4K_DIRECT_ATTN` unset, the backend ignores the
+/// index and runs the f32 path — output is identical to [`generate_with_engine`].
+#[allow(clippy::too_many_arguments)]
+pub fn generate_with_engine_resident<F>(
+    engine: &mut crate::AnyEngine,
+    weights: &ModelWeights,
+    tokenizer: &larql_inference::tokenizers::Tokenizer,
+    ffn: &dyn FfnBackend,
+    index: &larql_inference::larql_vindex::VectorIndex,
+    prompt_ids: &[u32],
+    max_new_tokens: usize,
+    mut on_token: F,
+) -> Vec<u32>
+where
+    F: FnMut(u32, &str),
+{
+    if max_new_tokens == 0 || prompt_ids.is_empty() {
+        return Vec::new();
+    }
+
+    let last_hidden = match engine.prefill_resident(weights, ffn, index, prompt_ids) {
+        Ok(h) => h,
+        Err(_) => return Vec::new(),
+    };
+
+    let first = match argmax_next_token(weights, tokenizer, &last_hidden) {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+    on_token(first.0, &first.1);
+
+    let mut generated = Vec::with_capacity(max_new_tokens);
+    generated.push(first.0);
+    if is_stop_token_str(&first.1) || max_new_tokens == 1 {
+        return generated;
+    }
+
+    let mut current_id = first.0;
+    for _step in 1..max_new_tokens {
+        let h_step = match engine.decode_step_resident(weights, ffn, index, current_id) {
+            Ok(h) => h,
+            Err(_) => break,
+        };
+        let (id, tok_str) = match argmax_next_token(weights, tokenizer, &h_step) {
+            Some(t) => t,
+            None => break,
+        };
+        on_token(id, &tok_str);
+        generated.push(id);
+        if is_stop_token_str(&tok_str) {
+            break;
+        }
+        current_id = id;
+    }
+
+    generated
+}
+
 /// Multi-modal-capable peer of [`generate_with_engine`]. Same shape;
 /// the only difference is the prefill input: pre-built initial hidden
 /// state (e.g. from `larql_compute::forward::embed_plan` on an
@@ -556,7 +622,11 @@ fn argmax_next_token(
     tokenizer: &larql_inference::tokenizers::Tokenizer,
     h_single: &Array2<f32>,
 ) -> Option<(u32, String)> {
+    // lm_head (vocab projection) dominates this call — time it for the
+    // decode-stage split (`LARQL_DECODE_STAGES=1`).
+    let _t_lmhead = std::time::Instant::now();
     let result = logits_to_predictions_pub(weights, h_single, tokenizer, 1, 1.0);
+    larql_inference::decode_stages::record_lmhead(_t_lmhead.elapsed().as_nanos());
     let id = *result.token_ids.first()?;
     let (decoded, _) = result.predictions.first()?.clone();
     Some((id, decoded))

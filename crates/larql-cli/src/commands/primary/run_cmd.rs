@@ -712,11 +712,17 @@ fn run_with_moe_shards(
             // conflates model-load + prefill into the per-token number.
             let mut tok_times: Vec<std::time::Instant> = Vec::new();
             let started = std::time::Instant::now();
-            let _ids = larql_kv::generation::generate_with_engine(
+            // Resident-weights quant path: weights were dequantised f32-resident
+            // above, so this threads the `index` to the backend (no `&mut`, so
+            // `moe_ffn` can borrow `&weights` concurrently) — letting the
+            // Q4K-direct attention kernel fire under `LARQL_Q4K_DIRECT_ATTN`.
+            // With the flag unset the backend ignores the index → identical f32.
+            let _ids = larql_kv::generation::generate_with_engine_resident(
                 &mut engine,
                 &weights,
                 &tokenizer,
                 &moe_ffn,
+                &index,
                 &prompt_ids,
                 max_tokens,
                 |_id, tok| {
@@ -737,13 +743,14 @@ fn run_with_moe_shards(
                 .map(|w| w[1].duration_since(w[0]).as_secs_f64() * 1000.0)
                 .collect();
             if larql_inference::decode_stages::is_enabled() {
-                let (dense_ms, expert_ms) = larql_inference::decode_stages::snapshot_ms();
-                // Accumulated over prefill + decode (every moe_ffn_block_cpu call).
-                // The dense:expert ratio = client local-compute vs server expert
-                // dispatch; "everything else" (attention, router, lm_head) is the
-                // remainder of wall-time.
+                let (attn_ms, dense_ms, expert_ms, lmhead_ms) =
+                    larql_inference::decode_stages::snapshot_ms();
+                // Accumulated over prefill + decode. attn/dense/lm_head are
+                // client-side; experts are server-side. "Everything else"
+                // (router, combine, embed) is the remainder of wall-time.
                 eprintln!(
-                    "  [stages] client dense FFN: {dense_ms:.0} ms | remote experts: {expert_ms:.0} ms"
+                    "  [stages] attn: {attn_ms:.0} ms | dense FFN: {dense_ms:.0} ms | \
+                     lm_head: {lmhead_ms:.0} ms | remote experts: {expert_ms:.0} ms"
                 );
             }
             (strings, decode_ms)

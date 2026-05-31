@@ -94,7 +94,9 @@ pub(super) fn reset_and_preallocate_grid_kv(weights: &ModelWeights, backend: &dy
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{make_test_q4k_vindex, make_test_q4k_vindex_attn_only, make_test_q4k_weights};
+    use crate::test_utils::{
+        make_test_q4k_vindex, make_test_q4k_vindex_attn_only, make_test_q4k_weights,
+    };
     use larql_compute::CpuBackend;
 
     #[test]

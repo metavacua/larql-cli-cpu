@@ -128,3 +128,76 @@ std::thread_local! {
 pub(crate) fn set_w10_disabled_override(disabled: Option<bool>) {
     W10_DISABLED_OVERRIDE.with(|o| *o.borrow_mut() = disabled);
 }
+
+#[cfg(test)]
+mod layer_ffn_or_moe_tests {
+    use super::layer_ffn_or_moe;
+    use larql_inference::ffn::FfnBackend;
+    use larql_inference::test_utils::make_test_gemma4_moe_weights;
+    use ndarray::Array2;
+
+    /// FfnBackend whose MoE hook returns a sentinel (all 7.0) so we can tell
+    /// the MoE branch from the dense `run_ffn` fallback.
+    struct SentinelFfn;
+    impl FfnBackend for SentinelFfn {
+        fn forward(&self, _layer: usize, x: &Array2<f32>) -> Array2<f32> {
+            Array2::zeros(x.raw_dim())
+        }
+        fn forward_with_activation(
+            &self,
+            _layer: usize,
+            x: &Array2<f32>,
+        ) -> (Array2<f32>, Array2<f32>) {
+            (Array2::zeros(x.raw_dim()), Array2::zeros((x.nrows(), 1)))
+        }
+        fn name(&self) -> &str {
+            "sentinel"
+        }
+        fn forward_moe_full_layer(
+            &self,
+            _layer: usize,
+            h_post_attn: &Array2<f32>,
+        ) -> Option<Array2<f32>> {
+            Some(Array2::from_elem(h_post_attn.raw_dim(), 7.0))
+        }
+    }
+
+    #[test]
+    fn uses_moe_hook_on_hybrid_moe_arch() {
+        let weights = make_test_gemma4_moe_weights();
+        assert!(weights.arch.is_hybrid_moe());
+        let h = Array2::<f32>::zeros((2, weights.hidden_size));
+        let out = layer_ffn_or_moe(&weights, &h, 0, &SentinelFfn, Some(&SentinelFfn));
+        // Took the MoE hook → sentinel output, not the dense run_ffn path.
+        assert!(
+            out.iter().all(|&v| v == 7.0),
+            "expected MoE-hook sentinel output"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_dense_when_no_hook() {
+        let weights = make_test_gemma4_moe_weights();
+        let h = Array2::<f32>::zeros((2, weights.hidden_size));
+        // No moe_ffn → dense run_ffn even on a MoE arch (no experts dispatched).
+        let out = layer_ffn_or_moe(&weights, &h, 0, &SentinelFfn, None);
+        assert_eq!(out.shape(), &[2, weights.hidden_size]);
+        assert!(
+            out.iter().any(|&v| v != 7.0),
+            "must NOT be the MoE-hook sentinel"
+        );
+        assert!(out.iter().all(|v| v.is_finite()));
+    }
+
+    #[test]
+    fn sentinel_ffn_trait_surface() {
+        // Exercise the FfnBackend methods `layer_ffn_or_moe` doesn't call.
+        let s = SentinelFfn;
+        let x = Array2::<f32>::zeros((2, 4));
+        assert_eq!(s.name(), "sentinel");
+        assert_eq!(s.forward(0, &x).shape(), &[2, 4]);
+        let (o, a) = s.forward_with_activation(0, &x);
+        assert_eq!(o.shape(), &[2, 4]);
+        assert_eq!(a.shape(), &[2, 1]);
+    }
+}

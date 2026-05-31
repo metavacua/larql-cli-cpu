@@ -62,27 +62,46 @@ whether the path is network- or compute-bound.
 
 ## Decode-stage split (measured 2026-05-29, `LARQL_DECODE_STAGES=1`)
 
-`moe_ffn_block_cpu` timers, accumulated over prefill + 12 decode tokens on the
-26B (standard engine, 2 shards, localhost):
+Per-stage timers (`decode_stages`), accumulated over prefill + 12 decode tokens
+on the 26B (standard engine, 2 shards, localhost). Full 4-way client/server split:
 
-| Stage | Time | Share of wall |
-|---|---:|---:|
-| client dense FFN (`h1`, f32 `run_ffn`) | 326 ms | ~13% |
-| **remote experts** (`forward_moe_seq`: server dequant+matmul + wire) | **973 ms** | **~40%** |
-| everything else (attention + lm_head + combine + norms) — by subtraction | ~1130 ms | ~47% |
-| (total wall in region: TTFT 1039 + decode ~1390) | ~2429 ms | |
+| Stage | Time | Share | Side |
+|---|---:|---:|---|
+| **remote experts** (`forward_moe_seq`: server dequant+matmul + wire) | **1539 ms** | **~41%** | server |
+| **attention** (`backend.attention_*`, f32 BLAS) | **1051 ms** | **~28%** | client f32 |
+| client dense FFN (`h1`, f32 `run_ffn` via `WeightFfn`) | 471 ms | ~13% | client f32 |
+| lm_head (`logits_to_predictions_pub`, f32 vocab proj) | 446 ms | ~12% | client f32 |
+| everything else (router, combine, embed, norms) — by subtraction | ~190 ms | ~5% | client |
 
 Reading it:
-- **`experts : dense ≈ 3 : 1`.** The single biggest *explicit* cost is the
-  **server-side expert compute** (Q4K dequant + top-8 matmul, parallel across 2
-  shards; localhost wire is negligible) — bandwidth-bound on the shard machines.
-- **~60% of decode is client-side f32 compute** (dense FFN 13% + most of the 47%
-  "else" = attention + lm_head, all on the dequant-to-f32 BLAS path). This is the
-  **recoverable engineering slack** — the workspace already has NEON Q4K-direct
-  matvec kernels that the remote-MoE engine path doesn't use.
+- **~53% of decode is recoverable client-side f32 compute** (attention 28 + dense
+  13 + lm_head 12), all on the dequant-to-f32 BLAS path. **Attention is the #1
+  target**, not dense FFN.
+- **~41% is server-side expert compute** (Q4K dequant + top-8 matmul, parallel
+  across 2 shards; localhost wire negligible) — bandwidth-bound on the shards.
+- Ready Q4K-direct kernels for the client stages: **`q4_attention_proj`**
+  (`attention/gpu.rs`, Q4K Q/K/V/O via `q4_matvec`, CPU-tested) for attention;
+  **`WalkFfn`** (Q4K-direct dense FFN from the index) for `h1`; lm_head needs a
+  Q4K vocab-projection path (TBD). Reclaiming all three would also remove the
+  ~6.8 s up-front dequant-to-f32 load tax (nothing left to dequantize).
 - So the path to faster decode is **both**: (a) Q4K-direct client kernels
-  (attention + dense FFN + lm_head) to reclaim the ~60% f32 tax, and (b) reduce
-  the server expert cost (more shards / FP4 / hash-routing) for the ~40%.
+  (attention → dense → lm_head, ranked by win) to reclaim the ~53% f32 tax, and
+  (b) reduce the server expert cost (more shards / FP4 / hash-routing) for the ~41%.
+
+**Implementation sequence for item 5b (ranked by client win):**
+1. **Attention (28%)** — Q4K-direct path reading attn bytes from the index via
+   `q4_attention_proj`, replacing the f32 `run_attention_with_kv_backend`. Biggest
+   win + (with the others) kills the dequant-all load tax. Parity-critical rework
+   of the attention path → verify byte-parity on the 26B before flipping.
+2. **dense FFN (13%)** — ⚠️ **`WalkFfn` is the wrong kernel** (tried 2026-05-29,
+   reverted): its `forward` always routes through `walk_ffn_sparse` (per-position
+   gate-KNN walk), so even "dense" config ran **~8.5× slower** than f32 BLAS
+   (dense FFN 331 → 3986 ms, decode 7.4 → 2.0 tok/s). The genuine Q4K-direct dense
+   kernel is **`kquant_ffn_forward_layer_q8k`** (NEON Q4K×Q8K, no dequant) — needs
+   a thin `FfnBackend` wrapper. **Low ROI though:** f32 BLAS dense FFN is already
+   competitive and it's only ~13%; deprioritized below attention.
+3. **lm_head (12%)** — Q4K vocab projection from the loaded lm_head Q4K bytes
+   (per-token cost, so pure decode win).
 
 ## 80 tok/s gap (12.5 ms/token vs ~127 ms/token today)
 

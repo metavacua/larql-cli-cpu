@@ -101,6 +101,7 @@ pub fn kv_prefill_from_hidden_via_dispatch(
     let mut h = initial_hidden.clone();
 
     for layer in 0..num_layers {
+        let _t_attn = std::time::Instant::now();
         let (h_post_attn, mut handle) = backend.attention_prefill(
             weights,
             &h,
@@ -108,6 +109,7 @@ pub fn kv_prefill_from_hidden_via_dispatch(
             window,
             index.map(|v| v as &dyn larql_compute::KvIndex),
         )?;
+        crate::decode_stages::record_attn(_t_attn.elapsed().as_nanos());
         if let Some(w) = window {
             backend.clip_kv(&mut handle, w);
         }
@@ -150,6 +152,7 @@ pub fn kv_decode_step_via_dispatch(
     let mut h_step = h_new;
 
     for (layer, handle) in handles.iter_mut().enumerate().take(num_layers) {
+        let _t_attn = std::time::Instant::now();
         let h_post_attn = backend.attention_step(
             weights,
             &h_step,
@@ -158,6 +161,7 @@ pub fn kv_decode_step_via_dispatch(
             abs_position,
             index.map(|v| v as &dyn larql_compute::KvIndex),
         )?;
+        crate::decode_stages::record_attn(_t_attn.elapsed().as_nanos());
         if let Some(w) = window {
             backend.clip_kv(handle, w);
         }

@@ -282,6 +282,208 @@ pub fn run_attention_block_decode_step_backend(
     Some((h_post_attn, (k_concat, v_concat)))
 }
 
+/// Single decode-step projection via Q4K/Q6K-direct matvec — no dequant.
+///
+/// `x` is `[1, in_dim]` (decode is one new token); `qw` carries the
+/// `[num_rows, in_dim]` weight in its packed format (Q4_K / Q6_K). Dispatches
+/// through `quant_matvec`, which routes Q4_K→`q4k_matvec`, Q6_K→`q6k_matvec`
+/// (both take f32 input directly — no activation quant). Returns `[1, num_rows]`,
+/// or `None` if the backend can't run that format (caller falls back to the f32
+/// dequant path) or the input row isn't contiguous.
+fn q4k_direct_proj(
+    backend: &dyn crate::ComputeBackend,
+    qw: &crate::QuantWeight,
+    x: &Array2<f32>,
+    num_rows: usize,
+    in_dim: usize,
+) -> Option<Array2<f32>> {
+    let x_slice = x.as_slice()?;
+    let out = backend.quant_matvec(qw.format, qw.data, x_slice, num_rows, in_dim)?;
+    Array2::from_shape_vec((1, num_rows), out).ok()
+}
+
+/// Q4K-direct decode-step attention — reads the Q/K/V/O projection bytes
+/// straight from the index (`resolve_attn_weights`) and runs them as
+/// `quant_matvec` (Q4_K / Q6_K), skipping the up-front dequant-to-f32 of the
+/// f32-BLAS path (`run_attention_block_decode_step_backend`). Everything around
+/// the projections — input/QK/V norms, RoPE, GQA decode step, KV-concat,
+/// biases, residual — is byte-identical to that function (copied verbatim); the
+/// ONLY change is the four projection calls. Parity contract: Q4K-direct ≈
+/// Q4K-dequant within float-summation noise (the kernels are parity-tested vs
+/// dequant→matmul), pinned by the test in `larql-inference`'s dequant module.
+///
+/// Returns `None` (so the caller falls back to the f32 path) when the index has
+/// no Q4K attention bytes for this layer, or the backend can't run a format.
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::type_complexity)]
+pub fn run_attention_block_decode_step_q4k_direct(
+    weights: &larql_models::ModelWeights,
+    h_new: &Array2<f32>,
+    layer: usize,
+    kv_entry: Option<&SharedKV>,
+    abs_position: usize,
+    backend: &dyn crate::ComputeBackend,
+    index: &dyn crate::KvIndex,
+) -> Option<(Array2<f32>, SharedKV)> {
+    use crate::forward::add_bias;
+    use crate::residual::{rms_norm_heads, rms_norm_heads_no_weight};
+
+    let arch = &*weights.arch;
+    let head_dim = arch.head_dim_for_layer(layer);
+    let num_q = arch.num_q_heads_for_layer(layer);
+    let num_kv = arch.num_kv_heads_for_layer(layer);
+    let reps = num_q / num_kv;
+    let scale = if arch.attention_multiplier() != 1.0 {
+        arch.attention_multiplier() as f64
+    } else {
+        arch.attention_scale_for_layer(layer)
+    };
+    let norm_offset = arch.norm_weight_offset();
+    let position = abs_position;
+    let hidden = weights.hidden_size;
+    let q_dim = num_q * head_dim;
+    let kv_dim = num_kv * head_dim;
+
+    // Q4K-direct projection weights straight from the index. `None` → no Q4K
+    // attn bytes for this layer; caller uses the f32 dequant path.
+    let (wq, wk, wv, wo) = crate::pipeline_layer::resolve_attn_weights(index, layer)?;
+
+    let h_norm = crate::forward::apply_norm(
+        weights,
+        h_new,
+        &arch.input_layernorm_key(layer),
+        norm_offset,
+    );
+
+    let mut q_full = q4k_direct_proj(backend, &wq, &h_norm, q_dim, hidden)?;
+    if let Some(bias) = arch
+        .attn_q_bias_key(layer)
+        .and_then(|k| weights.vectors.get(&k))
+    {
+        add_bias(&mut q_full, bias);
+    }
+
+    let qk_offset = weights.arch.qk_norm_weight_offset();
+    let qk_norm_off = if qk_offset != 0.0 {
+        qk_offset
+    } else {
+        norm_offset
+    };
+    let q_normed = match arch
+        .attn_q_norm_key(layer)
+        .and_then(|k| weights.vectors.get(&k))
+    {
+        Some(norm_w) => rms_norm_heads(&q_full, norm_w, num_q, head_dim, qk_norm_off),
+        None => q_full,
+    };
+    let layer_rope_base = crate::forward_overrides::effective_rope_base_for_layer(arch, layer);
+    let rotary_frac = arch.rotary_fraction_for_layer(layer);
+    let pos_divisor =
+        crate::forward_overrides::effective_rope_position_divisor_for_layer(arch, layer);
+    let llama3 = crate::forward_overrides::effective_llama3_rope_scaling(arch);
+    let q_rope = crate::attention::rope::apply_rope_partial_at_full(
+        &q_normed,
+        num_q,
+        head_dim,
+        layer_rope_base,
+        rotary_frac,
+        position,
+        pos_divisor,
+        llama3,
+    );
+
+    let mut k_full_new = q4k_direct_proj(backend, &wk, &h_norm, kv_dim, hidden)?;
+    let mut v_full_new = q4k_direct_proj(backend, &wv, &h_norm, kv_dim, hidden)?;
+    if let Some(bias) = arch
+        .attn_k_bias_key(layer)
+        .and_then(|k| weights.vectors.get(&k))
+    {
+        add_bias(&mut k_full_new, bias);
+    }
+    if let Some(bias) = arch
+        .attn_v_bias_key(layer)
+        .and_then(|k| weights.vectors.get(&k))
+    {
+        add_bias(&mut v_full_new, bias);
+    }
+    if arch.has_v_norm() {
+        v_full_new = rms_norm_heads_no_weight(&v_full_new, num_kv, head_dim);
+    }
+    let k_normed = match arch
+        .attn_k_norm_key(layer)
+        .and_then(|k| weights.vectors.get(&k))
+    {
+        Some(norm_w) => rms_norm_heads(&k_full_new, norm_w, num_kv, head_dim, qk_norm_off),
+        None => k_full_new,
+    };
+    let k_new_rope = crate::attention::rope::apply_rope_partial_at_full(
+        &k_normed,
+        num_kv,
+        head_dim,
+        layer_rope_base,
+        rotary_frac,
+        position,
+        pos_divisor,
+        llama3,
+    );
+
+    let (k_concat, v_concat) = match kv_entry {
+        Some((k_cached, v_cached)) => {
+            let total = k_cached.shape()[0] + 1;
+            let mut k_out = Array2::<f32>::zeros((total, kv_dim));
+            let mut v_out = Array2::<f32>::zeros((total, kv_dim));
+            k_out
+                .slice_mut(ndarray::s![..k_cached.shape()[0], ..])
+                .assign(k_cached);
+            v_out
+                .slice_mut(ndarray::s![..v_cached.shape()[0], ..])
+                .assign(v_cached);
+            k_out
+                .slice_mut(ndarray::s![k_cached.shape()[0].., ..])
+                .assign(&k_new_rope);
+            v_out
+                .slice_mut(ndarray::s![v_cached.shape()[0].., ..])
+                .assign(&v_full_new);
+            (k_out, v_out)
+        }
+        None => (k_new_rope, v_full_new),
+    };
+
+    let softcap = arch.attn_logit_softcapping();
+    let attn_out = gqa_attention_decode_step(
+        &q_rope, &k_concat, &v_concat, num_q, head_dim, reps, scale, softcap,
+    );
+
+    let mut attn_projected = q4k_direct_proj(backend, &wo, &attn_out, hidden, q_dim)?;
+    if let Some(bias) = arch
+        .attn_o_bias_key(layer)
+        .and_then(|k| weights.vectors.get(&k))
+    {
+        add_bias(&mut attn_projected, bias);
+    }
+
+    let res_mult = arch.residual_multiplier();
+    let h_post_attn = if arch.has_post_norms() {
+        let normed = crate::forward::apply_norm(
+            weights,
+            &attn_projected,
+            &arch.post_attention_layernorm_key(layer),
+            norm_offset,
+        );
+        if res_mult != 1.0 {
+            h_new + &(&normed * res_mult)
+        } else {
+            h_new + &normed
+        }
+    } else if res_mult != 1.0 {
+        h_new + &(&attn_projected * res_mult)
+    } else {
+        h_new + &attn_projected
+    };
+
+    Some((h_post_attn, (k_concat, v_concat)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

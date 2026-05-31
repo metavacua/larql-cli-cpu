@@ -324,6 +324,53 @@ long-context MoE run that evicts windows would need replay threaded too. This is
 only remaining MoE-correctness gap. CLI guard allows the seven verified engines and
 rejects `no-cache` / `apollo` with a clear message.
 
+### ⏭ NEXT — Q4K-direct client decode path (remove the f32 tax) — top engineering lever
+
+**Why now:** the bottleneck diagnosis
+([`docs/diagnoses/remote-moe-bottlenecks.md`](../../docs/diagnoses/remote-moe-bottlenecks.md),
+2026-05-29) measured the remote-MoE decode split on the 26B: **~60% is client-side
+f32 compute** (attention + lm_head + dense FFN, on the dequant-to-f32 BLAS path),
+~40% is server expert compute, network negligible. The engine path currently
+**dequantizes all attn + dense-FFN weights to f32 up front** (the ~6.8 s model-load
+tax) and runs attention/FFN/lm_head on f32 BLAS — *not* the NEON **Q4K-direct
+matvec** kernels that already exist (the ones that took Gemma-3-4B CPU
+0.36 → 28 tok/s).
+
+**Measured client split** (`LARQL_DECODE_STAGES=1`, 26B, prefill+12 decode):
+attention **28%** · dense FFN **13%** · lm_head **12%** (≈53% recoverable client
+f32) · remote experts 41% (server) · misc 5%. **Attention is the #1 target.**
+
+**Work (ranked by win):**
+1. **Attention (28%)** — Q4K-direct path reading attn bytes from the index via
+   `q4_attention_proj` (`attention/gpu.rs`, CPU-tested), replacing the f32
+   `run_attention_with_kv_backend`. Parity-critical rework of the attention path;
+   verify byte-parity on the 26B before flipping.
+2. **dense FFN (13%)** — ⚠️ `WalkFfn` tried + reverted (its dense mode runs the
+   sparse-walk machinery → 8.5× slower than f32 BLAS). The right kernel is
+   `kquant_ffn_forward_layer_q8k` (NEON, no dequant) via a thin `FfnBackend`
+   wrapper. Low ROI (f32 BLAS already competitive, only ~13%) — below attention.
+3. **lm_head (12%)** — Q4K vocab projection from the loaded lm_head Q4K bytes.
+
+Doing all three also lets the CLI **drop the up-front "dequantize all layers to
+f32"** step (`run_with_moe_shards`) — removing most of the ~6.8 s model-load tax
+(nothing left to dequantize). Per-stage timers already in place (`decode_stages`).
+
+**Expected:** ~4× decode (measured 7.9 → **~20-25 tok/s** on the 26B, i.e. up to the
+DDR5 bandwidth ceiling) **and** much faster startup (no dequant-all). Pure
+engineering — depends on no unproven research. **Highest-leverage move fully in our
+control.**
+
+**Exit:** remote-MoE `--engine standard` decode within ~10% of the single-box A4B-Q4
+bandwidth ceiling (~22 tok/s on the 26B), byte-identical to the f32 path; CLI no
+longer dequantizes all layers up front.
+
+**After this** (to go past the ~22 tok/s wall, both out of pure-engineering scope):
+distribute expert bandwidth across more grid shards; the compounding stack
+(hash-routing 5× + FP4 2×, V1/V2 — unproven to compound per ADR-015); and
+multi-layer expert **prefetch** to hide the 30 sequential layer round-trips on real
+LAN/WAN (free on localhost, fatal at 10 ms RTT). 80 tok/s on the 26B needs all
+three; for 4B-class it's already near.
+
 ### P0 — engine performance (the post-bypass optimization frontier)
 
 The fused-bypass strip (2026-05-17 night) made every engine's actual
