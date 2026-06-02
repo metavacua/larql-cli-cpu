@@ -353,7 +353,8 @@ impl KvEngine for TurboQuantEngine {
                 weights,
                 backend: self.backend.as_ref(),
             };
-            let h_out = crate::engines::layer_ffn_or_moe(weights, &h_post_attn, layer, &bffn, Some(ffn));
+            let h_out =
+                crate::engines::layer_ffn_or_moe(weights, &h_post_attn, layer, &bffn, Some(ffn));
             h = h_out;
         }
 
@@ -423,7 +424,8 @@ impl KvEngine for TurboQuantEngine {
                 weights,
                 backend: self.backend.as_ref(),
             };
-            let h_out = crate::engines::layer_ffn_or_moe(weights, &h_post_attn, layer, &bffn, Some(ffn));
+            let h_out =
+                crate::engines::layer_ffn_or_moe(weights, &h_post_attn, layer, &bffn, Some(ffn));
             h = h_out;
         }
 

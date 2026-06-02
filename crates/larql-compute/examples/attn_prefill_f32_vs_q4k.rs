@@ -64,11 +64,25 @@ fn main() {
     let seq = 907; // matches the representative-context end-to-end run
 
     let geoms = [
-        Geom { name: "sliding", hidden: 2816, num_q: 16, num_kv: 8, head_dim: 256 },
-        Geom { name: "global", hidden: 2816, num_q: 16, num_kv: 4, head_dim: 512 },
+        Geom {
+            name: "sliding",
+            hidden: 2816,
+            num_q: 16,
+            num_kv: 8,
+            head_dim: 256,
+        },
+        Geom {
+            name: "global",
+            hidden: 2816,
+            num_q: 16,
+            num_kv: 4,
+            head_dim: 512,
+        },
     ];
 
-    println!("attn_prefill_f32_vs_q4k — prefill-shape gate (seq_len={seq}, Gemma-4-26B-A4B, CpuBackend)");
+    println!(
+        "attn_prefill_f32_vs_q4k — prefill-shape gate (seq_len={seq}, Gemma-4-26B-A4B, CpuBackend)"
+    );
     println!("f32 = one BLAS sgemm   q4k = {seq}× per-position q4k_matvec (no q4k_matmul on CPU)");
     println!("speedup = f32/q4k  (<1 → AMX f32 wins → twin dead w/o a real q4k_matmul)\n");
 
@@ -124,7 +138,11 @@ fn main() {
             // 4 B/weight once; q4k reads ~0.56 B/weight once → best case the proj
             // shrinks by the byte ratio IF it were weight-bandwidth-bound. (At
             // batched-gemm seq it's compute-bound, so this is optimistic.)
-            let bytes_ratio = if q6 { 210.0 / 256.0 / 4.0 } else { 144.0 / 256.0 / 4.0 };
+            let bytes_ratio = if q6 {
+                210.0 / 256.0 / 4.0
+            } else {
+                144.0 / 256.0 / 4.0
+            };
             let floor_ms = f32_ms * bytes_ratio;
             tot_f32 += f32_ms;
             tot_q4k += q4k_ms;
@@ -140,7 +158,11 @@ fn main() {
         }
         println!(
             "{:>4} | {:>12} | {:>10.3} | {:>10.3} | {:>7.2}× |",
-            "Σ", "block", tot_f32, tot_q4k, tot_f32 / tot_q4k
+            "Σ",
+            "block",
+            tot_f32,
+            tot_q4k,
+            tot_f32 / tot_q4k
         );
         println!();
     }

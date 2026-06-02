@@ -17,7 +17,7 @@ use super::remote_ffn_runtime::run_concurrent_ffn;
 use super::remote_moe_runtime::run_concurrent_moe;
 use super::row::{BenchJsonLatency, BenchJsonResult, BenchJsonRow, BenchJsonStages, BenchRow};
 
-pub fn run(args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(mut args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
     // Configure rayon's global thread pool up front. Auto-select picks
     // 8 on Apple silicon — empirically the sweet spot for Q4_K × Q8_K
     // matvec on M3 Max's LPDDR5 controllers (12-thread default
@@ -25,6 +25,24 @@ pub fn run(args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
     // `bench/baselines/cpu/DIAGNOSIS-2026-05-16-thread-scaling.md`).
     // `RAYON_NUM_THREADS` in the environment overrides everything.
     configure_rayon_threads(args.threads);
+
+    // `--cpu` is shorthand for a CPU-only run. Two normalisations:
+    //  1. Force `backends = "cpu"` so the engine path (which decides
+    //     CPU-vs-Metal via `args.backends.contains("metal")`) builds a
+    //     CpuBackend rather than silently running the engine on Metal.
+    //  2. Unless the user picked engines explicitly, also surface the
+    //     production `standard` StandardEngine CPU row. That is the path
+    //     `larql run`/`larql walk` actually use and it is ~12% faster
+    //     than the legacy fused `larql-cpu` bench row (26.4 vs 23.5 tok/s
+    //     on Gemma 3 4B Q4K, M3 Max). Without this, `larql bench --cpu`
+    //     reported only the slower legacy path — understating the real
+    //     CPU number (see `bench/baselines/c10_gemma3-4b_cpu_reconciled.json`).
+    if args.cpu {
+        args.backends = "cpu".to_string();
+        if args.engine.is_none() {
+            args.engine = Some("standard".to_string());
+        }
+    }
 
     // --bench-grid-lan short-circuits the normal flow: it orchestrates
     // a matrix of independent `larql bench` invocations from a JSON
@@ -136,7 +154,20 @@ pub fn run(args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     if let Some(ref ollama_model) = args.ollama {
-        rows.push(run_ollama(ollama_model, &args.prompt, args.tokens));
+        // `--ollama-cpu` forces num_gpu=0 + num_thread=<bench threads> so
+        // Ollama is a true CPU baseline; otherwise it runs on its default
+        // backend (Metal GPU on Apple silicon) and is a GPU comparison.
+        let ollama_cpu_threads = if args.ollama_cpu {
+            Some(rayon::current_num_threads())
+        } else {
+            None
+        };
+        rows.push(run_ollama(
+            ollama_model,
+            &args.prompt,
+            args.tokens,
+            ollama_cpu_threads,
+        ));
     }
 
     // KV engine rows.

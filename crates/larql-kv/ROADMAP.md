@@ -366,7 +366,7 @@ longer dequantizes all layers up front.
 
 **After this** (to go past the ~22 tok/s wall, both out of pure-engineering scope):
 distribute expert bandwidth across more grid shards; the compounding stack
-(hash-routing 5× + FP4 2×, V1/V2 — unproven to compound per ADR-015); and
+(hash-routing 5× **FALSIFIED V1 2026-05-31** — doesn't compound; FP4 2× **confirmed V2**); and
 multi-layer expert **prefetch** to hide the 30 sequential layer round-trips on real
 LAN/WAN (free on localhost, fatal at 10 ms RTT). 80 tok/s on the 26B needs all
 three; for 4B-class it's already near.

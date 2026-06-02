@@ -148,9 +148,9 @@ impl KvEngine for MarkovResidualCodecEngine {
             })?;
         let (hidden, new_rs) =
             rs_decode_step_codec(weights, token_id, rs, self.backend.as_ref(), Some(ffn))
-            .ok_or_else(|| EngineError::BackendFailure {
-            details: "rs_decode_step_codec returned None".into(),
-        })?;
+                .ok_or_else(|| EngineError::BackendFailure {
+                    details: "rs_decode_step_codec returned None".into(),
+                })?;
         self.store = Some(new_rs);
         Ok(hidden)
     }

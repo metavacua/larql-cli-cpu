@@ -797,7 +797,9 @@ mod tests {
 
         // Feed exactly window_size tokens → triggers close
         for tok in 0..window_size as u32 {
-            engine.process(&weights, &[tok], None).expect("process failed");
+            engine
+                .process(&weights, &[tok], None)
+                .expect("process failed");
         }
         assert_eq!(engine.archive.len(), 1, "one window should be archived");
         assert_eq!(
@@ -833,7 +835,9 @@ mod tests {
         let mut engine = UnlimitedContextEngine::new(4);
 
         // 3 tokens < window_size=4 → no close
-        engine.process(&weights, &[0u32, 1, 2], None).expect("process");
+        engine
+            .process(&weights, &[0u32, 1, 2], None)
+            .expect("process");
         assert_eq!(engine.archive.len(), 0, "no window closed yet");
         assert_eq!(engine.window_tokens(), 3);
     }

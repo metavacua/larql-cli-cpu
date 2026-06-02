@@ -89,7 +89,8 @@ pub fn rs_extend_from_checkpoint_backend(
             )?;
 
             let bffn = BackendFfn { weights, backend };
-            let h_out = crate::engines::layer_ffn_or_moe(weights, &h_post_attn, layer, &bffn, moe_ffn);
+            let h_out =
+                crate::engines::layer_ffn_or_moe(weights, &h_post_attn, layer, &bffn, moe_ffn);
             h = h_out;
             *kv_slot = new_kv;
         }

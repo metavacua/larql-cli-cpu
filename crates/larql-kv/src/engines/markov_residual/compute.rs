@@ -994,7 +994,8 @@ mod tests {
     fn rs_decode_step_produces_finite_hidden() {
         let weights = make_test_weights();
         let prefill = rs_prefill(&weights, &[0u32], None, &CpuBackend, None);
-        let (h, _) = rs_decode_step(&weights, 1, prefill.store, &CpuBackend, None).expect("decode step");
+        let (h, _) =
+            rs_decode_step(&weights, 1, prefill.store, &CpuBackend, None).expect("decode step");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert!(h.iter().all(|v| v.is_finite()));
     }
@@ -1029,8 +1030,8 @@ mod tests {
         // After overflow merges into cold_residuals, cold_kv is cleared
         // (compute.rs line 260) so a second decode exercises the
         // cold_residuals-only branch (lines 149-160).
-        let (h2, _) =
-            rs_decode_step(&weights, 5, rs2, &CpuBackend, None).expect("decode_step over cold_residuals");
+        let (h2, _) = rs_decode_step(&weights, 5, rs2, &CpuBackend, None)
+            .expect("decode_step over cold_residuals");
         assert_eq!(h2.shape(), &[1, weights.hidden_size]);
         assert!(h2.iter().all(|v| v.is_finite()));
     }
