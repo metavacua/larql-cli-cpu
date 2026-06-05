@@ -111,8 +111,8 @@ fn main() {
         println!();
         for (di, &depth) in depths.iter().enumerate() {
             print!("  last {depth:<5}");
-            for ki in 0..ks.len() {
-                let p = pct(agree[di][ki]);
+            for &a in agree[di].iter().take(ks.len()) {
+                let p = pct(a);
                 let mark = if p >= 90.0 { "*" } else { " " };
                 print!("  {p:>5.1}{mark} ");
             }

@@ -194,7 +194,7 @@ fn main() {
         "{:<20} {:>22} {:>26}",
         "zone", "‖δ‖/‖base‖ med/p90/worst", "lin-error med/p90/worst"
     );
-    for z in 0..4 {
+    for (z, zname) in zn.iter().enumerate() {
         let layers: Vec<usize> = (0..nl).filter(|&l| zone(l) == z).collect();
         let mut amp: Vec<f64> = layers
             .iter()
@@ -216,7 +216,7 @@ fn main() {
         );
         println!(
             "{:<20} {:>6.3}/{:>6.3}/{:>6.3} {:>8.3}/{:>7.3}/{:>7.3}",
-            zn[z], am, ap, aw, lm, lp, lw
+            zname, am, ap, aw, lm, lp, lw
         );
     }
     println!("\n  KILL (pre-registered): highway ‖δ‖/‖base‖ ≳0.20 OR lin-error ≳0.15 ⇒ delta-walk dead.\n  worst = max over step-pairs (catastrophic on 10% of steps = drift generator).\n  lin-error here uses the FULL true Jacobian — a low-rank approx can only be worse.");

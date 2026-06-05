@@ -190,7 +190,7 @@ fn main() {
         "{:<20} {:>20} {:>20} {:>14}",
         "", "med / p10 / worst", "med / p10 / worst", "median dim"
     );
-    for z in 0..4 {
+    for (z, zname) in znames.iter().enumerate() {
         let layers: Vec<usize> = (0..nl).filter(|&l| zone(l) == z).collect();
         let mut cos_all: Vec<f64> = layers
             .iter()
@@ -219,7 +219,7 @@ fn main() {
         let dim_med = pctile(&mut dims, 0.50);
         println!(
             "{:<20} {:>6.3}/{:>5.3}/{:>5.3} {:>7.3}/{:>5.3}/{:>5.3} {:>14.1}",
-            znames[z], cos_med, cos_p10, cos_worst, jac_med, jac_p10, jac_worst, dim_med
+            zname, cos_med, cos_p10, cos_worst, jac_med, jac_p10, jac_worst, dim_med
         );
     }
     println!("\n  PRE-REGISTERED reading: highway delta-dim ≤~30 ⇒ delta-walk LIVE; cosine ≥0.995 ⇒ output reuse;\n  Jaccard ≥0.9 + low cosine ⇒ route-reuse only; all churn ⇒ axis closes.\n  worst = min over step-pairs (a reuse scheme catastrophic on 10% of steps is a drift generator).");
