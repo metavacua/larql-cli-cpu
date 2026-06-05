@@ -53,6 +53,7 @@ pub mod async_compute_backend;
 pub mod attention;
 pub mod capture;
 pub mod chat;
+pub mod decode_stages;
 pub mod error;
 pub mod experts;
 pub mod ffn;
@@ -269,7 +270,10 @@ pub use trace::{
     ContextStore, ContextTier, ContextWriter, LayerSummary, ResidualTrace, TraceNode,
     TracePositions, TraceStore, TraceWriter,
 };
-pub use vindex::{open_inference_vindex, predict_kquant, FfnL1Cache, WalkFfn, WalkFfnConfig};
+pub use vindex::{
+    generate_kquant_cpu_remote, open_inference_vindex, predict_kquant, FfnL1Cache, WalkFfn,
+    WalkFfnConfig,
+};
 
 /// Stable, application-facing inference imports.
 ///

@@ -382,6 +382,36 @@ impl KvEngine for StandardEngine {
         self.do_decode_step(weights, ffn, token_id, Some(index))
     }
 
+    /// Resident-weights variants (task #16): the caller has already made the
+    /// client weights f32-resident, so these take `&weights` (no `&mut` for
+    /// `ensure_attn_tensors_dequantised`) and just thread `index` to the
+    /// per-layer dispatch. That lets the FFN backend borrow the same `&weights`
+    /// concurrently (no borrow conflict) while a Q4K-direct attention kernel
+    /// reads packed bytes from `index`. CPU uses per-layer handles (the coarse
+    /// path is Metal-only), so these route straight to `do_*`.
+    fn prefill_resident(
+        &mut self,
+        weights: &ModelWeights,
+        ffn: &dyn FfnBackend,
+        index: &larql_inference::larql_vindex::VectorIndex,
+        token_ids: &[u32],
+    ) -> Result<Array2<f32>, EngineError> {
+        if token_ids.is_empty() {
+            return Err(EngineError::EmptyPrompt);
+        }
+        self.do_prefill(weights, ffn, token_ids, Some(index))
+    }
+
+    fn decode_step_resident(
+        &mut self,
+        weights: &ModelWeights,
+        ffn: &dyn FfnBackend,
+        index: &larql_inference::larql_vindex::VectorIndex,
+        token_id: u32,
+    ) -> Result<Array2<f32>, EngineError> {
+        self.do_decode_step(weights, ffn, token_id, Some(index))
+    }
+
     fn memory_bytes(&self) -> usize {
         self.cache_memory_bytes()
     }

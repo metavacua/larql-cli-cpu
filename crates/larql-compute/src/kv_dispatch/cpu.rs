@@ -30,9 +30,27 @@ use ndarray::Array2;
 
 use super::{KvDispatch, KvHandle, KvHandleInner, ResidualHandle, ResidualHandleInner};
 use crate::attention::{
-    run_attention_block_decode_step_backend, run_attention_with_kv_backend, SharedKV,
+    run_attention_block_decode_step_backend, run_attention_block_decode_step_q4k_direct,
+    run_attention_with_kv_backend, SharedKV,
 };
 use larql_models::ModelWeights;
+
+/// Opt-in: route the CPU decode-step attention projections through the
+/// Q4K-direct kernels (`quant_matvec` straight from the index) instead of the
+/// f32-BLAS path on pre-dequantised `weights.tensors`. Gated while parity +
+/// end-to-end are validated on the 26B (task #16); falls back to f32 per layer
+/// when the index lacks Q4K attn bytes or a format is unsupported.
+///
+/// ⚠️ SIBLING PATH: `cached_decode_step_q4k` / `CpuQ4kCacheHandle` (below, in
+/// `crate::kquant_forward`) is a SECOND independent CPU Q4K attention decode.
+/// Any RoPE / softcap / QK-V-norm / GQA change here must mirror there (and vice
+/// versa) or the two silently diverge. Consolidate before either is load-bearing
+/// — see `docs/diagnoses/q4k-direct-attention.md` §"CONSOLIDATION HAZARD".
+fn q4k_direct_attn_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("LARQL_Q4K_DIRECT_ATTN").as_deref() == Ok("1"))
+}
 
 // ─── CpuKvHandle ────────────────────────────────────────────────────────────
 
@@ -278,25 +296,41 @@ impl KvDispatch for CpuBackend {
         kv: &mut KvHandle,
         layer: usize,
         abs_position: usize,
-        _index: Option<&dyn crate::KvIndex>,
+        index: Option<&dyn crate::KvIndex>,
     ) -> Option<Array2<f32>> {
-        // CpuBackend reads f32 attention tensors out of `weights.tensors`.
-        // When the caller has a Q4K `VectorIndex`, it's expected to have
-        // already populated `weights.tensors` via
-        // `crate::kquant_forward::ensure_attn_tensors_dequantised` before
-        // dispatching here. Until phase-3 CPU Q4K matvec kernels land,
-        // the `index` parameter is accepted for trait-shape compatibility
-        // but not consumed.
+        // Default (f32) path: CpuBackend reads f32 attention tensors out of
+        // `weights.tensors`, which the caller pre-populates via
+        // `ensure_attn_tensors_dequantised` (the up-front dequant-to-f32 tax).
+        //
+        // Opt-in Q4K-direct path (`LARQL_Q4K_DIRECT_ATTN=1`, task #16): when the
+        // caller has a Q4K `index`, run the projections straight from its packed
+        // bytes via `quant_matvec` (no dequant), falling back per layer to the
+        // f32 path if the index lacks Q4K attn bytes / a format is unsupported.
         let h = cpu_handle_mut(kv);
         let prior_kv = h.as_shared_kv().cloned();
-        let (h_post_attn, new_kv) = run_attention_block_decode_step_backend(
-            weights,
-            query,
-            layer,
-            prior_kv.as_ref(),
-            abs_position,
-            Some(self),
-        )?;
+        let f32_path = |prior: Option<&SharedKV>| {
+            run_attention_block_decode_step_backend(
+                weights,
+                query,
+                layer,
+                prior,
+                abs_position,
+                Some(self),
+            )
+        };
+        let (h_post_attn, new_kv) = match index.filter(|_| q4k_direct_attn_enabled()) {
+            Some(idx) => run_attention_block_decode_step_q4k_direct(
+                weights,
+                query,
+                layer,
+                prior_kv.as_ref(),
+                abs_position,
+                self,
+                idx,
+            )
+            .or_else(|| f32_path(prior_kv.as_ref()))?,
+            None => f32_path(prior_kv.as_ref())?,
+        };
         h.replace_state(new_kv);
         Some(h_post_attn)
     }
