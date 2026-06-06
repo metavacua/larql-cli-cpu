@@ -863,6 +863,55 @@ mod tests {
                 },
             )
         }
+        // MM support: drive `generate_with_engine_from_hidden`. We can't
+        // recover the original tokens from a pre-built hidden state, so the
+        // stub seeds a fresh cache from synthetic ids `0..nrows`. That's a
+        // valid populated cache (the from-hidden tests assert control flow
+        // — break arms, EOS, max-tokens budget — not bit-parity with a
+        // real embed).
+        fn supports_multimodal(&self) -> bool {
+            true
+        }
+        fn prefill_from_hidden(
+            &mut self,
+            weights: &ModelWeights,
+            ffn: &dyn FfnBackend,
+            initial_hidden: &Array2<f32>,
+        ) -> Result<Array2<f32>, larql_inference::kv_engine::EngineError> {
+            if self.fail_prefill {
+                return Err(larql_inference::kv_engine::EngineError::BackendFailure {
+                    details: "test stub: fail_prefill set".into(),
+                });
+            }
+            let ids: Vec<u32> = (0..initial_hidden.nrows() as u32).collect();
+            let (hidden, cache) = kv_prefill_run(weights, ffn, &ids, None, None, &mut NoopHook)
+                .ok_or_else(|| larql_inference::kv_engine::EngineError::BackendFailure {
+                    details: "kv_prefill_run returned None".into(),
+                })?;
+            self.cache = Some(cache);
+            Ok(hidden)
+        }
+        // Resident-weights path: drive `generate_with_engine_resident`. The
+        // stub ignores `index` and reuses the f32 prefill/decode bodies —
+        // enough to exercise the wrapper's prefill/decode/break arms.
+        fn prefill_resident(
+            &mut self,
+            weights: &ModelWeights,
+            ffn: &dyn FfnBackend,
+            _index: &larql_inference::larql_vindex::VectorIndex,
+            token_ids: &[u32],
+        ) -> Result<Array2<f32>, larql_inference::kv_engine::EngineError> {
+            self.prefill(weights, ffn, token_ids)
+        }
+        fn decode_step_resident(
+            &mut self,
+            weights: &ModelWeights,
+            ffn: &dyn FfnBackend,
+            _index: &larql_inference::larql_vindex::VectorIndex,
+            token_id: u32,
+        ) -> Result<Array2<f32>, larql_inference::kv_engine::EngineError> {
+            self.decode_step(weights, ffn, token_id)
+        }
         fn memory_bytes(&self) -> usize {
             0
         }
@@ -1337,5 +1386,277 @@ mod tests {
             |_, _| {},
         );
         assert!(ids.is_empty(), "zero-row hidden should yield empty stream");
+    }
+
+    // ── generate_with_engine_from_hidden break-arm coverage ────────────────
+    //
+    // The from-hidden wrapper duplicates the prefill→sample→decode loop of
+    // `generate_with_engine`, including the early-return / break arms:
+    // zero-max budget, prefill failure, max_new=1, and decode failure
+    // mid-loop. These mirror the `generate_with_engine_*` stub tests above
+    // but drive the from-hidden code path (engine.prefill_from_hidden +
+    // engine.decode_step). The StubEngine seeds a fresh cache from
+    // synthetic ids, so the assertions are on control flow, not parity.
+
+    fn hidden_for(weights: &ModelWeights, rows: usize) -> Array2<f32> {
+        let mut h = Array2::<f32>::zeros((rows, weights.hidden_size));
+        for r in 0..rows {
+            for c in 0..weights.hidden_size {
+                h[[r, c]] = ((r * 7 + c * 3) % 11) as f32 * 0.01 - 0.05;
+            }
+        }
+        h
+    }
+
+    #[test]
+    fn from_hidden_zero_max_returns_empty() {
+        let weights = make_test_weights();
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let ffn = WeightFfn { weights: &weights };
+        let h = hidden_for(&weights, 3);
+        let mut eng = crate::AnyEngine::Kv(Box::new(fresh_stub()));
+        let out = generate_with_engine_from_hidden(
+            &mut eng,
+            &weights,
+            &tokenizer,
+            &ffn,
+            &h,
+            0,
+            |_, _| {},
+        );
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn from_hidden_prefill_failure_returns_empty() {
+        let weights = make_test_weights();
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let ffn = WeightFfn { weights: &weights };
+        let h = hidden_for(&weights, 3);
+        let mut stub = fresh_stub();
+        stub.fail_prefill = true;
+        let mut eng = crate::AnyEngine::Kv(Box::new(stub));
+        let out = generate_with_engine_from_hidden(
+            &mut eng,
+            &weights,
+            &tokenizer,
+            &ffn,
+            &h,
+            4,
+            |_, _| {},
+        );
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn from_hidden_max_one_returns_single_token() {
+        let weights = make_test_weights();
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let ffn = WeightFfn { weights: &weights };
+        let h = hidden_for(&weights, 2);
+        let mut eng = crate::AnyEngine::Kv(Box::new(fresh_stub()));
+        let out = generate_with_engine_from_hidden(
+            &mut eng,
+            &weights,
+            &tokenizer,
+            &ffn,
+            &h,
+            1,
+            |_, _| {},
+        );
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn from_hidden_decode_failure_breaks_loop_early() {
+        let weights = make_test_weights();
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let ffn = WeightFfn { weights: &weights };
+        let h = hidden_for(&weights, 2);
+        let mut stub = fresh_stub();
+        stub.fail_decode_after = Some(1);
+        let mut eng = crate::AnyEngine::Kv(Box::new(stub));
+        let out = generate_with_engine_from_hidden(
+            &mut eng,
+            &weights,
+            &tokenizer,
+            &ffn,
+            &h,
+            5,
+            |_, _| {},
+        );
+        assert!(
+            out.len() <= 2,
+            "should break after decode failure, got {} tokens",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn from_hidden_multi_step_fires_callback_per_token() {
+        let weights = make_test_weights();
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let ffn = WeightFfn { weights: &weights };
+        let h = hidden_for(&weights, 2);
+        let mut eng = crate::AnyEngine::Kv(Box::new(fresh_stub()));
+        let mut callbacks = 0usize;
+        let out = generate_with_engine_from_hidden(
+            &mut eng,
+            &weights,
+            &tokenizer,
+            &ffn,
+            &h,
+            4,
+            |_, _| callbacks += 1,
+        );
+        assert_eq!(out.len(), callbacks);
+        assert!(out.len() <= 4);
+    }
+
+    // ── generate_with_engine_resident coverage ─────────────────────────────
+    //
+    // The resident wrapper drives `engine.prefill_resident` /
+    // `engine.decode_step_resident`, threading the `index`. With
+    // `LARQL_Q4K_DIRECT_ATTN` unset (default), the CPU backend ignores the
+    // index and runs the f32 path, so a StandardEngine over f32 test
+    // weights + a Q4K vindex exercises the full happy path. The stub drives
+    // the zero-max / prefill-failure / max-one / decode-failure break arms.
+
+    #[test]
+    fn resident_happy_path_via_standard_engine() {
+        use crate::engines::standard::StandardEngine;
+        use larql_inference::ffn::NullFfn;
+        use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
+        let weights = make_test_q4k_weights();
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let index = make_test_q4k_vindex(&weights);
+        let ffn = NullFfn;
+        let mut engine = crate::AnyEngine::Kv(Box::new(StandardEngine::new(None)));
+        let mut callbacks = 0usize;
+        let out = generate_with_engine_resident(
+            &mut engine,
+            &weights,
+            &tokenizer,
+            &ffn,
+            &index,
+            &[0u32, 1, 2],
+            4,
+            |_, _| callbacks += 1,
+        );
+        assert_eq!(out.len(), callbacks, "callback fires once per token");
+        assert!(out.len() <= 4);
+    }
+
+    #[test]
+    fn resident_zero_max_returns_empty() {
+        use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
+        let weights = make_test_q4k_weights();
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let index = make_test_q4k_vindex(&weights);
+        let ffn = WeightFfn { weights: &weights };
+        let mut eng = crate::AnyEngine::Kv(Box::new(fresh_stub()));
+        let out = generate_with_engine_resident(
+            &mut eng,
+            &weights,
+            &tokenizer,
+            &ffn,
+            &index,
+            &[0u32, 1],
+            0,
+            |_, _| {},
+        );
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn resident_empty_prompt_returns_empty() {
+        use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
+        let weights = make_test_q4k_weights();
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let index = make_test_q4k_vindex(&weights);
+        let ffn = WeightFfn { weights: &weights };
+        let mut eng = crate::AnyEngine::Kv(Box::new(fresh_stub()));
+        let out = generate_with_engine_resident(
+            &mut eng,
+            &weights,
+            &tokenizer,
+            &ffn,
+            &index,
+            &[],
+            4,
+            |_, _| {},
+        );
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn resident_prefill_failure_returns_empty() {
+        use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
+        let weights = make_test_q4k_weights();
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let index = make_test_q4k_vindex(&weights);
+        let ffn = WeightFfn { weights: &weights };
+        let mut stub = fresh_stub();
+        stub.fail_prefill = true;
+        let mut eng = crate::AnyEngine::Kv(Box::new(stub));
+        let out = generate_with_engine_resident(
+            &mut eng,
+            &weights,
+            &tokenizer,
+            &ffn,
+            &index,
+            &[0u32],
+            3,
+            |_, _| {},
+        );
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn resident_max_one_returns_single_token() {
+        use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
+        let weights = make_test_q4k_weights();
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let index = make_test_q4k_vindex(&weights);
+        let ffn = WeightFfn { weights: &weights };
+        let mut eng = crate::AnyEngine::Kv(Box::new(fresh_stub()));
+        let out = generate_with_engine_resident(
+            &mut eng,
+            &weights,
+            &tokenizer,
+            &ffn,
+            &index,
+            &[0u32, 1],
+            1,
+            |_, _| {},
+        );
+        assert_eq!(out.len(), 1);
+    }
+
+    #[test]
+    fn resident_decode_failure_breaks_loop_early() {
+        use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
+        let weights = make_test_q4k_weights();
+        let tokenizer = make_test_tokenizer(weights.vocab_size);
+        let index = make_test_q4k_vindex(&weights);
+        let ffn = WeightFfn { weights: &weights };
+        let mut stub = fresh_stub();
+        stub.fail_decode_after = Some(1);
+        let mut eng = crate::AnyEngine::Kv(Box::new(stub));
+        let out = generate_with_engine_resident(
+            &mut eng,
+            &weights,
+            &tokenizer,
+            &ffn,
+            &index,
+            &[0u32, 1],
+            5,
+            |_, _| {},
+        );
+        assert!(
+            out.len() <= 2,
+            "should break after decode failure, got {} tokens",
+            out.len()
+        );
     }
 }
