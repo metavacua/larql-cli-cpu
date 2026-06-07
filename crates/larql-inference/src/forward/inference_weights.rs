@@ -98,13 +98,14 @@ impl InferenceWeights {
         knn_store: Option<&KnnStore>,
         token_ids: &[u32],
         top_k: usize,
+        route_mode: &super::KnnRouteMode,
     ) -> InferPatchedResult {
         match self {
-            Self::Dense(weights) => {
-                infer_patched(weights, tokenizer, gate_index, knn_store, token_ids, top_k)
-            }
+            Self::Dense(weights) => infer_patched(
+                weights, tokenizer, gate_index, knn_store, token_ids, top_k, route_mode,
+            ),
             Self::Quantised { weights, index } => infer_patched_q4k(
-                weights, tokenizer, gate_index, knn_store, token_ids, top_k, index,
+                weights, tokenizer, gate_index, knn_store, token_ids, top_k, index, route_mode,
             ),
         }
     }
@@ -214,7 +215,14 @@ mod tests {
     fn dense_infer_patched_returns_predictions() {
         let (mut iw, tokenizer) = dense_fixture();
         let index = make_test_vindex(iw.as_weights());
-        let result = iw.infer_patched(&tokenizer, &index, None, &[0u32, 1, 2], 5);
+        let result = iw.infer_patched(
+            &tokenizer,
+            &index,
+            None,
+            &[0u32, 1, 2],
+            5,
+            &crate::forward::KnnRouteMode::Legacy,
+        );
         assert!(!result.predictions.is_empty());
         // top_k clamped by vocab/available rows; just check we got a
         // shaped result.

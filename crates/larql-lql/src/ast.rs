@@ -47,6 +47,9 @@ pub enum Statement {
         prompt: String,
         top: Option<u32>,
         compare: bool,
+        /// FR1/FR2 KnnStore router selection (`ROUTE VERIFY [FALLBACK] [TOPK n]`).
+        /// `None` = inherit the env default (`KnnRouteMode::from_env`).
+        route: Option<InferRoute>,
     },
     Select {
         source: SelectSource,
@@ -203,6 +206,17 @@ pub enum ExplainMode {
     Walk,
     /// EXPLAIN INFER — full inference with feature trace
     Infer,
+}
+
+/// INFER `ROUTE` clause — selects the FR1/FR2 KnnStore router for this
+/// statement. Presence implies the FR1 verified router (top-k + entity-in-prompt
+/// verify + abstain); `fallback` adds the FR2 activation alias fallback.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct InferRoute {
+    /// `ROUTE VERIFY FALLBACK` → two-tier (verify then activation fallback).
+    pub fallback: bool,
+    /// `TOPK n` — candidate count the verifier considers (None = default 5).
+    pub topk: Option<u32>,
 }
 
 /// Display mode for DESCRIBE and SHOW RELATIONS output.

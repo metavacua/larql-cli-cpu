@@ -10,8 +10,28 @@ impl Session {
         prompt: &str,
         top: Option<u32>,
         compare: bool,
+        route: Option<&crate::ast::InferRoute>,
     ) -> Result<Vec<String>, LqlError> {
         let top_k = top.unwrap_or(5) as usize;
+        // Resolve the KnnStore router: an explicit `ROUTE VERIFY [FALLBACK]
+        // [TOPK n]` clause wins; otherwise inherit the `LARQL_KNN_*` env default
+        // (so unclaused INFER stays byte-identical to the Python binding —
+        // ADR 0001).
+        let route_mode = match route {
+            Some(r) => {
+                let k = r
+                    .topk
+                    .map(|k| k as usize)
+                    .unwrap_or(larql_inference::forward::KNN_VERIFY_TOPK);
+                let thr = larql_inference::forward::KNN_COSINE_THRESHOLD;
+                if r.fallback {
+                    larql_inference::KnnRouteMode::TwoTier { k, threshold: thr }
+                } else {
+                    larql_inference::KnnRouteMode::Verified { k, threshold: thr }
+                }
+            }
+            None => larql_inference::KnnRouteMode::from_env(),
+        };
 
         // Weight backend: dense inference (no vindex needed)
         if let Backend::Weight {
@@ -74,6 +94,7 @@ impl Session {
             Some(&patched.knn_store),
             &token_ids,
             top_k,
+            &route_mode,
         );
 
         let trace_layers = larql_inference::walk_trace_from_residuals(&infer.residuals, patched);

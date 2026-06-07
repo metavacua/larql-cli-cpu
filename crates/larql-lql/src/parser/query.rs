@@ -57,6 +57,7 @@ impl Parser {
 
         let mut top = None;
         let mut compare = false;
+        let mut route = None;
 
         loop {
             match self.peek() {
@@ -68,6 +69,26 @@ impl Parser {
                     self.advance();
                     compare = true;
                 }
+                Token::Keyword(Keyword::Route) => {
+                    self.advance();
+                    // ROUTE VERIFY [FALLBACK] [TOPK n]
+                    self.expect_keyword(Keyword::Verify)?;
+                    let mut r = crate::ast::InferRoute::default();
+                    loop {
+                        match self.peek() {
+                            Token::Keyword(Keyword::Fallback) => {
+                                self.advance();
+                                r.fallback = true;
+                            }
+                            Token::Keyword(Keyword::Topk) => {
+                                self.advance();
+                                r.topk = Some(self.expect_u32()?);
+                            }
+                            _ => break,
+                        }
+                    }
+                    route = Some(r);
+                }
                 _ => break,
             }
         }
@@ -77,6 +98,7 @@ impl Parser {
             prompt,
             top,
             compare,
+            route,
         })
     }
 

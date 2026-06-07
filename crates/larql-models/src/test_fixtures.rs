@@ -586,8 +586,17 @@ pub const Q4K_TEST_NUM_LAYERS: usize = 2;
 /// Build a synthetic `ModelWeights` sized to satisfy Q4_K's 256-element
 /// super-block constraint. Uses Gemma 3 architecture so the
 /// `has_post_norms` + `GeluTanh` branches in the cached decode path
-/// are exercised.
+/// are exercised. `Q4K_TEST_NUM_LAYERS` layers.
 pub fn make_test_q4k_weights() -> ModelWeights {
+    make_test_q4k_weights_layers(Q4K_TEST_NUM_LAYERS)
+}
+
+/// Layer-parametrised sibling of [`make_test_q4k_weights`]. Identical
+/// arch / dims, but with `num_layers` decoder layers — for tests that
+/// need a depth-fraction layer index to land inside the model (e.g. the
+/// LQL FR3 relation resolver, whose probe layer clamps to ≥3, so it needs
+/// a model deeper than the default 2-layer fixture).
+pub fn make_test_q4k_weights_layers(num_layers: usize) -> ModelWeights {
     let num_q = 4usize;
     let num_kv = 2usize;
     let head_dim = Q4K_TEST_HIDDEN / num_q;
@@ -595,7 +604,7 @@ pub fn make_test_q4k_weights() -> ModelWeights {
     let arch_json = serde_json::json!({
         "model_type": "gemma3_text",
         "hidden_size": Q4K_TEST_HIDDEN,
-        "num_hidden_layers": Q4K_TEST_NUM_LAYERS,
+        "num_hidden_layers": num_layers,
         "intermediate_size": Q4K_TEST_INTER,
         "head_dim": head_dim,
         "num_attention_heads": num_q,
@@ -629,7 +638,7 @@ pub fn make_test_q4k_weights() -> ModelWeights {
     let q_dim = num_q * head_dim;
     let kv_dim = num_kv * head_dim;
 
-    for layer in 0..Q4K_TEST_NUM_LAYERS {
+    for layer in 0..num_layers {
         tensors.insert(
             arch.attn_q_key(layer),
             rand_mat_seeded(q_dim, Q4K_TEST_HIDDEN, 0.05, next_seed()),
@@ -683,7 +692,7 @@ pub fn make_test_q4k_weights() -> ModelWeights {
         lm_head,
         position_embed: None,
         arch,
-        num_layers: Q4K_TEST_NUM_LAYERS,
+        num_layers,
         hidden_size: Q4K_TEST_HIDDEN,
         intermediate_size: Q4K_TEST_INTER,
         vocab_size: Q4K_TEST_VOCAB,

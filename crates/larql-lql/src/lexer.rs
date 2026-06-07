@@ -139,6 +139,10 @@ pub enum Keyword {
     Converged,
     Compact,
     Status,
+    Route,
+    Verify,
+    Fallback,
+    Topk,
 }
 
 impl Keyword {
@@ -252,6 +256,10 @@ impl Keyword {
             Self::Converged => "converged",
             Self::Compact => "compact",
             Self::Status => "status",
+            Self::Route => "route",
+            Self::Verify => "verify",
+            Self::Fallback => "fallback",
+            Self::Topk => "topk",
         }
     }
 
@@ -362,6 +370,10 @@ impl Keyword {
             "CONVERGED" => Some(Self::Converged),
             "COMPACT" => Some(Self::Compact),
             "STATUS" => Some(Self::Status),
+            "ROUTE" => Some(Self::Route),
+            "VERIFY" => Some(Self::Verify),
+            "FALLBACK" => Some(Self::Fallback),
+            "TOPK" => Some(Self::Topk),
             _ => None,
         }
     }

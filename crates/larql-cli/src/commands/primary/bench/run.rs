@@ -10,6 +10,7 @@ use super::args::BenchArgs;
 use super::engine_runtime::run_engine;
 use super::grid_lan_runtime::{self, GridLanOptions};
 use super::helpers;
+use super::local_moe_runtime;
 use super::local_runtime::run_larql;
 use super::ollama::run_ollama;
 use super::output::print_table;
@@ -130,6 +131,15 @@ pub fn run(mut args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
     let cfg = larql_vindex::load_vindex_config(&vindex_path)?;
     let is_q4k = cfg.quant == larql_vindex::QuantFormat::Q4K;
 
+    // Hybrid-MoE vindexes (Gemma 4 26B-A4B etc.) need the in-process KV-cached
+    // MoE decode path, not the dense legacy CPU decode (`run_larql`) or the
+    // NullFfn engine path — both ignore the experts. Detect up front (mmap
+    // load, cheap) so the CPU rows route correctly. `--moe-shards` keeps the
+    // remote path; Metal MoE keeps its existing GPU dispatch.
+    let arch_is_moe = is_q4k && vindex_is_hybrid_moe(&vindex_path);
+    // CPU MoE without shards → drive the in-process LocalMoeFfn engine path.
+    let want_local_moe = arch_is_moe && !want_metal && args.moe_shards.is_none();
+
     if want_metal {
         if is_q4k {
             rows.push(run_larql(&vindex_path, &args, /* metal */ true)?);
@@ -142,7 +152,7 @@ pub fn run(mut args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
             .into());
         }
     }
-    if want_cpu {
+    if want_cpu && !arch_is_moe {
         if is_q4k {
             rows.push(run_larql(&vindex_path, &args, /* metal */ false)?);
         } else if !want_engine {
@@ -186,40 +196,64 @@ pub fn run(mut args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
             let token_ids =
                 larql_inference::encode_prompt(&tokenizer, &*weights.arch, args.prompt.as_str())
                     .map_err(|e| format!("tokenize: {e}"))?;
-            let kv_ref_bytes =
-                larql_kv::markov_residual::kv_memory_bytes_for_seq(&weights, token_ids.len());
+            if want_local_moe {
+                // In-process KV-cached MoE: attention is KV-cached on the
+                // engine, experts are computed locally from the resident
+                // vindex (no shards, no loopback round-trip). This is the
+                // fair single-box CPU MoE decode number — the one that pins
+                // the medium-term tier against llama.cpp-on-26B-CPU.
+                rows.extend(local_moe_runtime::run_local_moe(
+                    &mut weights,
+                    &index,
+                    &tokenizer,
+                    &token_ids,
+                    engine_list,
+                    &args,
+                )?);
+            } else if arch_is_moe && !want_metal {
+                // CPU MoE with --moe-shards: the remote-MoE block below
+                // dispatches experts to the shards. The dense NullFfn engine
+                // loop would silently ignore the experts, so skip it here.
+                eprintln!(
+                    "[bench] MoE vindex on CPU with --moe-shards — experts via \
+                     the remote block; dense engine row skipped"
+                );
+            } else {
+                let kv_ref_bytes =
+                    larql_kv::markov_residual::kv_memory_bytes_for_seq(&weights, token_ids.len());
 
-            // Parse + validate --ffn-policy once before the engine loop
-            // (multi-engine sweep reuses the same validated policy).
-            // Q4K path accepts but doesn't yet honor — engine_runtime
-            // logs a warning if non-None.
-            let validated_policy =
-                parse_ffn_policy(args.ffn_policy.as_deref(), weights.num_layers)?;
+                // Parse + validate --ffn-policy once before the engine loop
+                // (multi-engine sweep reuses the same validated policy).
+                // Q4K path accepts but doesn't yet honor — engine_runtime
+                // logs a warning if non-None.
+                let validated_policy =
+                    parse_ffn_policy(args.ffn_policy.as_deref(), weights.num_layers)?;
 
-            for engine_name in EngineKind::split_specs(engine_list) {
-                match EngineKind::from_name(&engine_name) {
-                    Some(kind) => {
-                        let backend = if want_metal {
-                            larql_inference::default_engine_backend()
-                        } else {
-                            larql_inference::cpu_engine_backend()
-                        };
-                        rows.push(run_engine(
-                            &mut weights,
-                            Some(&index),
-                            &token_ids,
-                            kv_ref_bytes,
-                            kind,
-                            backend,
-                            validated_policy.as_ref(),
-                            &args,
-                        )?);
+                for engine_name in EngineKind::split_specs(engine_list) {
+                    match EngineKind::from_name(&engine_name) {
+                        Some(kind) => {
+                            let backend = if want_metal {
+                                larql_inference::default_engine_backend()
+                            } else {
+                                larql_inference::cpu_engine_backend()
+                            };
+                            rows.push(run_engine(
+                                &mut weights,
+                                Some(&index),
+                                &token_ids,
+                                kv_ref_bytes,
+                                kind,
+                                backend,
+                                validated_policy.as_ref(),
+                                &args,
+                            )?);
+                        }
+                        None => eprintln!(
+                            "unknown engine {:?} — supported: {}",
+                            engine_name,
+                            EngineKind::supported_names().join(", "),
+                        ),
                     }
-                    None => eprintln!(
-                        "unknown engine {:?} — supported: {}",
-                        engine_name,
-                        EngineKind::supported_names().join(", "),
-                    ),
                 }
             }
         } else {
@@ -368,6 +402,18 @@ pub fn run(mut args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+/// Whether the vindex at `dir` is a hybrid-MoE architecture (Gemma 4
+/// 26B-A4B, 31B-MoE, …). Loads the Q4K model weights (mmap — cheap, no full
+/// read) and probes the architecture. Returns `false` on any load error so a
+/// non-MoE / unreadable vindex falls through to the standard CPU/engine paths
+/// and surfaces its own error there.
+fn vindex_is_hybrid_moe(dir: &std::path::Path) -> bool {
+    let mut cb = larql_vindex::SilentLoadCallbacks;
+    larql_vindex::load_model_weights_kquant(dir, &mut cb)
+        .map(|w| w.arch.is_hybrid_moe())
+        .unwrap_or(false)
 }
 
 /// Configure rayon's global thread pool for the bench. Precedence:

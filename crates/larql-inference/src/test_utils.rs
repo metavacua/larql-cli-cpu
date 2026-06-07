@@ -370,6 +370,18 @@ pub fn write_synthetic_model_dir(dir: &std::path::Path) -> Result<(), String> {
 ///   norms.bin                        -- f32 norms (unchanged from non-Q4 path)
 /// ```
 pub fn write_synthetic_q4k_model_dir(dir: &std::path::Path) -> Result<(), String> {
+    write_synthetic_q4k_model_dir_layers(dir, Q4K_TEST_NUM_LAYERS)
+}
+
+/// Layer-parametrised sibling of [`write_synthetic_q4k_model_dir`]. Same
+/// on-disk layout, but the serialised model has `num_layers` decoder
+/// layers — for tests that need a depth-fraction layer index to land
+/// inside the model (e.g. the LQL FR3 relation resolver's probe layer,
+/// which clamps to ≥3 and so needs a model deeper than the 2-layer default).
+pub fn write_synthetic_q4k_model_dir_layers(
+    dir: &std::path::Path,
+    num_layers: usize,
+) -> Result<(), String> {
     use larql_vindex::{
         write_model_weights_kquant, ExtractLevel, MoeConfig, SilentBuildCallbacks, StorageDtype,
         VindexConfig, VindexModelConfig,
@@ -377,7 +389,7 @@ pub fn write_synthetic_q4k_model_dir(dir: &std::path::Path) -> Result<(), String
 
     std::fs::create_dir_all(dir).map_err(|e| format!("create_dir_all: {e}"))?;
 
-    let weights = make_test_q4k_weights();
+    let weights = make_test_q4k_weights_layers(num_layers);
 
     // ── tokenizer.json ────────────────────────────────────────────────
     std::fs::write(
@@ -546,8 +558,9 @@ pub use larql_models::test_fixtures::{make_gemma3_test_weights, make_starcoder2_
 // construct realistic Q4K-sized ModelWeights. Re-exported for existing
 // `crate::test_utils::*` callers.
 pub use larql_models::test_fixtures::{
-    arc_mmap_from_bytes, make_test_q4k_weights, make_test_q4k_weights_silu, Q4K_TEST_HIDDEN,
-    Q4K_TEST_INTER, Q4K_TEST_NUM_LAYERS, Q4K_TEST_VOCAB,
+    arc_mmap_from_bytes, make_test_q4k_weights, make_test_q4k_weights_layers,
+    make_test_q4k_weights_silu, Q4K_TEST_HIDDEN, Q4K_TEST_INTER, Q4K_TEST_NUM_LAYERS,
+    Q4K_TEST_VOCAB,
 };
 /// Build a fully-populated synthetic `VectorIndex` that satisfies the
 /// cached + direct-matvec decode contract on the Q4_K weights from
