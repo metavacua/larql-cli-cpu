@@ -217,6 +217,11 @@ pub struct InferRoute {
     pub fallback: bool,
     /// `TOPK n` — candidate count the verifier considers (None = default 5).
     pub topk: Option<u32>,
+    /// `EXIT` → retrieval-augmented early exit: when the verified router fires,
+    /// short-circuit the forward at the resolved layer (skip the remaining
+    /// layers + lm_head). Verified-only — ignored when `fallback` is set, since
+    /// the FR2 fallback needs the full forward to stay parity-identical.
+    pub exit: bool,
 }
 
 /// Display mode for DESCRIBE and SHOW RELATIONS output.

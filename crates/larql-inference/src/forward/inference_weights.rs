@@ -19,7 +19,10 @@ use larql_vindex::{
 
 use crate::model::ModelWeights;
 
-use super::infer_patched::{infer_patched, infer_patched_q4k, InferPatchedResult};
+use super::infer_patched::{
+    infer_patched, infer_patched_early_exit, infer_patched_q4k, infer_patched_q4k_early_exit,
+    InferPatchedResult,
+};
 use super::predict::predict;
 use super::PredictResult;
 
@@ -106,6 +109,47 @@ impl InferenceWeights {
             ),
             Self::Quantised { weights, index } => infer_patched_q4k(
                 weights, tokenizer, gate_index, knn_store, token_ids, top_k, index, route_mode,
+            ),
+        }
+    }
+
+    /// Early-exit INFER (FR retrieval-augmented early exit): short-circuit the
+    /// forward at the highest stored layer when the FR1 verified router fires,
+    /// skipping the tail + lm_head. Returns `(result, exited)`. On a miss it
+    /// completes the full forward, so the result matches `infer_patched` in
+    /// `Verified` mode. Dispatches Dense / Q4_K like [`Self::infer_patched`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn infer_patched_early_exit(
+        &mut self,
+        tokenizer: &Tokenizer,
+        gate_index: &dyn GateIndex,
+        knn_store: Option<&KnnStore>,
+        token_ids: &[u32],
+        top_k: usize,
+        k_candidates: usize,
+        threshold: f32,
+    ) -> (InferPatchedResult, bool) {
+        match self {
+            Self::Dense(weights) => infer_patched_early_exit(
+                weights,
+                tokenizer,
+                gate_index,
+                knn_store,
+                token_ids,
+                top_k,
+                k_candidates,
+                threshold,
+            ),
+            Self::Quantised { weights, index } => infer_patched_q4k_early_exit(
+                weights,
+                tokenizer,
+                gate_index,
+                knn_store,
+                token_ids,
+                top_k,
+                index,
+                k_candidates,
+                threshold,
             ),
         }
     }

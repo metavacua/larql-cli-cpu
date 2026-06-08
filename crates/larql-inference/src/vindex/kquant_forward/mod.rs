@@ -47,6 +47,8 @@ pub use metal::{
     predict_kquant_metal, predict_kquant_metal_capture_pre_wo, predict_kquant_metal_hidden,
     predict_kquant_metal_with_replaced_head_residual_delta,
 };
-pub use remote_ffn::{predict_kquant_hidden_with_ffn, predict_kquant_with_ffn};
+pub use remote_ffn::{
+    predict_kquant_hidden_with_ffn, predict_kquant_with_ffn, predict_kquant_with_ffn_early_exit,
+};
 pub use tensors::{insert_q4k_layer_tensors, remove_layer_tensors};
 pub use walk_ffn::{kquant_ffn_forward_layer, kquant_ffn_forward_layer_q8k};

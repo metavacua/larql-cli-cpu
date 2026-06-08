@@ -114,6 +114,12 @@ INFER "The capital of Atlantis is" ROUTE VERIFY TOP 3;
 -- non-stored entity it can confident-wrong like the legacy gate — use FALLBACK
 -- only for queries known to be aliases of stored entities.
 INFER "The capital of Persia is" ROUTE VERIFY FALLBACK TOPK 8 TOP 3;
+
+-- EXIT: retrieval-augmented early exit. When the verified hit fires, the forward
+-- short-circuits at the resolved layer — the stored target is emitted and the
+-- remaining layers + lm_head are skipped (parity-exact, ~1.4× faster on
+-- fact-lookup answer tokens). Verified-only; ignored with FALLBACK.
+INFER "The capital of Atlantis is" ROUTE VERIFY EXIT TOP 3;
 ```
 
 With no `ROUTE` clause, INFER inherits the global default from the `LARQL_KNN_*`

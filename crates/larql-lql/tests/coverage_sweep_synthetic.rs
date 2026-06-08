@@ -276,6 +276,27 @@ fn infer_route_verify_fallback_synthetic() {
 }
 
 #[test]
+fn infer_route_verify_exit_synthetic() {
+    // ROUTE VERIFY EXIT → drives the early-exit branch of exec_infer
+    // (`infer_patched_early_exit`). The synthetic KnnStore is empty so no
+    // verified hit fires → it transparently completes the full forward; we
+    // assert only that the path runs.
+    let (mut session, _dir, _) = fresh_session();
+    let _ = try_run(&mut session, r#"INFER "[1]" ROUTE VERIFY EXIT TOP 3;"#);
+}
+
+#[test]
+fn infer_route_verify_fallback_exit_ignores_early_exit_synthetic() {
+    // FALLBACK + EXIT: early-exit is verified-only, so the fallback path
+    // disables it and the full TwoTier forward runs. Must still parse + run.
+    let (mut session, _dir, _) = fresh_session();
+    let _ = try_run(
+        &mut session,
+        r#"INFER "[1]" ROUTE VERIFY FALLBACK EXIT TOP 3;"#,
+    );
+}
+
+#[test]
 fn infer_errors_when_tokenizer_file_missing() {
     // `exec_infer` reloads `tokenizer.json` from disk on every call (the
     // vindex backend path). Removing it after USE drives the

@@ -21,10 +21,10 @@ use larql_vindex::{GateIndex, KnnStore, PatchedVindex, VectorIndex, WalkHit};
 use tokenizers::Tokenizer;
 
 use crate::model::ModelWeights;
-use crate::vindex::predict_kquant_with_ffn;
 use crate::vindex::WalkFfn;
+use crate::vindex::{predict_kquant_with_ffn, predict_kquant_with_ffn_early_exit};
 
-use super::predict::predict_with_ffn;
+use super::predict::{predict_with_ffn, predict_with_ffn_early_exit};
 use super::PredictResult;
 
 /// Cosine threshold for the L0 KnnStore override. A stored key whose top-1
@@ -139,6 +139,85 @@ pub fn infer_patched(
     }
 }
 
+/// **Early-exit** variant of `infer_patched` (FR retrieval-augmented early
+/// exit). Runs the walk forward only as far as the highest stored KnnStore
+/// layer L\*, checks the FR1 verified router there, and — if a verified hit
+/// fires — returns the stored target immediately, **skipping layers L\*+1..end
+/// and the lm_head**. On a miss it transparently completes the full forward, so
+/// the result is identical to `infer_patched` in `Verified` mode (the verified
+/// router checks every stored layer ≤ L\*, which are all computed by L\*).
+///
+/// The returned `bool` is `true` when the early exit fired. Parity is structural
+/// (residuals ≤ L\* are independent of the tail) and proven bit-exact in
+/// `examples/fr_early_exit_parity.rs`; this is the production-path wiring whose
+/// tok/s win is measured in `examples/fr_early_exit_bench.rs`.
+#[allow(clippy::too_many_arguments)]
+pub fn infer_patched_early_exit(
+    weights: &ModelWeights,
+    tokenizer: &Tokenizer,
+    gate_index: &dyn GateIndex,
+    knn_store: Option<&KnnStore>,
+    token_ids: &[u32],
+    top_k: usize,
+    k_candidates: usize,
+    threshold: f32,
+) -> (InferPatchedResult, bool) {
+    let walk_ffn = WalkFfn::new_unlimited_with_trace(weights, gate_index);
+
+    // Check at the highest stored layer — by then every stored-layer residual
+    // (all ≤ L*) has been captured, so the verified route sees the same set it
+    // would post-hoc. No store / no valid layer → never exits (full forward).
+    let stop = knn_store
+        .map(|s| s.layers())
+        .and_then(|ls| ls.into_iter().filter(|l| *l < weights.num_layers).max())
+        .unwrap_or_else(|| weights.num_layers.saturating_sub(1));
+
+    let prompt = tokenizer.decode(token_ids, true).unwrap_or_default();
+    let prompt_lc = prompt.to_lowercase();
+
+    let mut fired: Option<KnnOverride> = None;
+    let start = std::time::Instant::now();
+    let (predictions, exited);
+    {
+        let mut on_stop = || -> Option<Vec<(String, f64)>> {
+            let store = knn_store?;
+            let residuals = walk_ffn.peek_residuals();
+            let ovr = verified_route(store, &residuals, &prompt_lc, k_candidates, threshold)?;
+            let preds = assemble_predictions(Vec::new(), &Some(ovr.clone()), top_k);
+            fired = Some(ovr);
+            Some(preds)
+        };
+        (predictions, exited) = predict_with_ffn_early_exit(
+            weights,
+            tokenizer,
+            token_ids,
+            top_k,
+            &walk_ffn,
+            stop,
+            &mut on_stop,
+        );
+    }
+    let walk_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let residuals = walk_ffn.take_residuals();
+    // On an exit the model's own lm_head never ran, so there is no model_top1.
+    let model_top1 = if exited {
+        None
+    } else {
+        predictions.first().cloned()
+    };
+
+    (
+        InferPatchedResult {
+            predictions,
+            model_top1,
+            knn_override: fired,
+            residuals,
+            walk_ms,
+        },
+        exited,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 /// Q4K variant of `infer_patched`. Identical contract but routes the forward
 /// pass through `predict_kquant_with_ffn`, which dequantises one layer at a time
@@ -179,6 +258,78 @@ pub fn infer_patched_q4k(
         residuals,
         walk_ms,
     }
+}
+
+/// Q4K early-exit — the Q4_K twin of [`infer_patched_early_exit`]. Same
+/// short-circuit contract (stop at the highest stored layer L\*, emit the
+/// verified target, skip the tail + lm_head; on a miss complete the full
+/// forward), routed through the per-layer-dequant q4k forward.
+#[allow(clippy::too_many_arguments)]
+pub fn infer_patched_q4k_early_exit(
+    weights: &mut ModelWeights,
+    tokenizer: &Tokenizer,
+    gate_index: &dyn GateIndex,
+    knn_store: Option<&KnnStore>,
+    token_ids: &[u32],
+    top_k: usize,
+    index: &VectorIndex,
+    k_candidates: usize,
+    threshold: f32,
+) -> (InferPatchedResult, bool) {
+    // SAFETY: identical aliasing argument to `infer_patched_q4k` — WalkFfn reads
+    // only `weights.arch`/`weights.vectors`, the q4k forward mutates only
+    // `weights.tensors`.
+    let weights_ref: &ModelWeights = unsafe { &*(weights as *const ModelWeights) };
+    let walk_ffn = WalkFfn::new_unlimited_with_trace(weights_ref, gate_index);
+
+    let stop = knn_store
+        .map(|s| s.layers())
+        .and_then(|ls| ls.into_iter().filter(|l| *l < weights.num_layers).max())
+        .unwrap_or_else(|| weights.num_layers.saturating_sub(1));
+    let prompt = tokenizer.decode(token_ids, true).unwrap_or_default();
+    let prompt_lc = prompt.to_lowercase();
+
+    let mut fired: Option<KnnOverride> = None;
+    let start = std::time::Instant::now();
+    let (predictions, exited);
+    {
+        let mut on_stop = || -> Option<Vec<(String, f64)>> {
+            let store = knn_store?;
+            let residuals = walk_ffn.peek_residuals();
+            let ovr = verified_route(store, &residuals, &prompt_lc, k_candidates, threshold)?;
+            let preds = assemble_predictions(Vec::new(), &Some(ovr.clone()), top_k);
+            fired = Some(ovr);
+            Some(preds)
+        };
+        (predictions, exited) = predict_kquant_with_ffn_early_exit(
+            weights,
+            tokenizer,
+            token_ids,
+            top_k,
+            index,
+            &walk_ffn,
+            stop,
+            &mut on_stop,
+        );
+    }
+    let walk_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let residuals = walk_ffn.take_residuals();
+    let model_top1 = if exited {
+        None
+    } else {
+        predictions.first().cloned()
+    };
+
+    (
+        InferPatchedResult {
+            predictions,
+            model_top1,
+            knn_override: fired,
+            residuals,
+            walk_ms,
+        },
+        exited,
+    )
 }
 
 /// Pure function: given raw walk predictions, per-layer residuals, and an

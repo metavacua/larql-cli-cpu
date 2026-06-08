@@ -33,6 +33,15 @@ impl Session {
             None => larql_inference::KnnRouteMode::from_env(),
         };
 
+        // Retrieval-augmented early exit (FR): opt-in via `ROUTE VERIFY … EXIT`
+        // or `LARQL_KNN_EARLY_EXIT`. Verified-only — the FR2 fallback needs the
+        // full forward to stay parity-identical, so `FALLBACK` disables it. Only
+        // takes effect below when `route_mode` actually resolves to `Verified`.
+        let exit_requested = match route {
+            Some(r) => r.exit && !r.fallback,
+            None => std::env::var_os("LARQL_KNN_EARLY_EXIT").is_some(),
+        };
+
         // Weight backend: dense inference (no vindex needed)
         if let Backend::Weight {
             weights, tokenizer, ..
@@ -88,14 +97,31 @@ impl Session {
         // 0001 (docs/adr/0001-python-lql-infer-parity.md).
         let mut iw = larql_inference::InferenceWeights::load(path, config, &mut cb)
             .map_err(|e| LqlError::exec("failed to load model weights", e))?;
-        let infer = iw.infer_patched(
-            &tokenizer,
-            patched,
-            Some(&patched.knn_store),
-            &token_ids,
-            top_k,
-            &route_mode,
-        );
+        // Early-exit applies only to the verified router (parity-safe). Any
+        // other resolved mode (Legacy / TwoTier) runs the full forward.
+        let (infer, exited) = match (exit_requested, &route_mode) {
+            (true, larql_inference::KnnRouteMode::Verified { k, threshold }) => iw
+                .infer_patched_early_exit(
+                    &tokenizer,
+                    patched,
+                    Some(&patched.knn_store),
+                    &token_ids,
+                    top_k,
+                    *k,
+                    *threshold,
+                ),
+            _ => (
+                iw.infer_patched(
+                    &tokenizer,
+                    patched,
+                    Some(&patched.knn_store),
+                    &token_ids,
+                    top_k,
+                    &route_mode,
+                ),
+                false,
+            ),
+        };
 
         let trace_layers = larql_inference::walk_trace_from_residuals(&infer.residuals, patched);
 
@@ -117,10 +143,18 @@ impl Session {
         }
         out.push(format!("  {:.0}ms", infer.walk_ms));
         if infer.knn_override.is_some() {
-            out.push(
-                "  note: KNN override is a post-logits retrieval sidecar, not an FFN/residual edit."
-                    .into(),
-            );
+            if exited {
+                out.push(
+                    "  note: early-exit — verified hit fired at the resolved layer; the stored \
+                     target was emitted and the remaining layers + lm_head were skipped."
+                        .into(),
+                );
+            } else {
+                out.push(
+                    "  note: KNN override is a post-logits retrieval sidecar, not an FFN/residual edit."
+                        .into(),
+                );
+            }
         }
 
         out.push(String::new());

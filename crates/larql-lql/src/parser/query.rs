@@ -71,7 +71,7 @@ impl Parser {
                 }
                 Token::Keyword(Keyword::Route) => {
                     self.advance();
-                    // ROUTE VERIFY [FALLBACK] [TOPK n]
+                    // ROUTE VERIFY [FALLBACK] [TOPK n] [EXIT]
                     self.expect_keyword(Keyword::Verify)?;
                     let mut r = crate::ast::InferRoute::default();
                     loop {
@@ -83,6 +83,10 @@ impl Parser {
                             Token::Keyword(Keyword::Topk) => {
                                 self.advance();
                                 r.topk = Some(self.expect_u32()?);
+                            }
+                            Token::Keyword(Keyword::Exit) => {
+                                self.advance();
+                                r.exit = true;
                             }
                             _ => break,
                         }

@@ -143,6 +143,7 @@ pub enum Keyword {
     Verify,
     Fallback,
     Topk,
+    Exit,
 }
 
 impl Keyword {
@@ -260,6 +261,7 @@ impl Keyword {
             Self::Verify => "verify",
             Self::Fallback => "fallback",
             Self::Topk => "topk",
+            Self::Exit => "exit",
         }
     }
 
@@ -374,6 +376,7 @@ impl Keyword {
             "VERIFY" => Some(Self::Verify),
             "FALLBACK" => Some(Self::Fallback),
             "TOPK" => Some(Self::Topk),
+            "EXIT" => Some(Self::Exit),
             _ => None,
         }
     }

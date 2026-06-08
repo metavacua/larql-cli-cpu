@@ -366,7 +366,7 @@ EXPLAIN WALK "The capital of France is"
 
 ```
 INFER <prompt>
-    [ROUTE VERIFY [FALLBACK] [TOPK <n>]]
+    [ROUTE VERIFY [FALLBACK] [TOPK <n>] [EXIT]]
     [TOP <n>]
     [COMPARE]
 
@@ -391,8 +391,16 @@ INFER <prompt>
 --   gate (measured 0/20 distractor-safe vs VERIFY's 20/20). Use FALLBACK only
 --   for queries known to be aliases of stored entities; VERIFY is the safe
 --   open default.
+-- ROUTE VERIFY EXIT: retrieval-augmented EARLY EXIT. When the verified router
+--   fires, the forward short-circuits at the resolved layer (~0.7 depth) — the
+--   stored target is emitted and the remaining layers + lm_head are SKIPPED.
+--   Parity-exact (the emitted token is byte-identical to the full forward) and
+--   ~1.4× faster on fact-lookup answer tokens. Verified-only: EXIT is ignored
+--   when FALLBACK is set (the FR2 fallback needs the full forward to stay
+--   parity-identical). On a verify-miss the forward completes normally.
 -- (The LARQL_KNN_VERIFY / LARQL_KNN_FALLBACK / LARQL_KNN_TOPK / LARQL_KNN_MIN_COS
---  env vars set the default when no ROUTE clause is present.)
+--  env vars set the default when no ROUTE clause is present;
+--  LARQL_KNN_EARLY_EXIT turns on EXIT for the env-default verified path.)
 
 INFER "The capital of France is" TOP 5;
 
@@ -401,6 +409,9 @@ INFER "The capital of France is" TOP 5 COMPARE;
 INFER "The capital of Atlantis is" ROUTE VERIFY TOP 3;
 
 INFER "The capital of Persia is" ROUTE VERIFY FALLBACK TOPK 8 TOP 3;
+
+-- Early-exit: emit the stored target the moment the verified hit fires.
+INFER "The capital of Atlantis is" ROUTE VERIFY EXIT TOP 3;
 ```
 
 ```
