@@ -5,6 +5,23 @@
 //! explicit options struct; this module is the compatibility bridge while those
 //! APIs are split out.
 //!
+//! ## Environment-variable surface (the categories)
+//!
+//! - **Decode fast path — default ON, opt out with `=0`.** The shipped CPU
+//!   decode default; you do *not* set anything to go fast. Resolvers:
+//!   [`q4k_direct_attn_enabled`], [`q4k_attn_int8_enabled`],
+//!   [`q4k_lm_head_enabled`], [`q4k_direct_ffn_enabled`], [`q4k_asm_enabled`],
+//!   [`spin_pool_enabled`] (env `LARQL_Q4K_*`, `LARQL_SPIN_POOL`). Set any to
+//!   `0`/`false`/`off`/`no` to force the f32/rayon path (A/B, kernel debug).
+//! - **Diagnostics / dumps — presence = on** (`env_flag`): the `LARQL_*_DUMP_*`,
+//!   `*_TIMING`, `LARQL_PROFILE_SPLIT`, `LARQL_DECODE_STAGES`,
+//!   `LARQL_VINDEX_DESCRIBE`, `LARQL_MOE_DEBUG` toggles. Off unless set.
+//! - **Retained comparison knobs** (ADR-017 shader/kernel retention): the
+//!   fused-shader flags (`LARQL_QKV_FUSED`, `LARQL_FUSED_*`) and the `asm_v2`
+//!   bench arm — deliberately kept for A/B, *not* dead code.
+//! - **Config / paths / experiment / test** live with their feature, not here
+//!   (`HF_*`, `LARQL_HOME`, `LARQL_MODEL`, `LARQL_MEMIT_*`, `LARQL_TEST_*`, …).
+//!
 //! ## Helper taxonomy — pick the matching one for the flag's intended default
 //!
 //! Mixing these on the same env var is the bug class flagged in the
@@ -49,14 +66,10 @@ pub const ENV_DISABLE_Q4K_DIRECT: &str = "LARQL_DISABLE_Q4K_DIRECT";
 pub const ENV_Q4K_DIRECT: &str = "LARQL_Q4K_DIRECT";
 /// Max entries in the dequantised MoE expert cache.
 pub const ENV_MOE_CACHE_ENTRIES: &str = "LARQL_MOE_CACHE_ENTRIES";
-/// Namespaced MoE bypass toggle.
+/// MoE bypass toggle (diagnostic).
 pub const ENV_SKIP_MOE: &str = "LARQL_SKIP_MOE";
-/// Legacy MoE bypass toggle. Prefer [`ENV_SKIP_MOE`] in new scripts.
-pub const ENV_SKIP_MOE_LEGACY: &str = "SKIP_MOE";
-/// Namespaced MoE route/debug output toggle.
+/// MoE route/debug output toggle.
 pub const ENV_MOE_DEBUG: &str = "LARQL_MOE_DEBUG";
-/// Legacy MoE route/debug output toggle. Prefer [`ENV_MOE_DEBUG`].
-pub const ENV_MOE_DEBUG_LEGACY: &str = "MOE_DEBUG";
 /// Enable Metal MoE dispatch timing.
 pub const ENV_METAL_MOE_TIMING: &str = "LARQL_MOE_TIMING";
 /// Select the 8-simdgroup Q4_K matvec kernel; set to a false value to opt out.
@@ -119,10 +132,72 @@ pub const ENV_STAGE_DUMP_LAYER: &str = "LARQL_STAGE_DUMP_LAYER";
 pub const ENV_GPU_TIMING: &str = "LARQL_GPU_TIMING";
 /// Request paired commit/wait decode stage profiling.
 pub const ENV_PROFILE_SPLIT: &str = "LARQL_PROFILE_SPLIT";
-/// Legacy alias for [`ENV_PROFILE_SPLIT`].
-pub const ENV_DECODE_STAGE_TIMING: &str = "LARQL_DECODE_STAGE_TIMING";
 /// Debug-only outer norm bypass in Metal MoE combine.
 pub const ENV_SKIP_OUTER_NORM: &str = "SKIP_OUTER_NORM";
+
+// ── CPU decode fast path — default ON, opt out with `=0` ─────────────────────
+//
+// These graduated from opt-in experiments (2026-06) to the shipped default:
+// together they take CPU MoE decode from ~7 tok/s (f32 fallback) to ~35 on the
+// 26B-A4B, parity-safe, with per-layer/format fallbacks (a layer/model that
+// can't take the fast route silently uses the f32 one). Disable any single
+// stage with `LARQL_<NAME>=0` (also accepts `false`/`off`/`no`) — e.g. for an
+// A/B against the f32 path or to debug a kernel.
+//
+/// Q4_K-direct attention projections (read Q4_K weights straight from the index
+/// instead of dequantising to f32 first).
+pub const ENV_Q4K_DIRECT_ATTN: &str = "LARQL_Q4K_DIRECT_ATTN";
+/// Int8 (Q8_K) activation route for the Q4_K-direct attention projections.
+pub const ENV_Q4K_ATTN_INT8: &str = "LARQL_Q4K_ATTN_INT8";
+/// Q4_K lm_head (vocab projection straight from the Q4_K view; ~4× the
+/// bandwidth of the f32 head). Falls back to f32 when no Q4_K head view exists.
+pub const ENV_Q4K_LM_HEAD: &str = "LARQL_Q4K_LM_HEAD";
+/// Q4_K-direct dense-FFN slab on the decode path (prefill stays f32 gemm).
+pub const ENV_Q4K_DIRECT_FFN: &str = "LARQL_Q4K_DIRECT_FFN";
+/// Hand-asm aarch64 Q4_K/Q6_K × Q8_K kernels (bit-exact with the intrinsic path).
+pub const ENV_Q4K_ASM: &str = "LARQL_Q4K_ASM";
+/// Spin-barrier thread pool for the decode hot path (vs rayon's sleeping pool).
+pub const ENV_SPIN_POOL: &str = "LARQL_SPIN_POOL";
+
+/// A decode fast-path stage is ON unless explicitly disabled
+/// (`=0`/`false`/`off`/`no`).
+fn fast_path_on(name: &str) -> bool {
+    !env_opt_out(name)
+}
+
+// The per-layer / per-token stages read the env each call (an uncontended
+// single-thread `getenv` ~ns, negligible at layer granularity) so they stay
+// togglable in tests. The two genuinely hot stages — `asm` (per matvec) and
+// `spin_pool` (per parallel section) — cache at first read; no test toggles
+// them via env (their unit tests drive the kernels / `SpinPool` directly).
+
+/// Q4_K-direct attention projections enabled (default on).
+pub fn q4k_direct_attn_enabled() -> bool {
+    fast_path_on(ENV_Q4K_DIRECT_ATTN)
+}
+/// Int8 attention projection route enabled (default on).
+pub fn q4k_attn_int8_enabled() -> bool {
+    fast_path_on(ENV_Q4K_ATTN_INT8)
+}
+/// Q4_K lm_head enabled (default on; falls back to f32 without a head view).
+pub fn q4k_lm_head_enabled() -> bool {
+    fast_path_on(ENV_Q4K_LM_HEAD)
+}
+/// Q4_K-direct dense-FFN decode slab enabled (default on).
+pub fn q4k_direct_ffn_enabled() -> bool {
+    fast_path_on(ENV_Q4K_DIRECT_FFN)
+}
+/// Hand-asm Q4_K/Q6_K kernels enabled (default on; aarch64 only). Cached — read
+/// per matvec.
+pub fn q4k_asm_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| fast_path_on(ENV_Q4K_ASM))
+}
+/// Spin-barrier decode pool enabled (default on). Cached — read per section.
+pub fn spin_pool_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| fast_path_on(ENV_SPIN_POOL))
+}
 
 // Helpers below are `pub` (not `pub(crate)`) because sibling backend
 // crates (`larql-compute-metal`, future `larql-compute-vulkan`, …)
@@ -172,15 +247,15 @@ pub fn env_not_zero_or_default(name: &str, default: bool) -> bool {
 }
 
 pub(crate) fn moe_debug_enabled() -> bool {
-    env_flag_any(&[ENV_MOE_DEBUG, ENV_MOE_DEBUG_LEGACY])
+    env_flag(ENV_MOE_DEBUG)
 }
 
 pub(crate) fn skip_moe_enabled() -> bool {
-    env_flag_any(&[ENV_SKIP_MOE, ENV_SKIP_MOE_LEGACY])
+    env_flag(ENV_SKIP_MOE)
 }
 
 pub fn split_profile_requested() -> bool {
-    env_flag_any(&[ENV_PROFILE_SPLIT, ENV_DECODE_STAGE_TIMING])
+    env_flag(ENV_PROFILE_SPLIT)
 }
 
 #[cfg(test)]
@@ -271,54 +346,27 @@ mod tests {
     }
 
     #[test]
-    fn legacy_alias_helpers_still_work() {
-        with_env_vars(
-            &[(ENV_SKIP_MOE, None), (ENV_SKIP_MOE_LEGACY, Some("1"))],
-            || {
-                assert!(skip_moe_enabled());
-            },
-        );
-        with_env_vars(
-            &[(ENV_MOE_DEBUG, Some("1")), (ENV_MOE_DEBUG_LEGACY, None)],
-            || {
-                assert!(moe_debug_enabled());
-            },
-        );
-        with_env_vars(
-            &[
-                (ENV_PROFILE_SPLIT, None),
-                (ENV_DECODE_STAGE_TIMING, Some("1")),
-            ],
-            || {
-                assert!(split_profile_requested());
-            },
-        );
+    fn namespaced_toggle_helpers_read_their_flag() {
+        with_env(ENV_SKIP_MOE, Some("1"), || assert!(skip_moe_enabled()));
+        with_env(ENV_MOE_DEBUG, Some("1"), || assert!(moe_debug_enabled()));
+        with_env(ENV_PROFILE_SPLIT, Some("1"), || {
+            assert!(split_profile_requested())
+        });
     }
 
     #[test]
     fn env_flag_any_and_debug_helpers_cover_absent_and_present_cases() {
-        with_env_vars(
-            &[
-                (ENV_SKIP_OUTER_NORM, None),
-                (ENV_MOE_DEBUG, None),
-                (ENV_MOE_DEBUG_LEGACY, None),
-            ],
-            || {
-                assert!(!env_flag(ENV_SKIP_OUTER_NORM));
-                assert!(!env_flag_any(&[ENV_SKIP_OUTER_NORM, ENV_MOE_DEBUG]));
-                assert!(!moe_debug_enabled());
-            },
-        );
+        with_env_vars(&[(ENV_SKIP_OUTER_NORM, None), (ENV_MOE_DEBUG, None)], || {
+            assert!(!env_flag(ENV_SKIP_OUTER_NORM));
+            assert!(!env_flag_any(&[ENV_SKIP_OUTER_NORM, ENV_MOE_DEBUG]));
+            assert!(!moe_debug_enabled());
+        });
 
         with_env_vars(
-            &[
-                (ENV_SKIP_OUTER_NORM, Some("1")),
-                (ENV_MOE_DEBUG, Some("1")),
-                (ENV_MOE_DEBUG_LEGACY, None),
-            ],
+            &[(ENV_SKIP_OUTER_NORM, Some("1")), (ENV_MOE_DEBUG, Some("1"))],
             || {
                 assert!(env_flag(ENV_SKIP_OUTER_NORM));
-                assert!(env_flag_any(&[ENV_SKIP_OUTER_NORM, ENV_MOE_DEBUG_LEGACY]));
+                assert!(env_flag_any(&[ENV_SKIP_OUTER_NORM, ENV_MOE_DEBUG]));
                 assert!(moe_debug_enabled());
             },
         );

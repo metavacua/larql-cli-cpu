@@ -19,6 +19,7 @@
 //! - `ops/linalg`:     Cholesky factor/solve, `ridge_decomposition_solve`
 
 pub mod ops;
+pub mod spin_pool;
 
 // Re-export for backward compatibility (used by benchmarks/examples)
 pub mod q4 {

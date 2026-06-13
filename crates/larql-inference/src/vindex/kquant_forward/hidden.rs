@@ -170,11 +170,10 @@ pub fn moe_ffn_block_cpu(
 /// f32-resident `run_ffn` — on the 26B-A4B this drops the slab's per-token
 /// traffic ~7× (2.14 GB f32 → ~0.3 GB quantised). Decode-only (single-row):
 /// prefill stays on the f32 BLAS gemm, where repeated quantised matvec
-/// loses (the task-#16 prefill falsification). Default off = byte-identical.
+/// loses (the task-#16 prefill falsification). **Default on**
+/// (`LARQL_Q4K_DIRECT_FFN=0` opts out); see [`larql_compute::options`].
 fn q4k_direct_ffn_enabled() -> bool {
-    use std::sync::OnceLock;
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("LARQL_Q4K_DIRECT_FFN").as_deref() == Ok("1"))
+    larql_compute::options::q4k_direct_ffn_enabled()
 }
 
 /// Index-aware variant of [`moe_ffn_block_cpu`]: when `index` is provided

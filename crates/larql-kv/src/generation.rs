@@ -636,11 +636,10 @@ fn argmax_next_token(
 /// the vindex's Q4_K lm_head view (synthesised from f16 embeddings at load
 /// for tied-embedding models) instead of the f32 row-parallel sgemv. On a
 /// 262K-vocab head this drops lm_head bandwidth ~4× (e.g. 2.95 GB → 0.42 GB
-/// per step on Gemma 4 26B-A4B). Default off = byte-identical f32 path.
+/// per step on Gemma 4 26B-A4B). **Default on** (`LARQL_Q4K_LM_HEAD=0` opts
+/// out); falls back to the f32 path when no Q4_K head view exists.
 fn q4k_lm_head_enabled() -> bool {
-    use std::sync::OnceLock;
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("LARQL_Q4K_LM_HEAD").as_deref() == Ok("1"))
+    larql_compute::options::q4k_lm_head_enabled()
 }
 
 /// Resident-path argmax: like [`argmax_next_token`] but with the vindex at

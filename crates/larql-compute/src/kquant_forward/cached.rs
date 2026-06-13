@@ -25,9 +25,7 @@
 // across two files.
 #![allow(clippy::needless_range_loop, clippy::type_complexity)]
 
-use crate::cpu::ops::q4k_q8k_dot::{
-    q4k_q8k_matvec_into, q6k_q8k_matvec_into, quantize_x_to_q8k_into, Q8KActivation,
-};
+use crate::cpu::ops::q4k_q8k_dot::{quantize_x_to_q8k_into, Q8KActivation};
 use crate::ComputeBackend;
 use larql_models::ModelWeights;
 use ndarray::Array2;
@@ -276,30 +274,10 @@ fn matvec_q4k_or_q6k_q8k(
     // `q4k_matvec_into` in `q4_common.rs`. Without this, decode runs
     // single-threaded and the sdot path actually regresses vs the
     // (rayon-parallel) f32 path despite each row being faster.
-    use rayon::prelude::*;
-    const CHUNK_ROWS: usize = 32;
     let mut out = vec![0.0f32; rows];
-    let w_ref = bytes;
-    out.par_chunks_mut(CHUNK_ROWS)
-        .enumerate()
-        .for_each(|(chunk_idx, chunk)| {
-            let row_start = chunk_idx * CHUNK_ROWS;
-            let chunk_len = chunk.len().min(rows.saturating_sub(row_start));
-            if chunk_len == 0 {
-                return;
-            }
-            let w_chunk =
-                &w_ref[row_start * bytes_per_row..(row_start + chunk_len) * bytes_per_row];
-            match format {
-                "Q4_K" => {
-                    q4k_q8k_matvec_into(&mut chunk[..chunk_len], x_q8k, w_chunk, chunk_len, cols)
-                }
-                "Q6_K" => {
-                    q6k_q8k_matvec_into(&mut chunk[..chunk_len], x_q8k, w_chunk, chunk_len, cols)
-                }
-                _ => {}
-            }
-        });
+    crate::cpu::ops::q4k_q8k_dot::q4k_q8k_matvec_parallel(
+        &mut out, x_q8k, bytes, rows, cols, format,
+    );
     Some(out)
 }
 
@@ -838,26 +816,27 @@ fn run_ffn_decode_step_q4k_direct(
     // scalar pass serial on the main thread while the workers slept.
     let mut activated = vec![0.0f32; intermediate];
     {
-        use rayon::prelude::*;
         let gelu = matches!(arch.activation(), larql_models::Activation::GeluTanh);
         let sqrt_2_over_pi = (2.0f32 / std::f32::consts::PI).sqrt();
-        activated
-            .par_chunks_mut(256)
-            .zip(gate_vec.par_chunks(256).zip(up_vec.par_chunks(256)))
-            .for_each(|(a_c, (g_c, u_c))| {
-                if gelu {
-                    for ((a, &x), &u) in a_c.iter_mut().zip(g_c.iter()).zip(u_c.iter()) {
-                        let inner = sqrt_2_over_pi * (x + 0.044715 * x * x * x);
-                        *a = 0.5 * x * (1.0 + inner.tanh()) * u;
-                    }
-                } else {
-                    // SiLU = x * sigmoid(x). Same shape as dense_ffn_forward_backend.
-                    for ((a, &x), &u) in a_c.iter_mut().zip(g_c.iter()).zip(u_c.iter()) {
-                        let sig = 1.0 / (1.0 + (-x).exp());
-                        *a = x * sig * u;
-                    }
+        let gate_ref = &gate_vec[..];
+        let up_ref = &up_vec[..];
+        crate::cpu::spin_pool::par_chunks_mut(&mut activated, 256, |ci, a_c| {
+            let start = ci * 256;
+            let g_c = &gate_ref[start..start + a_c.len()];
+            let u_c = &up_ref[start..start + a_c.len()];
+            if gelu {
+                for ((a, &x), &u) in a_c.iter_mut().zip(g_c.iter()).zip(u_c.iter()) {
+                    let inner = sqrt_2_over_pi * (x + 0.044715 * x * x * x);
+                    *a = 0.5 * x * (1.0 + inner.tanh()) * u;
                 }
-            });
+            } else {
+                // SiLU = x * sigmoid(x). Same shape as dense_ffn_forward_backend.
+                for ((a, &x), &u) in a_c.iter_mut().zip(g_c.iter()).zip(u_c.iter()) {
+                    let sig = 1.0 / (1.0 + (-x).exp());
+                    *a = x * sig * u;
+                }
+            }
+        });
     }
 
     // down projection: out = activated @ W_down.T → [hidden].

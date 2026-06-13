@@ -9,7 +9,6 @@ use crate::attention::SharedKV;
 use crate::ffn::WeightFfn;
 use crate::model::ModelWeights;
 use ndarray::Array2;
-use rayon::prelude::*;
 
 /// Row-parallel matvec: `out[v] = sum_h x[0, h] * lm_head[v, h]`.
 /// `lm_head` is `[vocab, hidden]` row-major; `x` is `[1, hidden]`.
@@ -28,9 +27,17 @@ fn parallel_lm_head_logits(
         .as_slice()
         .expect("lm_head expected contiguous row-major");
     let mut out = vec![0.0f32; vocab];
-    out.par_iter_mut().enumerate().for_each(|(v, slot)| {
-        let row = &lm_slice[v * hidden..(v + 1) * hidden];
-        *slot = f32_dot(row, x_row);
+    // Route through the spin pool when enabled (else rayon) so the f32 lm_head
+    // shares the decode loop's one parallelism strategy instead of waking a
+    // second (rayon) pool that thrashes against it. Chunk by rows of vocab.
+    const CHUNK_ROWS: usize = 64;
+    larql_compute::cpu::spin_pool::par_chunks_mut(&mut out, CHUNK_ROWS, |ci, chunk| {
+        let base = ci * CHUNK_ROWS;
+        for (j, slot) in chunk.iter_mut().enumerate() {
+            let v = base + j;
+            let row = &lm_slice[v * hidden..(v + 1) * hidden];
+            *slot = f32_dot(row, x_row);
+        }
     });
     out
 }
@@ -169,26 +176,12 @@ pub fn logits_to_predictions_q4_lm_head(
     // linearly across M3 Max's 11 perf cores.
     let raw = {
         use larql_compute::cpu::ops::q4k_q8k_dot::{
-            q4k_q8k_matvec_into, quantize_x_to_q8k_into, Q8KActivation,
+            q4k_q8k_matvec_parallel, quantize_x_to_q8k_into, Q8KActivation,
         };
-        use rayon::prelude::*;
         let mut h_q8k = Q8KActivation::with_capacity(hidden);
         quantize_x_to_q8k_into(&mut h_q8k, last_row);
-        let bytes_per_row = (hidden / 256) * 144; // Q4_K row size
         let mut out = vec![0.0f32; vocab];
-        const CHUNK_ROWS: usize = 64;
-        out.par_chunks_mut(CHUNK_ROWS)
-            .enumerate()
-            .for_each(|(chunk_idx, chunk)| {
-                let row_start = chunk_idx * CHUNK_ROWS;
-                let chunk_len = chunk.len().min(vocab.saturating_sub(row_start));
-                if chunk_len == 0 {
-                    return;
-                }
-                let w_chunk =
-                    &q4_lm_head[row_start * bytes_per_row..(row_start + chunk_len) * bytes_per_row];
-                q4k_q8k_matvec_into(&mut chunk[..chunk_len], &h_q8k, w_chunk, chunk_len, hidden);
-            });
+        q4k_q8k_matvec_parallel(&mut out, &h_q8k, q4_lm_head, vocab, hidden, "Q4_K");
         out
     };
     let _ = backend;
@@ -237,25 +230,12 @@ pub fn q4_lm_head_argmax(
     // Same raw-matvec block as `logits_to_predictions_q4_lm_head`.
     let raw = {
         use larql_compute::cpu::ops::q4k_q8k_dot::{
-            q4k_q8k_matvec_into, quantize_x_to_q8k_into, Q8KActivation,
+            q4k_q8k_matvec_parallel, quantize_x_to_q8k_into, Q8KActivation,
         };
         let mut h_q8k = Q8KActivation::with_capacity(hidden);
         quantize_x_to_q8k_into(&mut h_q8k, last_row);
-        let bytes_per_row = (hidden / 256) * 144;
         let mut out = vec![0.0f32; vocab];
-        const CHUNK_ROWS: usize = 64;
-        out.par_chunks_mut(CHUNK_ROWS)
-            .enumerate()
-            .for_each(|(chunk_idx, chunk)| {
-                let row_start = chunk_idx * CHUNK_ROWS;
-                let chunk_len = chunk.len().min(vocab.saturating_sub(row_start));
-                if chunk_len == 0 {
-                    return;
-                }
-                let w_chunk =
-                    &q4_lm_head[row_start * bytes_per_row..(row_start + chunk_len) * bytes_per_row];
-                q4k_q8k_matvec_into(&mut chunk[..chunk_len], &h_q8k, w_chunk, chunk_len, hidden);
-            });
+        q4k_q8k_matvec_parallel(&mut out, &h_q8k, q4_lm_head, vocab, hidden, "Q4_K");
         out
     };
 

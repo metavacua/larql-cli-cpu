@@ -49,57 +49,75 @@ where
     // the previous serial loop). The decode sample showed this loop serial
     // on the main thread at ~5% of wall while 8 workers slept.
     {
-        use rayon::prelude::*;
         let out_slice = out
             .as_slice_mut()
             .expect("freshly allocated [1, q_dim] is contiguous");
-        out_slice
-            .par_chunks_mut(head_dim)
-            .enumerate()
-            .for_each_init(
-                // Per-worker scores scratch, reused across all heads this
-                // worker processes (and across calls — rayon workers are
-                // long-lived). The per-head `vec![0.0; total_len]` it
-                // replaces was ~480 allocs+zeroings per token at 26B sizes
-                // and grew with context.
-                Vec::<f32>::new,
-                |scores, (h, out_h)| {
-                let kv_h = h / reps;
-                let q_off = h * head_dim;
-                let kv_off = kv_h * head_dim;
+        // Per-head attention math, factored so the rayon and spin-pool paths
+        // share one body (and stay numerically identical). `scores` is a
+        // reused scratch buffer (per rayon worker / per spin thread): the
+        // per-head `vec![0.0; total_len]` it replaces was ~480 allocs+zeroings
+        // per token at 26B sizes and grew with context.
+        let head_body = |h: usize, out_h: &mut [f32], scores: &mut Vec<f32>| {
+            let kv_h = h / reps;
+            let q_off = h * head_dim;
+            let kv_off = kv_h * head_dim;
 
-                let q_row = q_new.slice(ndarray::s![0, q_off..q_off + head_dim]);
-                let k_block = k_full.slice(ndarray::s![.., kv_off..kv_off + head_dim]);
-                let raw: ndarray::Array1<f32> = k_block.dot(&q_row);
-                scores.resize(total_len, 0.0);
-                for i in 0..total_len {
-                    let mut s = raw[i] * scale_f32;
-                    if let Some(cap) = softcap {
-                        s = (s / cap).tanh() * cap;
-                    }
-                    scores[i] = s;
+            let q_row = q_new.slice(ndarray::s![0, q_off..q_off + head_dim]);
+            let k_block = k_full.slice(ndarray::s![.., kv_off..kv_off + head_dim]);
+            let raw: ndarray::Array1<f32> = k_block.dot(&q_row);
+            scores.resize(total_len, 0.0);
+            for i in 0..total_len {
+                let mut s = raw[i] * scale_f32;
+                if let Some(cap) = softcap {
+                    s = (s / cap).tanh() * cap;
                 }
-                // Softmax
-                let max_val = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-                let mut sum = 0.0f64;
-                for s in scores.iter_mut() {
-                    let e = ((*s - max_val) as f64).exp();
-                    *s = e as f32;
-                    sum += e;
+                scores[i] = s;
+            }
+            // Softmax
+            let max_val = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let mut sum = 0.0f64;
+            for s in scores.iter_mut() {
+                let e = ((*s - max_val) as f64).exp();
+                *s = e as f32;
+                sum += e;
+            }
+            let inv_sum = (1.0 / sum) as f32;
+            for s in scores.iter_mut() {
+                *s *= inv_sum;
+            }
+            // Weighted sum of V
+            let v_block = v_full.slice(ndarray::s![.., kv_off..kv_off + head_dim]);
+            let scores_view = ndarray::ArrayView1::from(&scores[..]);
+            let weighted_v = v_block.t().dot(&scores_view);
+            out_h.copy_from_slice(weighted_v.as_slice().expect("1-D dot output is contiguous"));
+        };
+
+        if crate::cpu::spin_pool::enabled() {
+            // Each head owns a disjoint `head_dim`-wide output slice; spin
+            // workers keep a thread-local scratch (same reuse as for_each_init).
+            let base = out_slice.as_mut_ptr() as usize;
+            let total = out_slice.len();
+            crate::cpu::spin_pool::global().for_each_chunk(num_q, |h| {
+                thread_local! {
+                    static SCORES: std::cell::RefCell<Vec<f32>> =
+                        const { std::cell::RefCell::new(Vec::new()) };
                 }
-                let inv_sum = (1.0 / sum) as f32;
-                for s in scores.iter_mut() {
-                    *s *= inv_sum;
-                }
-                // Weighted sum of V
-                let v_block = v_full.slice(ndarray::s![.., kv_off..kv_off + head_dim]);
-                let scores_view = ndarray::ArrayView1::from(&scores[..]);
-                let weighted_v = v_block.t().dot(&scores_view);
-                out_h.copy_from_slice(
-                    weighted_v.as_slice().expect("1-D dot output is contiguous"),
-                );
-                },
-            );
+                let start = h * head_dim;
+                let len = head_dim.min(total.saturating_sub(start));
+                // SAFETY: head `h` owns the disjoint range [start, start+len).
+                let out_h =
+                    unsafe { std::slice::from_raw_parts_mut((base as *mut f32).add(start), len) };
+                SCORES.with(|cell| head_body(h, out_h, &mut cell.borrow_mut()));
+            });
+        } else {
+            use rayon::prelude::*;
+            out_slice
+                .par_chunks_mut(head_dim)
+                .enumerate()
+                .for_each_init(Vec::<f32>::new, |scores, (h, out_h)| {
+                    head_body(h, out_h, scores);
+                });
+        }
     }
     out
 }
@@ -314,9 +332,7 @@ pub fn run_attention_block_decode_step_backend(
 /// loops (via [`run_attention_block_decode_step_auto`]) must make the same
 /// choice. Cached once; never in the hot loop.
 pub fn q4k_direct_attn_enabled() -> bool {
-    use std::sync::OnceLock;
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("LARQL_Q4K_DIRECT_ATTN").as_deref() == Ok("1"))
+    crate::options::q4k_direct_attn_enabled()
 }
 
 /// Best-available decode-step attention for callers that own their cache as
@@ -366,9 +382,7 @@ pub fn run_attention_block_decode_step_auto(
 /// the expert path's int8 kernels. Default off = the existing f32-activation
 /// behaviour, byte-identical.
 fn attn_int8_enabled() -> bool {
-    use std::sync::OnceLock;
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("LARQL_Q4K_ATTN_INT8").as_deref() == Ok("1"))
+    crate::options::q4k_attn_int8_enabled()
 }
 
 /// Int8 decode-step projection: `[1, num_rows] = qw × x_q8k`. The activation
@@ -384,7 +398,6 @@ fn q8k_direct_proj(
     in_dim: usize,
 ) -> Option<Array2<f32>> {
     use crate::cpu::ops::q4k_q8k_dot::{q4k_q8k_matvec_into, q6k_q8k_matvec_into};
-    use rayon::prelude::*;
 
     if !in_dim.is_multiple_of(256) {
         return None;
@@ -400,26 +413,23 @@ fn q8k_direct_proj(
 
     let mut out = vec![0.0f32; num_rows];
     const CHUNK_ROWS: usize = 32;
-    out.par_chunks_mut(CHUNK_ROWS)
-        .enumerate()
-        .for_each(|(chunk_idx, chunk)| {
-            let row_start = chunk_idx * CHUNK_ROWS;
-            let chunk_len = chunk.len().min(num_rows.saturating_sub(row_start));
-            if chunk_len == 0 {
-                return;
+    crate::cpu::spin_pool::par_chunks_mut(&mut out, CHUNK_ROWS, |chunk_idx, chunk| {
+        let row_start = chunk_idx * CHUNK_ROWS;
+        let chunk_len = chunk.len().min(num_rows.saturating_sub(row_start));
+        if chunk_len == 0 {
+            return;
+        }
+        let w_chunk = &qw.data[row_start * bytes_per_row..(row_start + chunk_len) * bytes_per_row];
+        match qw.format {
+            crate::QuantFormat::Q4_K => {
+                q4k_q8k_matvec_into(&mut chunk[..chunk_len], x_q8k, w_chunk, chunk_len, in_dim)
             }
-            let w_chunk =
-                &qw.data[row_start * bytes_per_row..(row_start + chunk_len) * bytes_per_row];
-            match qw.format {
-                crate::QuantFormat::Q4_K => {
-                    q4k_q8k_matvec_into(&mut chunk[..chunk_len], x_q8k, w_chunk, chunk_len, in_dim)
-                }
-                crate::QuantFormat::Q6_K => {
-                    q6k_q8k_matvec_into(&mut chunk[..chunk_len], x_q8k, w_chunk, chunk_len, in_dim)
-                }
-                _ => {}
+            crate::QuantFormat::Q6_K => {
+                q6k_q8k_matvec_into(&mut chunk[..chunk_len], x_q8k, w_chunk, chunk_len, in_dim)
             }
-        });
+            _ => {}
+        }
+    });
     Array2::from_shape_vec((1, num_rows), out).ok()
 }
 
@@ -1001,6 +1011,22 @@ mod tests {
 
     #[test]
     fn q4k_direct_decode_step_matches_dequant_path_within_tolerance() {
+        // This pins the strict <1e-3 WEIGHT parity of the *f32-activation*
+        // Q4K-direct path. The int8 activation route is now on by default and
+        // carries a looser (~2% scale-relative) bound by design, so disable it
+        // here. The guard restores the env even if an assertion panics.
+        struct EnvGuard(Option<std::ffi::OsString>);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(v) => std::env::set_var("LARQL_Q4K_ATTN_INT8", v),
+                    None => std::env::remove_var("LARQL_Q4K_ATTN_INT8"),
+                }
+            }
+        }
+        let _guard = EnvGuard(std::env::var_os("LARQL_Q4K_ATTN_INT8"));
+        std::env::set_var("LARQL_Q4K_ATTN_INT8", "0");
+
         // Parity contract (roadmap #16, "<1e-3"): the Q4K-direct decode
         // step should track the f32-BLAS path that runs on the SAME bytes
         // dequantised into `weights.tensors`. We dequantise the fixture's

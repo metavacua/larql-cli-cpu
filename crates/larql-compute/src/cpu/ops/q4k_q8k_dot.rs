@@ -1135,23 +1135,13 @@ pub fn q4k_q8k_matvec_asm_v3(
     }
 }
 
-/// C12 opt-in: route Q4_K × Q8_K matvecs through the hand-asm kernel
-/// (`q4k_q8k_matvec_asm`) instead of the intrinsic path when `LARQL_Q4K_ASM`
-/// is `1`/`true`. Read once and cached — the env lookup must not land in the
-/// per-token hot loop. Default off; both paths are bit-exact.
-/// Pure parse of the `LARQL_Q4K_ASM` opt-in value (`1`/`true` → on).
-/// Split out so the truth table is unit-testable without touching the
-/// process environment or the `OnceLock` cache below.
-#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-fn q4k_asm_flag_enabled(val: Option<&str>) -> bool {
-    matches!(val, Some(v) if v == "1" || v.eq_ignore_ascii_case("true"))
-}
-
+/// C12: route Q4_K × Q8_K matvecs through the hand-asm kernel
+/// (`q4k_q8k_matvec_asm`) instead of the intrinsic path. **Default on**
+/// (`LARQL_Q4K_ASM=0` opts out); both paths are bit-exact. The truth table +
+/// caching live in [`crate::options::q4k_asm_enabled`].
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 fn use_asm_kernel() -> bool {
-    use std::sync::OnceLock;
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| q4k_asm_flag_enabled(std::env::var("LARQL_Q4K_ASM").ok().as_deref()))
+    crate::options::q4k_asm_enabled()
 }
 
 /// Public entry point: dispatches to NEON on aarch64, scalar elsewhere.
@@ -1196,6 +1186,53 @@ pub fn q4k_q8k_matvec_into(
     }
     #[allow(unreachable_code)]
     q4k_q8k_matvec_scalar(out, q8k_x, w, rows, cols);
+}
+
+/// Row-chunked **parallel** Q4_K / Q6_K × Q8_K matvec — the single source for
+/// every quantized projection on the decode path (attention Q/K/V/O, the dense
+/// FFN gate/up/down slab, and the lm_head vocab projection). Fills `out[0..rows]`
+/// with each weight row's dot against `q8k_x`.
+///
+/// `format` is `"Q4_K"` or `"Q6_K"` (selects the per-row kernel and the byte
+/// stride). The per-row kernel ([`q4k_q8k_matvec_into`] / [`q6k_q8k_matvec_into`])
+/// is single-threaded; this wraps it across output-row chunks and routes the
+/// chunks through the spin pool when enabled, else rayon — so the whole decode
+/// path shares one parallelism strategy.
+///
+/// This centralizes what were four byte-identical `par_chunks_mut` copies
+/// (larql-compute `cached.rs`, larql-inference `cached.rs`, and the two lm_head
+/// blocks in larql-inference `dense.rs`) — the "consolidation hazard" twins.
+/// `out.len()` must be `>= rows`; rows beyond `rows` are left untouched.
+pub fn q4k_q8k_matvec_parallel(
+    out: &mut [f32],
+    q8k_x: &Q8KActivation,
+    bytes: &[u8],
+    rows: usize,
+    cols: usize,
+    format: &str,
+) {
+    let bytes_per_row = match format {
+        "Q4_K" => (cols / ELEMS_PER_BLOCK) * 144,
+        "Q6_K" => (cols / ELEMS_PER_BLOCK) * 210,
+        _ => return,
+    };
+    if rows == 0 || cols == 0 || bytes.len() < rows * bytes_per_row {
+        return;
+    }
+    const CHUNK_ROWS: usize = 32;
+    crate::cpu::spin_pool::par_chunks_mut(&mut out[..rows], CHUNK_ROWS, |chunk_idx, chunk| {
+        let row_start = chunk_idx * CHUNK_ROWS;
+        let chunk_len = chunk.len().min(rows.saturating_sub(row_start));
+        if chunk_len == 0 {
+            return;
+        }
+        let w_chunk = &bytes[row_start * bytes_per_row..(row_start + chunk_len) * bytes_per_row];
+        match format {
+            "Q4_K" => q4k_q8k_matvec_into(&mut chunk[..chunk_len], q8k_x, w_chunk, chunk_len, cols),
+            "Q6_K" => q6k_q8k_matvec_into(&mut chunk[..chunk_len], q8k_x, w_chunk, chunk_len, cols),
+            _ => {}
+        }
+    });
 }
 
 /// AVX2 Q4_K × Q8_K matvec for x86_64.
@@ -2526,21 +2563,6 @@ mod tests {
         assert!(out.iter().all(|&v| v == 0.0));
     }
 
-    /// `LARQL_Q4K_ASM` opt-in truth table (the pure parse behind the
-    /// `OnceLock`-cached `use_asm_kernel`).
-    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-    #[test]
-    fn q4k_asm_flag_truth_table() {
-        assert!(q4k_asm_flag_enabled(Some("1")));
-        assert!(q4k_asm_flag_enabled(Some("true")));
-        assert!(q4k_asm_flag_enabled(Some("TRUE")));
-        assert!(q4k_asm_flag_enabled(Some("True")));
-        assert!(!q4k_asm_flag_enabled(Some("0")));
-        assert!(!q4k_asm_flag_enabled(Some("false")));
-        assert!(!q4k_asm_flag_enabled(Some("yes")));
-        assert!(!q4k_asm_flag_enabled(Some("")));
-        assert!(!q4k_asm_flag_enabled(None));
-    }
 
     /// `quantize_x_to_q8k_into` must produce the same `qs`, `d`, `sums` as
     /// the allocating `quantize_x_to_q8k` for any well-sized input — both

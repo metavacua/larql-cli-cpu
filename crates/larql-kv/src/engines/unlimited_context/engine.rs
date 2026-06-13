@@ -167,9 +167,17 @@ impl UnlimitedContextEngine {
 
     /// Reconstruct a window's full K,V by replaying its archived tokens from
     /// the prior window's boundary checkpoint.
+    ///
+    /// For hybrid-MoE models, pass the FFN hook + vindex so the replay
+    /// dispatches experts exactly like the live-window path
+    /// ([`extend_current`](Self::extend_current)); pass `None`/`None` for dense
+    /// models. (Previously this always passed `None` → dense FFN, which would
+    /// have produced wrong K/V for an evicted MoE window — the C1 follow-up.)
     pub fn replay_window(
         &self,
         weights: &ModelWeights,
+        moe_ffn: Option<&dyn larql_inference::ffn::FfnBackend>,
+        index: Option<&larql_vindex::VectorIndex>,
         window_id: usize,
     ) -> Option<(Vec<SharedKV>, usize)> {
         let (tokens, abs_offset) = self.archive.retrieve(window_id)?;
@@ -181,17 +189,14 @@ impl UnlimitedContextEngine {
             empty_prior(weights)
         };
 
-        // Archived-window replay does not yet re-dispatch remote MoE experts
-        // (it fires only on window eviction / long context). `None` → dense
-        // FFN; see the larql-kv "MoE-aware KV engines (C1)" roadmap follow-up.
         let out = rs_extend_from_checkpoint_backend(
             weights,
             tokens,
             prior,
             abs_offset,
             self.backend.as_ref(),
-            None,
-            None,
+            moe_ffn,
+            index,
         )?;
         let abs_end = abs_offset + tokens.len() - 1;
         Some((out.kv_cache, abs_end))
@@ -1030,8 +1035,8 @@ mod tests {
         let engine = UnlimitedContextEngine::new(512);
         // No windows archived → any window_id returns None at the
         // `self.archive.retrieve(window_id)?` line.
-        assert!(engine.replay_window(&weights, 0).is_none());
-        assert!(engine.replay_window(&weights, 99).is_none());
+        assert!(engine.replay_window(&weights, None, None, 0).is_none());
+        assert!(engine.replay_window(&weights, None, None, 99).is_none());
     }
 
     #[test]
@@ -1053,7 +1058,7 @@ mod tests {
         );
         // Replay the first archived window — exercises the
         // `rs_extend_from_checkpoint_backend` path (lines 132-138).
-        let replay = engine.replay_window(&weights, 0);
+        let replay = engine.replay_window(&weights, None, None, 0);
         assert!(replay.is_some(), "replay_window(0) should succeed");
         let (kv, abs_end) = replay.unwrap();
         assert!(!kv.is_empty(), "replayed K/V cache should be non-empty");

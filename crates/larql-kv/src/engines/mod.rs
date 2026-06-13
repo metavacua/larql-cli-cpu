@@ -217,6 +217,36 @@ mod resident_identity_tests {
 
     #[test]
     fn every_engine_decode_step_resident_matches_decode_step_flag_off() {
+        // The Q4K decode fast path is on by default now; this pin asserts the
+        // flags-OFF f32 identity (resident must equal plain when the resident
+        // route is *not* taking the Q4K-direct branch), so disable the stages
+        // that change the resident hidden state. They read the env uncached, so
+        // this takes effect; restored on drop even if an assertion panics.
+        struct FlagsOff(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for FlagsOff {
+            fn drop(&mut self) {
+                for (k, v) in self.0.drain(..) {
+                    match v {
+                        Some(v) => std::env::set_var(k, v),
+                        None => std::env::remove_var(k),
+                    }
+                }
+            }
+        }
+        let _flags_off = {
+            let names = [
+                "LARQL_Q4K_DIRECT_ATTN",
+                "LARQL_Q4K_ATTN_INT8",
+                "LARQL_Q4K_DIRECT_FFN",
+                "LARQL_Q4K_LM_HEAD",
+            ];
+            let saved: Vec<_> = names.iter().map(|n| (*n, std::env::var_os(n))).collect();
+            for n in names {
+                std::env::set_var(n, "0");
+            }
+            FlagsOff(saved)
+        };
+
         // Concrete specs (parameterised kinds need real params). Excluded:
         // apollo (bench-only, full re-forward by design; resident default =
         // forward to decode_step is the documented intent) and boundary-kv

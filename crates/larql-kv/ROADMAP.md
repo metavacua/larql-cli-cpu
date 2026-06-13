@@ -1,5 +1,51 @@
 # Roadmap — larql-kv
 
+## Spin-barrier pool — CPU MoE decode caught llama.cpp (2026-06-13)
+
+After residency closed the byte-traffic gap (06-11/12), a `/usr/bin/sample` of
+live 26B decode showed the remaining ~1.15× was **rayon fork-join overhead**,
+not kernels. The decode driver runs *outside* the global rayon pool, so each of
+the ~211 parallel sections/token took the cold path (`in_worker_cold →
+LockLatch::wait_and_reset → __psynch_cvwait`) and workers slept between sections
+— ~40% of thread-time in wait states.
+
+**Built** [`larql_compute::cpu::spin_pool`](../../larql-compute/src/cpu/spin_pool.rs):
+a llama.cpp-style persistent spin-barrier pool. Workers spin on an epoch counter
+and only `park` after a long idle gap; the dispatcher participates as the n-th
+worker; **static strided chunk ownership** makes `completed == num_chunks` a
+sound barrier (no shared resettable cursor → no stale re-claim across
+back-to-back dispatches — a concurrent-dispatcher test caught that bug); a
+dispatch `Mutex` + thread-local reentrancy guard make it safe for
+`--concurrent`/multi-threaded tests. `par_chunks_mut` / `par_chunks_mut2`
+helpers route a row-chunked parallel-for through the pool, or rayon when
+`LARQL_SPIN_POOL=0`. **Default-on** (see "Decode fast path default-on" — the
+whole Q4K stack ships on, opt out per stage with `=0`); both paths are
+numerically identical, only the threading differs.
+
+**Centralized** the four byte-identical `par_chunks_mut` Q4_K/Q6_K×Q8_K matvec
+copies (larql-compute `cached.rs`, larql-inference `cached.rs`, lm_head ×2 in
+`dense.rs` — the prior "consolidation hazard") into one
+`q4k_q8k_matvec_parallel`, and routed every hot decode section (attention int8
+Q/K/V/O, GQA, dense FFN gate/up/down, geglu, expert fold, lm_head q4 + f32)
+through it — so when enabled the whole token runs on one hot pool.
+
+- **Parity:** 704 compute + 1220 inference + 756 kv green, flags-off AND
+  flags-on (incl. the `predict_kquant` oracles). clippy clean.
+- **Profile after:** rayon eliminated from the hot path — `in_worker_cold`
+  2682→0, `join_context` 10300→0, `wait_until_cold` 4463→9.
+- **Measured** (M3 Max, t=8, warm, tight A/B bracket, flags **inline**):
+  26B short-ctx OFF ~26.9 → ON **33–35**; n=256 OFF ~27.4 → ON **~34.9
+  (+28%)** — vs llama.cpp recorded **32.1** ⇒ ~9% ahead.
+- **Default-on + safe (2026-06-13):** shipped a spin→yield→park backoff (spin
+  the proven window during active decode → yield once a wait outlives a token →
+  park when idle, ~0 CPU; dispatcher unparks on dispatch) so the pool doesn't
+  peg cores between requests — what makes on-by-default safe on a shared box.
+  Also fixed a panic-safety bug (a panicking chunk killed a worker → the
+  barrier spun forever): `catch_unwind` per chunk + re-raise on the dispatcher.
+- **Caveat:** the pool spins during active decode (the win on a dedicated box);
+  under a transient mid-decode load spike a run can still regress (an n=512 ON
+  run hit 10.7 once) — `LARQL_SPIN_POOL=0` falls back to rayon if needed.
+
 ## CPU resident fast-path — all engines pluggable into it (2026-06-13)
 
 The 2026-06-11/12 CPU fast-path arc (Q4K-direct + int8 attention, q4k
@@ -350,12 +396,15 @@ for compressed KV memory at near-standard speed; `unlimited_context` for
 long-context windowed KV (slowest, bounded memory). `no_cache` / `apollo` are not a
 fit (re-forward multiplies round-trips).
 
-**Known limitation:** `unlimited_context`'s archived-window *replay*
-(`replay_window`, fires only on window eviction / long context) passes `None` for
-`moe_ffn` → dense FFN. Correct within a single window (the verified case); a
-long-context MoE run that evicts windows would need replay threaded too. This is the
-only remaining MoE-correctness gap. CLI guard allows the seven verified engines and
-rejects `no-cache` / `apollo` with a clear message.
+**Resolved (2026-06-13):** `unlimited_context::replay_window` now takes
+`moe_ffn` + `index` and threads them to `rs_extend_from_checkpoint_backend`
+(matching the live-window `extend_current` path), so an evicted MoE window
+replays with experts instead of silently falling back to dense FFN. It is a
+standalone utility (no decode-loop caller — the decode path attends to the
+current window + boundary checkpoints, never a full replay), so this was a
+*latent* correctness gap; it is now correct for any caller. Dense callers pass
+`None`/`None`. CLI guard allows the seven verified engines and rejects
+`no-cache` / `apollo` with a clear message.
 
 ### ⏭ NEXT — Q4K-direct client decode path (remove the f32 tax) — top engineering lever
 

@@ -583,34 +583,30 @@ pub fn q4k_matvec_into(out: &mut [f32], x: &[f32], w: &[u8], rows: usize, cols: 
     // for Q4_K) is large enough to amortise rayon's join overhead by
     // 100×+. Empirically on M3 Max this drops a 2560-row decode from
     // ~70ms → ~10ms (≈ 7× across 11 perf cores).
-    use rayon::prelude::*;
     let sum_x_ref = &sum_x[..];
     let w_ref = w;
     let x_ref = x;
     // par_chunks_mut(CHUNK_ROWS) instead of per-row par_iter_mut: each
-    // rayon task processes a contiguous block of rows sequentially.
-    // Cuts the number of work-stealing units from `rows` (10K+) down
-    // to ~rows/CHUNK_ROWS, reducing scheduler overhead while keeping
-    // enough granularity for the 11 perf cores on M3 Max to load-
-    // balance.
+    // task processes a contiguous block of rows sequentially. Cuts the
+    // number of work-stealing units from `rows` (10K+) down to
+    // ~rows/CHUNK_ROWS, reducing scheduler overhead while keeping enough
+    // granularity for the 11 perf cores on M3 Max to load-balance.
     const CHUNK_ROWS: usize = 32;
-    out.par_chunks_mut(CHUNK_ROWS)
-        .enumerate()
-        .for_each(|(chunk_idx, chunk_slots)| {
-            let row_base_chunk = chunk_idx * CHUNK_ROWS;
-            for (local_r, out_slot) in chunk_slots.iter_mut().enumerate() {
-                let r = row_base_chunk + local_r;
-                if r >= rows {
-                    break;
-                }
-                let row_base = r * row_bytes;
-                let mut acc = 0.0f32;
-                for sb in 0..n_blocks {
-                    acc += process_q4k_superblock(w_ref, x_ref, sum_x_ref, row_base, sb);
-                }
-                *out_slot = acc;
+    crate::cpu::spin_pool::par_chunks_mut(out, CHUNK_ROWS, |chunk_idx, chunk_slots| {
+        let row_base_chunk = chunk_idx * CHUNK_ROWS;
+        for (local_r, out_slot) in chunk_slots.iter_mut().enumerate() {
+            let r = row_base_chunk + local_r;
+            if r >= rows {
+                break;
             }
-        });
+            let row_base = r * row_bytes;
+            let mut acc = 0.0f32;
+            for sb in 0..n_blocks {
+                acc += process_q4k_superblock(w_ref, x_ref, sum_x_ref, row_base, sb);
+            }
+            *out_slot = acc;
+        }
+    });
 }
 
 /// Per-super-block dot contribution for a Q4_K row. Returned scalar
@@ -740,20 +736,18 @@ pub fn q4k_dual_matvec_into(
     // each worker computes both outputs for its assigned row index.
     // Zip `out_a` and `out_b` so rayon stays simple and the two
     // writes hit different cache lines per row.
-    use rayon::prelude::*;
     let sum_x_ref = &sum_x[..];
     let w_a_ref = w_a;
     let w_b_ref = w_b;
     let x_ref = x;
-    // par_chunks_mut(CHUNK_ROWS) — same rationale as
-    // `q4k_matvec_into`. Fewer-but-larger work units reduce rayon
-    // work-stealing overhead.
+    // Fewer-but-larger work units (CHUNK_ROWS rows each) reduce
+    // work-stealing overhead; same rationale as `q4k_matvec_into`.
     const CHUNK_ROWS: usize = 32;
-    out_a
-        .par_chunks_mut(CHUNK_ROWS)
-        .zip(out_b.par_chunks_mut(CHUNK_ROWS))
-        .enumerate()
-        .for_each(|(chunk_idx, (chunk_a, chunk_b))| {
+    crate::cpu::spin_pool::par_chunks_mut2(
+        out_a,
+        out_b,
+        CHUNK_ROWS,
+        |chunk_idx, chunk_a, chunk_b| {
             let row_base_chunk = chunk_idx * CHUNK_ROWS;
             for (local_r, (out_a_slot, out_b_slot)) in
                 chunk_a.iter_mut().zip(chunk_b.iter_mut()).enumerate()
