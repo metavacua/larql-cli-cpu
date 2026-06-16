@@ -41,6 +41,33 @@ fn write_synthetic_mixtral_model(
     num_experts_per_tok: usize,
     vocab: usize,
 ) -> larql_vindex::tokenizers::Tokenizer {
+    write_synthetic_mixtral_model_opts(
+        model_dir,
+        hidden,
+        intermediate,
+        num_layers,
+        num_experts,
+        num_experts_per_tok,
+        vocab,
+        true,
+    )
+}
+
+/// As [`write_synthetic_mixtral_model`], but `include_expert_down = false`
+/// omits every expert's `w2` (down) tensor. With no per-expert down
+/// matrices to gather, `down_meta`'s MoE arm produces an empty
+/// `down_matrices` and takes its `is_empty()` skip branch for each layer.
+#[allow(clippy::too_many_arguments)]
+fn write_synthetic_mixtral_model_opts(
+    model_dir: &Path,
+    hidden: usize,
+    intermediate: usize,
+    num_layers: usize,
+    num_experts: usize,
+    num_experts_per_tok: usize,
+    vocab: usize,
+    include_expert_down: bool,
+) -> larql_vindex::tokenizers::Tokenizer {
     std::fs::create_dir_all(model_dir).unwrap();
 
     let config = serde_json::json!({
@@ -107,7 +134,9 @@ fn write_synthetic_mixtral_model(
         for e in 0..num_experts {
             let ep = format!("{lp}.block_sparse_moe.experts.{e}");
             push(&format!("{ep}.w1.weight"), vec![intermediate, hidden]);
-            push(&format!("{ep}.w2.weight"), vec![hidden, intermediate]);
+            if include_expert_down {
+                push(&format!("{ep}.w2.weight"), vec![hidden, intermediate]);
+            }
             push(&format!("{ep}.w3.weight"), vec![intermediate, hidden]);
         }
     }
@@ -724,11 +753,14 @@ fn write_synthetic_mixtral_model_with_real_tokenizer(
         vocab,
     );
 
-    // Populate the BPE `vocab` map directly so `decode(&[id], true)`
-    // (which skips special tokens) still returns the printable token
-    // string for every ID in 0..min(vocab, 8). IDs beyond that decode
-    // to empty and exercise the `.filter(|s| !s.is_empty())` skip path.
-    let vocab_entries: Vec<String> = (0..(vocab.min(8)))
+    // Populate the BPE `vocab` map for *every* ID so `decode(&[id], true)`
+    // returns a printable, non-empty token for whichever feature the
+    // down-projection argmax selects. This exercises the `TopKEntry`
+    // keep arm in `down_meta` (the `.map(|token| TopKEntry { .. })` that
+    // earlier capped at ID 8 never reached, because the argmax always
+    // landed on a higher ID). The complementary empty-string skip path
+    // stays covered by the empty-tokenizer fixtures above.
+    let vocab_entries: Vec<String> = (0..vocab)
         .map(|i| format!("\"tok{i}\":{i}"))
         .collect();
     let tok_json = format!(
@@ -1050,6 +1082,19 @@ fn gguf_f32_ramp(n: usize) -> Vec<u8> {
 /// naming (`blk.L.ffn_gate.weight`); the source adapter maps them back
 /// to HF keys via `normalize_gguf_key`.
 fn write_synthetic_llama_gguf(path: &Path, num_layers: usize, vocab: usize) {
+    write_synthetic_llama_gguf_opts(path, num_layers, vocab, true);
+}
+
+/// As [`write_synthetic_llama_gguf`], but `include_ffn_down = false`
+/// omits the `blk.L.ffn_down.weight` tensors — so `down_meta`'s dense
+/// arm hits its missing-tensor `continue` (the down projection is
+/// skipped for every layer).
+fn write_synthetic_llama_gguf_opts(
+    path: &Path,
+    num_layers: usize,
+    vocab: usize,
+    include_ffn_down: bool,
+) {
     const DIM: u64 = 4; // hidden == intermediate
     let v = vocab as u64;
 
@@ -1090,12 +1135,14 @@ fn write_synthetic_llama_gguf(path: &Path, num_layers: usize, vocab: usize) {
             ggml_type: 0,
             data: gguf_f32_ramp((DIM * DIM) as usize),
         });
-        w.tensor(GgufTensor {
-            name: format!("blk.{layer}.ffn_down.weight"),
-            dims: vec![DIM, DIM],
-            ggml_type: 0,
-            data: gguf_f32_ramp((DIM * DIM) as usize),
-        });
+        if include_ffn_down {
+            w.tensor(GgufTensor {
+                name: format!("blk.{layer}.ffn_down.weight"),
+                dims: vec![DIM, DIM],
+                ggml_type: 0,
+                data: gguf_f32_ramp((DIM * DIM) as usize),
+            });
+        }
     }
     w.write_to_file(path).unwrap();
 }
@@ -1219,5 +1266,137 @@ fn streaming_extract_drop_gate_without_q4k_is_rejected() {
     assert!(
         msg.contains("drop-gate-vectors") || msg.contains("q4k"),
         "unexpected error message: {msg}"
+    );
+}
+
+// ─── down_meta edge arms (missing-tensor + resume skips) ─────────────────
+
+#[test]
+fn streaming_extract_dense_with_missing_ffn_down_skips_down_projection() {
+    // Dense llama GGUF with no `blk.L.ffn_down.weight` — `down_meta`'s
+    // dense arm must hit its missing-tensor `continue` for every layer
+    // (no down projection), yet the extract still succeeds and writes a
+    // config with the right layer count.
+    let tmp = tempfile::tempdir().unwrap();
+    let model_dir = tmp.path().join("gguf_model");
+    std::fs::create_dir_all(&model_dir).unwrap();
+    write_synthetic_llama_gguf_opts(&model_dir.join("model.gguf"), 2, 16, false);
+
+    let tok_json =
+        r#"{"version":"1.0","model":{"type":"BPE","vocab":{},"merges":[]},"added_tokens":[]}"#;
+    let tokenizer = larql_vindex::tokenizers::Tokenizer::from_bytes(tok_json.as_bytes()).unwrap();
+
+    let output_dir = tmp.path().join("vindex");
+    let mut cb = SilentBuildCallbacks;
+    build_vindex_streaming(
+        &model_dir,
+        &tokenizer,
+        "test/llama-gguf-nodown",
+        &output_dir,
+        5,
+        0,
+        ExtractLevel::Browse,
+        StorageDtype::F32,
+        QuantFormat::None,
+        WriteWeightsOptions::default(),
+        KquantWriteOptions::default(),
+        false,
+        &mut cb,
+    )
+    .expect("extract should succeed even when ffn_down is absent");
+
+    let config = larql_vindex::load_vindex_config(&output_dir).unwrap();
+    assert_eq!(config.layers.len(), 2);
+}
+
+#[test]
+#[serial_test::serial]
+fn streaming_extract_moe_with_missing_expert_down_skips_layer() {
+    // Mixtral fixture with no expert `w2` (down) tensors — `down_meta`'s
+    // MoE arm gathers an empty `down_matrices` and takes the
+    // `is_empty()` skip branch for every layer. The other stages
+    // (gate / router / embeddings) still have what they need.
+    let tmp = tempfile::tempdir().unwrap();
+    let model_dir = tmp.path().join("model");
+    let output_dir = tmp.path().join("vindex");
+    let tokenizer = write_synthetic_mixtral_model_opts(
+        &model_dir, 8, 4, 2, 2, 1, 16, /* include_expert_down = */ false,
+    );
+
+    let mut cb = SilentBuildCallbacks;
+    build_vindex_streaming(
+        &model_dir,
+        &tokenizer,
+        "test/mixtral-nodown",
+        &output_dir,
+        5,
+        0,
+        ExtractLevel::Browse,
+        StorageDtype::F32,
+        QuantFormat::None,
+        WriteWeightsOptions::default(),
+        KquantWriteOptions::default(),
+        false,
+        &mut cb,
+    )
+    .expect("extract should succeed when expert down tensors are absent");
+
+    // Gate still written; the run completes despite the empty down arm.
+    assert!(output_dir.join("gate_vectors.bin").exists());
+    assert!(larql_vindex::load_vindex_config(&output_dir).is_ok());
+}
+
+#[test]
+#[serial_test::serial]
+fn streaming_extract_resumes_and_skips_down_meta_when_checkpoint_marks_it() {
+    use larql_vindex::extract::{Checkpoint, ExtractPhase};
+
+    // Full extract once, then plant a checkpoint that marks the down_meta
+    // phase complete and re-run. The second run must take `write_down_meta`'s
+    // resume-skip branch — `down_meta.bin` is reused byte-for-byte, never
+    // recomputed.
+    let tmp = tempfile::tempdir().unwrap();
+    let model_dir = tmp.path().join("model");
+    let output_dir = tmp.path().join("vindex");
+    let num_layers = 2usize;
+    let tokenizer = write_synthetic_mixtral_model(&model_dir, 8, 4, num_layers, 2, 1, 16);
+    let model_name = "test/resume-down-meta";
+
+    let run = |out: &Path, tok: &larql_vindex::tokenizers::Tokenizer| {
+        let mut cb = SilentBuildCallbacks;
+        build_vindex_streaming(
+            &model_dir,
+            tok,
+            model_name,
+            out,
+            5,
+            0,
+            ExtractLevel::Browse,
+            StorageDtype::F32,
+            QuantFormat::None,
+            WriteWeightsOptions::default(),
+            KquantWriteOptions::default(),
+            false,
+            &mut cb,
+        )
+        .expect("streaming extract");
+    };
+
+    run(&output_dir, &tokenizer);
+    let down_meta_before = std::fs::read(output_dir.join("down_meta.bin")).unwrap();
+
+    // Plant a checkpoint marking *only* down_meta complete (the gate stage
+    // re-runs fresh, so `layer_infos` is rebuilt for index.json — we just
+    // want down_meta to be skipped). `mark` persists to disk.
+    let mut cp = Checkpoint::fresh(&model_dir, model_name, num_layers);
+    cp.mark(ExtractPhase::DownMeta, &output_dir).unwrap();
+    assert!(cp.is_complete(ExtractPhase::DownMeta));
+
+    run(&output_dir, &tokenizer);
+    let down_meta_after = std::fs::read(output_dir.join("down_meta.bin")).unwrap();
+
+    assert_eq!(
+        down_meta_before, down_meta_after,
+        "resumed down_meta.bin must be reused unchanged, not recomputed"
     );
 }
