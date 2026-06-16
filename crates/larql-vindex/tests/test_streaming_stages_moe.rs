@@ -175,6 +175,7 @@ fn streaming_extract_mixtral_exercises_moe_arms() {
         "test/mixtral-synthetic",
         &output_dir,
         5, // down_top_k
+        0, // summary_features_per_expert (off)
         ExtractLevel::Browse,
         StorageDtype::F32,
         QuantFormat::None,
@@ -414,6 +415,7 @@ fn streaming_extract_gemma4_hybrid_moe_exercises_packed_bf16_arms() {
         "test/gemma4-hybrid-moe-synthetic",
         &output_dir,
         5,
+        0, // summary_features_per_expert (off)
         ExtractLevel::Browse,
         StorageDtype::F32,
         QuantFormat::None,
@@ -660,6 +662,7 @@ fn streaming_extract_gpt_oss_exercises_packed_mxfp4_arms() {
         "test/gpt-oss-synthetic",
         &output_dir,
         5,
+        0, // summary_features_per_expert (off)
         ExtractLevel::Browse,
         StorageDtype::F32,
         QuantFormat::None,
@@ -690,32 +693,10 @@ fn streaming_extract_gpt_oss_exercises_packed_mxfp4_arms() {
     }
 }
 
-// ─── LARQL_SUMMARY_FEATURES_PER_EXPERT path (gate_vectors SVD + down_meta cap) ──
-
-/// RAII guard for the `LARQL_SUMMARY_FEATURES_PER_EXPERT` env var. The
-/// summary tier is gated on a process-global env var, so tests reading
-/// or writing it must serialise via `#[serial]` (and the var must be
-/// cleared on drop so neighbouring tests aren't affected).
-struct SummaryEnvGuard {
-    prev: Option<String>,
-}
-
-impl SummaryEnvGuard {
-    fn set(value: &str) -> Self {
-        let prev = std::env::var("LARQL_SUMMARY_FEATURES_PER_EXPERT").ok();
-        std::env::set_var("LARQL_SUMMARY_FEATURES_PER_EXPERT", value);
-        Self { prev }
-    }
-}
-
-impl Drop for SummaryEnvGuard {
-    fn drop(&mut self) {
-        match self.prev.take() {
-            Some(v) => std::env::set_var("LARQL_SUMMARY_FEATURES_PER_EXPERT", v),
-            None => std::env::remove_var("LARQL_SUMMARY_FEATURES_PER_EXPERT"),
-        }
-    }
-}
+// ─── summary-features-per-expert path (gate_vectors SVD + down_meta cap) ──
+// The summary tier is now a `build_vindex_streaming` parameter
+// (`summary_features_per_expert`), passed directly per call — no
+// process-global env, so these tests need no serialisation.
 
 /// Build a Mixtral fixture with a tokenizer that has a non-empty vocab,
 /// so `down_meta` actually decodes some `token_id → string` and exercises
@@ -799,6 +780,7 @@ fn streaming_extract_mixtral_resumes_when_run_twice_on_same_output_dir() {
         "test/mixtral-resume",
         &output_dir,
         5,
+        0, // summary_features_per_expert (off)
         ExtractLevel::Browse,
         StorageDtype::F32,
         QuantFormat::None,
@@ -830,6 +812,7 @@ fn streaming_extract_mixtral_resumes_when_run_twice_on_same_output_dir() {
         "test/mixtral-resume",
         &output_dir,
         5,
+        0, // summary_features_per_expert (off)
         ExtractLevel::Browse,
         StorageDtype::F32,
         QuantFormat::None,
@@ -882,6 +865,7 @@ fn streaming_extract_mixtral_with_real_tokenizer_records_top_k_entries() {
         "test/mixtral-real-tok",
         &output_dir,
         5,
+        0, // summary_features_per_expert (off)
         ExtractLevel::Browse,
         StorageDtype::F32,
         QuantFormat::None,
@@ -941,6 +925,7 @@ fn streaming_extract_mixtral_with_drop_gate_vectors_removes_zero_byte_file() {
         "test/mixtral-drop-gate",
         &output_dir,
         5,
+        0, // summary_features_per_expert (off)
         ExtractLevel::Browse,
         StorageDtype::F32,
         QuantFormat::Q4K, // required by drop_gate_vectors
@@ -967,10 +952,9 @@ fn streaming_extract_mixtral_with_drop_gate_vectors_removes_zero_byte_file() {
 }
 
 #[test]
-#[serial_test::serial]
 fn streaming_extract_mixtral_with_summary_k_runs_svd_and_caps_down_meta() {
     // Same Mixtral fixture as the baseline test, but with
-    // `LARQL_SUMMARY_FEATURES_PER_EXPERT=2`. Triggers:
+    // `summary_features_per_expert = 2`. Triggers:
     //   - the SVD-summary path in `gate_vectors.rs` Standard-MoE branch
     //     (writes K rows per expert instead of full intermediate=4)
     //   - the down_meta `summary_k`-cap branch (truncates `num_features`
@@ -986,8 +970,6 @@ fn streaming_extract_mixtral_with_summary_k_runs_svd_and_caps_down_meta() {
     let num_experts_per_tok = 1usize;
     let vocab = 16usize;
     let summary_k = 2usize;
-
-    let _env = SummaryEnvGuard::set(&summary_k.to_string());
 
     let tmp = tempfile::tempdir().unwrap();
     let model_dir = tmp.path().join("model");
@@ -1010,6 +992,7 @@ fn streaming_extract_mixtral_with_summary_k_runs_svd_and_caps_down_meta() {
         "test/mixtral-summary-k",
         &output_dir,
         5,
+        summary_k, // summary_features_per_expert (SVD-summary tier)
         ExtractLevel::Browse,
         StorageDtype::F32,
         QuantFormat::None,
@@ -1038,5 +1021,203 @@ fn streaming_extract_mixtral_with_summary_k_runs_svd_and_caps_down_meta() {
     assert_eq!(
         gate_bytes, expected,
         "gate_vectors.bin sized for K rows × hidden, not intermediate"
+    );
+}
+
+// ─── GGUF-backed streaming extract ───────────────────────────────────────
+// Every fixture above is safetensors-backed. This section drives
+// `build_vindex_streaming` against a hand-built GGUF model so the GGUF
+// arms exercise end-to-end: arch detection in `streaming::mod`
+// (`GgufFile::open` → `to_config_json` → `detect_from_json`) and the
+// `GgufTensorSource` setup branch in `streaming::context::new`.
+
+use larql_models::loading::gguf::{GgufTensor, GgufValue, GgufWriter};
+
+/// Deterministic f32 ramp → little-endian bytes (non-degenerate so the
+/// down-projection argmax isn't a tie across the whole vocab).
+fn gguf_f32_ramp(n: usize) -> Vec<u8> {
+    (0..n)
+        .flat_map(|i| ((i as f32) * 0.01).to_le_bytes())
+        .collect()
+}
+
+/// Write a tiny but complete llama-architecture GGUF model.
+///
+/// FFN is square (`hidden == intermediate == 4`) on purpose: the
+/// canonical FFN orientation in `GgufTensorSource::get_tensor_f32`
+/// becomes a no-op (`orient` short-circuits when rows == cols), so the
+/// synthetic data can't trip a transpose mismatch. Tensors use GGUF
+/// naming (`blk.L.ffn_gate.weight`); the source adapter maps them back
+/// to HF keys via `normalize_gguf_key`.
+fn write_synthetic_llama_gguf(path: &Path, num_layers: usize, vocab: usize) {
+    const DIM: u64 = 4; // hidden == intermediate
+    let v = vocab as u64;
+
+    let mut w = GgufWriter::new();
+    w.meta("general.architecture", GgufValue::String("llama".into()))
+        .meta("llama.embedding_length", GgufValue::U32(DIM as u32))
+        .meta("llama.block_count", GgufValue::U32(num_layers as u32))
+        .meta("llama.feed_forward_length", GgufValue::U32(DIM as u32))
+        .meta("llama.attention.head_count", GgufValue::U32(2))
+        .meta("llama.attention.head_count_kv", GgufValue::U32(2))
+        .meta("llama.attention.key_length", GgufValue::U32(2))
+        .meta("llama.rope.freq_base", GgufValue::F32(10000.0));
+
+    // GGUF dims are innermost-first: [hidden, vocab] reshapes to the
+    // Array2 (vocab, hidden) the embeddings stage expects.
+    w.tensor(GgufTensor {
+        name: "token_embd.weight".into(),
+        dims: vec![DIM, v],
+        ggml_type: 0, // GGML_TYPE_F32
+        data: gguf_f32_ramp((DIM * v) as usize),
+    });
+    w.tensor(GgufTensor {
+        name: "output.weight".into(),
+        dims: vec![DIM, v],
+        ggml_type: 0,
+        data: gguf_f32_ramp((DIM * v) as usize),
+    });
+    w.tensor(GgufTensor {
+        name: "output_norm.weight".into(),
+        dims: vec![DIM],
+        ggml_type: 0,
+        data: gguf_f32_ramp(DIM as usize),
+    });
+    for layer in 0..num_layers {
+        w.tensor(GgufTensor {
+            name: format!("blk.{layer}.ffn_gate.weight"),
+            dims: vec![DIM, DIM],
+            ggml_type: 0,
+            data: gguf_f32_ramp((DIM * DIM) as usize),
+        });
+        w.tensor(GgufTensor {
+            name: format!("blk.{layer}.ffn_down.weight"),
+            dims: vec![DIM, DIM],
+            ggml_type: 0,
+            data: gguf_f32_ramp((DIM * DIM) as usize),
+        });
+    }
+    w.write_to_file(path).unwrap();
+}
+
+#[test]
+fn streaming_extract_gguf_llama_browse_runs_end_to_end() {
+    let num_layers = 2usize;
+    let vocab = 24usize;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let model_dir = tmp.path().join("gguf_model");
+    std::fs::create_dir_all(&model_dir).unwrap();
+    // A directory containing exactly one `.gguf` — exercises the
+    // dir-scan branch of `detect_gguf_entry` as well as the GGUF arms.
+    write_synthetic_llama_gguf(&model_dir.join("model.gguf"), num_layers, vocab);
+
+    let tok_json =
+        r#"{"version":"1.0","model":{"type":"BPE","vocab":{},"merges":[]},"added_tokens":[]}"#;
+    let tokenizer = larql_vindex::tokenizers::Tokenizer::from_bytes(tok_json.as_bytes()).unwrap();
+
+    let output_dir = tmp.path().join("vindex");
+    let mut cb = SilentBuildCallbacks;
+    build_vindex_streaming(
+        &model_dir,
+        &tokenizer,
+        "test/llama-gguf",
+        &output_dir,
+        5, // down_top_k
+        0, // summary_features_per_expert (off)
+        ExtractLevel::Browse,
+        StorageDtype::F32,
+        QuantFormat::None,
+        WriteWeightsOptions::default(),
+        KquantWriteOptions::default(),
+        false, // drop_gate_vectors
+        &mut cb,
+    )
+    .expect("streaming extract on GGUF llama fixture");
+
+    let config = larql_vindex::load_vindex_config(&output_dir).unwrap();
+    assert_eq!(
+        config.layers.len(),
+        num_layers,
+        "GGUF extract should record one layer_info per block"
+    );
+    assert!(
+        output_dir.join("gate_vectors.bin").exists(),
+        "GGUF extract should write gate_vectors.bin"
+    );
+    assert!(
+        output_dir.join("embeddings.bin").exists(),
+        "GGUF extract should write embeddings.bin"
+    );
+}
+
+#[test]
+fn streaming_extract_gguf_single_file_path_is_accepted() {
+    // Point `build_vindex_streaming` directly at the `.gguf` file rather
+    // than its parent dir — exercises the single-file arm of
+    // `detect_gguf_entry` through the full pipeline.
+    let tmp = tempfile::tempdir().unwrap();
+    let gguf_path = tmp.path().join("solo.gguf");
+    write_synthetic_llama_gguf(&gguf_path, 1, 16);
+
+    let tok_json =
+        r#"{"version":"1.0","model":{"type":"BPE","vocab":{},"merges":[]},"added_tokens":[]}"#;
+    let tokenizer = larql_vindex::tokenizers::Tokenizer::from_bytes(tok_json.as_bytes()).unwrap();
+
+    let output_dir = tmp.path().join("vindex");
+    let mut cb = SilentBuildCallbacks;
+    build_vindex_streaming(
+        &gguf_path,
+        &tokenizer,
+        "test/llama-gguf-solo",
+        &output_dir,
+        3,
+        0,
+        ExtractLevel::Browse,
+        StorageDtype::F32,
+        QuantFormat::None,
+        WriteWeightsOptions::default(),
+        KquantWriteOptions::default(),
+        false,
+        &mut cb,
+    )
+    .expect("streaming extract on single-file GGUF");
+
+    let config = larql_vindex::load_vindex_config(&output_dir).unwrap();
+    assert_eq!(config.layers.len(), 1);
+}
+
+#[test]
+fn streaming_extract_drop_gate_without_q4k_is_rejected() {
+    // `--drop-gate-vectors` is only recoverable when interleaved Q4K is
+    // also written; with `QuantFormat::None` the orchestrator must refuse
+    // before touching the output dir.
+    let tmp = tempfile::tempdir().unwrap();
+    let model_dir = tmp.path().join("model");
+    let output_dir = tmp.path().join("vindex");
+    let tokenizer = write_synthetic_mixtral_model(&model_dir, 8, 4, 1, 2, 1, 16);
+
+    let mut cb = SilentBuildCallbacks;
+    let err = build_vindex_streaming(
+        &model_dir,
+        &tokenizer,
+        "test/drop-gate-bad",
+        &output_dir,
+        5,
+        0,
+        ExtractLevel::Browse,
+        StorageDtype::F32,
+        QuantFormat::None, // not Q4K — drop_gate is invalid here
+        WriteWeightsOptions::default(),
+        KquantWriteOptions::default(),
+        true, // drop_gate_vectors
+        &mut cb,
+    )
+    .expect_err("drop_gate_vectors without Q4K must be rejected");
+
+    let msg = format!("{err}").to_lowercase();
+    assert!(
+        msg.contains("drop-gate-vectors") || msg.contains("q4k"),
+        "unexpected error message: {msg}"
     );
 }

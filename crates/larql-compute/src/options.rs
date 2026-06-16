@@ -159,44 +159,169 @@ pub const ENV_Q4K_ASM: &str = "LARQL_Q4K_ASM";
 /// Spin-barrier thread pool for the decode hot path (vs rayon's sleeping pool).
 pub const ENV_SPIN_POOL: &str = "LARQL_SPIN_POOL";
 
-/// A decode fast-path stage is ON unless explicitly disabled
-/// (`=0`/`false`/`off`/`no`).
-fn fast_path_on(name: &str) -> bool {
-    !env_opt_out(name)
+thread_local! {
+    /// Per-thread override for env-var reads ([`env_override`]). Tests inject
+    /// values here to toggle a flag WITHOUT `std::env::set_var`, which is
+    /// thread-unsafe against the concurrent `getenv` every other parallel test
+    /// does on the decode path — that race SIGSEGVs libc. Each entry is the raw
+    /// value the env helper should see: `Some("v")` = "set to v", `None` = "act
+    /// as if unset". Production never touches this; the map is empty so every
+    /// helper falls through to the process env unchanged.
+    static ENV_OVERRIDES: std::cell::RefCell<
+        std::collections::HashMap<&'static str, Option<String>>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
-// The per-layer / per-token stages read the env each call (an uncontended
-// single-thread `getenv` ~ns, negligible at layer granularity) so they stay
-// togglable in tests. The two genuinely hot stages — `asm` (per matvec) and
-// `spin_pool` (per parallel section) — cache at first read; no test toggles
-// them via env (their unit tests drive the kernels / `SpinPool` directly).
+/// The current thread's test override for `name`, if any. The outer `Option`
+/// tells overridden-vs-not; the inner is the (possibly-unset) raw value.
+fn env_override(name: &str) -> Option<Option<String>> {
+    ENV_OVERRIDES.with(|o| o.borrow().get(name).cloned())
+}
+
+/// Effective raw value for `name`: the thread-local override if present, else
+/// the process env. The single choke point every env helper reads through.
+fn env_effective(name: &str) -> Option<String> {
+    match env_override(name) {
+        Some(v) => v,
+        None => std::env::var(name).ok(),
+    }
+}
+
+// ── Pure value parsers (no env) — directly unit-tested; the env helpers below
+//    just feed them the effective raw value. Keeps the "0"/"true"/… vocabulary
+//    in one place and testable without touching process env.
+fn is_opt_out_value(v: Option<&str>) -> bool {
+    matches!(v, Some("0") | Some("false") | Some("off") | Some("no"))
+}
+fn is_opt_in_value(v: Option<&str>) -> bool {
+    matches!(v, Some("1") | Some("true") | Some("on") | Some("yes"))
+}
+
+/// The current thread's override for a fast-path stage flag as a bool, if set.
+/// `None` in production → the accessor uses the cached [`decode_options`] value.
+fn fast_path_override(name: &'static str) -> Option<bool> {
+    env_override(name).map(|v| !is_opt_out_value(v.as_deref()))
+}
+
+/// Override an env flag on the current thread to a raw string value (`Some`) or
+/// unset (`None`) — test-only escape hatch ([`ENV_OVERRIDES`]). Lets tests
+/// toggle any flag without process-global env mutation (which segfaults under
+/// parallel `getenv`). Clear with [`clear_fast_path_overrides`] on teardown.
+#[doc(hidden)]
+pub fn set_env_override(name: &'static str, value: Option<&str>) {
+    ENV_OVERRIDES.with(|o| {
+        o.borrow_mut().insert(name, value.map(str::to_string));
+    });
+}
+
+/// Override a decode fast-path stage flag on the current thread (test-only).
+/// Bool convenience over [`set_env_override`] (`true` → `"1"`, `false` → `"0"`).
+#[doc(hidden)]
+pub fn set_fast_path_override(name: &'static str, on: bool) {
+    set_env_override(name, Some(if on { "1" } else { "0" }));
+}
+
+/// Clear all thread-local env overrides (test-only).
+#[doc(hidden)]
+pub fn clear_fast_path_overrides() {
+    ENV_OVERRIDES.with(|o| o.borrow_mut().clear());
+}
+
+/// RAII guard that sets fast-path stage overrides on the current thread and
+/// clears them on drop (test-only). Replaces the `std::env::set_var` pattern,
+/// which races concurrent `getenv` on the decode path and SIGSEGVs libc.
+#[cfg(test)]
+pub(crate) struct FastPathGuard;
+
+#[cfg(test)]
+impl FastPathGuard {
+    pub(crate) fn set(flags: &[(&'static str, bool)]) -> Self {
+        for &(name, on) in flags {
+            set_fast_path_override(name, on);
+        }
+        FastPathGuard
+    }
+}
+
+#[cfg(test)]
+impl Drop for FastPathGuard {
+    fn drop(&mut self) {
+        clear_fast_path_overrides();
+    }
+}
+
+/// The decode fast-path stage flags — the single source of truth for "which
+/// decode stages are on". Read ONCE from the process env at first use and
+/// cached (see [`decode_options`]); each stage is default-ON, opt out with
+/// `LARQL_<X>=0`. This folds what were four per-token `getenv`s and two ad-hoc
+/// per-stage `OnceLock`s (`asm`, `spin_pool`) into one typed registry. Tests
+/// toggle stages per-thread via [`set_fast_path_override`] (no `set_var`, which
+/// races the per-token `getenv` and SIGSEGVs libc), and the override wins over
+/// this cache.
+#[derive(Debug, Clone, Copy)]
+pub struct DecodeOptions {
+    /// Q4_K-direct attention projections (read Q4_K bytes from the index).
+    pub q4k_direct_attn: bool,
+    /// Int8 (Q8_K) activation route for the Q4_K-direct attention projections.
+    pub q4k_attn_int8: bool,
+    /// Q4_K lm_head (vocab projection straight from the Q4_K view).
+    pub q4k_lm_head: bool,
+    /// Q4_K-direct dense-FFN decode slab (prefill stays f32 gemm).
+    pub q4k_direct_ffn: bool,
+    /// Hand-asm aarch64 Q4_K/Q6_K kernels (bit-exact with the intrinsic path).
+    pub q4k_asm: bool,
+    /// Spin-barrier thread pool for the decode hot path (vs rayon's pool).
+    pub spin_pool: bool,
+}
+
+impl DecodeOptions {
+    fn from_env() -> Self {
+        // RAW process env (bypass the per-thread override): this is the
+        // process-wide cached production value, and a test's thread-local
+        // override must not be baked into it (the accessors apply the override
+        // per-call instead, via `fast_path_override`).
+        let on = |name: &str| !is_opt_out_value(std::env::var(name).ok().as_deref());
+        Self {
+            q4k_direct_attn: on(ENV_Q4K_DIRECT_ATTN),
+            q4k_attn_int8: on(ENV_Q4K_ATTN_INT8),
+            q4k_lm_head: on(ENV_Q4K_LM_HEAD),
+            q4k_direct_ffn: on(ENV_Q4K_DIRECT_FFN),
+            q4k_asm: on(ENV_Q4K_ASM),
+            spin_pool: on(ENV_SPIN_POOL),
+        }
+    }
+}
+
+/// Process-wide decode fast-path flags, built from env on first use and cached.
+/// The single registry the per-stage `*_enabled()` accessors read.
+pub fn decode_options() -> &'static DecodeOptions {
+    static OPTS: std::sync::OnceLock<DecodeOptions> = std::sync::OnceLock::new();
+    OPTS.get_or_init(DecodeOptions::from_env)
+}
 
 /// Q4_K-direct attention projections enabled (default on).
 pub fn q4k_direct_attn_enabled() -> bool {
-    fast_path_on(ENV_Q4K_DIRECT_ATTN)
+    fast_path_override(ENV_Q4K_DIRECT_ATTN).unwrap_or(decode_options().q4k_direct_attn)
 }
 /// Int8 attention projection route enabled (default on).
 pub fn q4k_attn_int8_enabled() -> bool {
-    fast_path_on(ENV_Q4K_ATTN_INT8)
+    fast_path_override(ENV_Q4K_ATTN_INT8).unwrap_or(decode_options().q4k_attn_int8)
 }
 /// Q4_K lm_head enabled (default on; falls back to f32 without a head view).
 pub fn q4k_lm_head_enabled() -> bool {
-    fast_path_on(ENV_Q4K_LM_HEAD)
+    fast_path_override(ENV_Q4K_LM_HEAD).unwrap_or(decode_options().q4k_lm_head)
 }
 /// Q4_K-direct dense-FFN decode slab enabled (default on).
 pub fn q4k_direct_ffn_enabled() -> bool {
-    fast_path_on(ENV_Q4K_DIRECT_FFN)
+    fast_path_override(ENV_Q4K_DIRECT_FFN).unwrap_or(decode_options().q4k_direct_ffn)
 }
-/// Hand-asm Q4_K/Q6_K kernels enabled (default on; aarch64 only). Cached — read
-/// per matvec.
+/// Hand-asm Q4_K/Q6_K kernels enabled (default on; aarch64 only).
 pub fn q4k_asm_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| fast_path_on(ENV_Q4K_ASM))
+    fast_path_override(ENV_Q4K_ASM).unwrap_or(decode_options().q4k_asm)
 }
-/// Spin-barrier decode pool enabled (default on). Cached — read per section.
+/// Spin-barrier decode pool enabled (default on).
 pub fn spin_pool_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| fast_path_on(ENV_SPIN_POOL))
+    fast_path_override(ENV_SPIN_POOL).unwrap_or(decode_options().spin_pool)
 }
 
 // Helpers below are `pub` (not `pub(crate)`) because sibling backend
@@ -206,8 +331,15 @@ pub fn spin_pool_enabled() -> bool {
 // `env::var_os`/`parse::<usize>` boilerplate and risk drift in how
 // "set" / "true" / "1" are interpreted across backends.
 
+// All of these read through `env_effective` so the thread-local test override
+// applies uniformly (no `std::env::set_var` in tests → no `setenv`/`getenv`
+// SIGSEGV race). In production the override map is empty, so each is exactly
+// the prior `std::env::var*` read.
 pub fn env_flag(name: &str) -> bool {
-    std::env::var_os(name).is_some()
+    match env_override(name) {
+        Some(v) => v.is_some(),
+        None => std::env::var_os(name).is_some(),
+    }
 }
 
 pub fn env_flag_any(names: &[&str]) -> bool {
@@ -215,11 +347,11 @@ pub fn env_flag_any(names: &[&str]) -> bool {
 }
 
 pub fn env_usize(name: &str) -> Option<usize> {
-    std::env::var(name).ok()?.parse().ok()
+    env_effective(name)?.parse().ok()
 }
 
 pub fn env_value(name: &str) -> Option<String> {
-    std::env::var(name).ok()
+    env_effective(name)
 }
 
 pub fn env_nonempty_value(name: &str) -> Option<String> {
@@ -227,21 +359,15 @@ pub fn env_nonempty_value(name: &str) -> Option<String> {
 }
 
 pub fn env_opt_in(name: &str) -> bool {
-    matches!(
-        std::env::var(name).as_deref(),
-        Ok("1") | Ok("true") | Ok("on") | Ok("yes")
-    )
+    is_opt_in_value(env_effective(name).as_deref())
 }
 
 pub fn env_opt_out(name: &str) -> bool {
-    matches!(
-        std::env::var(name).as_deref(),
-        Ok("0") | Ok("false") | Ok("off") | Ok("no")
-    )
+    is_opt_out_value(env_effective(name).as_deref())
 }
 
 pub fn env_not_zero_or_default(name: &str, default: bool) -> bool {
-    std::env::var(name)
+    env_effective(name)
         .map(|value| value != "0")
         .unwrap_or(default)
 }
@@ -262,32 +388,41 @@ pub fn split_profile_requested() -> bool {
 mod tests {
     use super::*;
 
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn with_env_vars<T>(vars: &[(&str, Option<&str>)], f: impl FnOnce() -> T) -> T {
-        let _guard = ENV_LOCK.lock().expect("env test mutex poisoned");
-        let previous: Vec<_> = vars
-            .iter()
-            .map(|(name, _)| (*name, std::env::var_os(name)))
-            .collect();
+    /// Run `f` with the given env flags overridden on the current thread via the
+    /// thread-local override (NOT `std::env::set_var`, which races concurrent
+    /// `getenv` → SIGSEGV). Cleared on drop, so no cross-test leakage and no
+    /// serialization needed.
+    fn with_env_vars<T>(vars: &[(&'static str, Option<&str>)], f: impl FnOnce() -> T) -> T {
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                clear_fast_path_overrides();
+            }
+        }
+        let _clear = Clear;
         for (name, value) in vars {
-            match value {
-                Some(value) => std::env::set_var(name, value),
-                None => std::env::remove_var(name),
-            }
+            set_env_override(name, *value);
         }
-        let result = f();
-        for (name, value) in previous {
-            match value {
-                Some(value) => std::env::set_var(name, value),
-                None => std::env::remove_var(name),
-            }
-        }
-        result
+        f()
     }
 
-    fn with_env<T>(name: &str, value: Option<&str>, f: impl FnOnce() -> T) -> T {
+    fn with_env<T>(name: &'static str, value: Option<&str>, f: impl FnOnce() -> T) -> T {
         with_env_vars(&[(name, value)], f)
+    }
+
+    #[test]
+    fn opt_value_parsers_recognise_the_vocabulary() {
+        for v in ["0", "false", "off", "no"] {
+            assert!(is_opt_out_value(Some(v)));
+            assert!(!is_opt_in_value(Some(v)));
+        }
+        for v in ["1", "true", "on", "yes"] {
+            assert!(is_opt_in_value(Some(v)));
+            assert!(!is_opt_out_value(Some(v)));
+        }
+        assert!(!is_opt_out_value(None));
+        assert!(!is_opt_in_value(None));
+        assert!(!is_opt_out_value(Some("maybe")));
     }
 
     #[test]

@@ -519,6 +519,54 @@ mod tests {
         });
     }
 
+    /// Cross-dispatch read-after-write — the real decode pipeline shape
+    /// (dispatch A writes a buffer; the *next* dispatch B reads it and writes a
+    /// derived buffer). Exercises the visibility the disjoint-write tests don't:
+    /// workers running dispatch B must observe ALL of dispatch A's writes (the
+    /// `barrier_A.Acquire → epoch_B.Release → worker_B.Acquire` chain). The pool
+    /// is oversubscribed (more workers than cores) so the barrier routinely waits
+    /// on a descheduled worker. Kept fast (a few hundred rounds) — under EXTREME
+    /// oversubscription (2× burners, 4000 rounds) this and the disjoint-write
+    /// path stayed correct, so this is a regression guard, not a repro.
+    #[test]
+    fn stress_cross_dispatch_read_after_write() {
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(8);
+        // Oversubscribe the pool itself (more workers than cores) so the barrier
+        // routinely waits on a descheduled worker.
+        let pool = SpinPool::new((cores + 2).max(4));
+        let n = 61usize; // chunks; not a multiple of the thread count
+        let mut a = vec![0u64; n];
+        let mut b = vec![0u64; n];
+        for round in 1..=400u64 {
+            // Dispatch A: fill `a` with a round-derived pattern.
+            let pa = a.as_mut_ptr() as usize;
+            pool.for_each_chunk(n, |c| {
+                // SAFETY: chunk c owns element c.
+                unsafe { *(pa as *mut u64).add(c) = round.wrapping_mul(c as u64 + 1) | 1 };
+            });
+            // Dispatch B: read `a`, write `b = f(a)`. If B's workers don't see
+            // all of A's writes, `b[c]` is wrong (or derived from a stale 0).
+            let pa_r = a.as_ptr() as usize;
+            let pb = b.as_mut_ptr() as usize;
+            pool.for_each_chunk(n, |c| {
+                // SAFETY: read element c (written by A's chunk c), write b[c].
+                let av = unsafe { *(pa_r as *const u64).add(c) };
+                unsafe { *(pb as *mut u64).add(c) = av.wrapping_mul(31).wrapping_add(7) };
+            });
+            for c in 0..n {
+                let want_a = round.wrapping_mul(c as u64 + 1) | 1;
+                assert_eq!(a[c], want_a, "round {round} chunk {c}: A wrong");
+                assert_eq!(
+                    b[c],
+                    want_a.wrapping_mul(31).wrapping_add(7),
+                    "round {round} chunk {c}: B read a stale/partial A"
+                );
+            }
+        }
+    }
+
     #[test]
     fn back_to_back_dispatches_reuse_workers() {
         // Exercises the epoch path: many tiny dispatches in a row (the decode

@@ -749,6 +749,95 @@ pub fn run_attention_block_decode_step_q4k_direct(
     Some((h_post_attn, (k_concat, v_concat)))
 }
 
+/// Append one `[1, cols]` row to a doubling-capacity `[cap, cols]` buffer at
+/// logical row `len`, growing (doubling) the buffer first if it is full. Mirror
+/// of `larql-kv`'s `helpers::append_row` — kept here because larql-compute can't
+/// depend on larql-kv. The caller increments its logical length after.
+fn append_kv_row(buf: &mut Array2<f32>, row: &Array2<f32>, len: usize) {
+    let cap = buf.shape()[0];
+    if len == cap {
+        let cols = buf.shape()[1];
+        let new_cap = (cap * 2).max(8);
+        let mut grown = Array2::<f32>::zeros((new_cap, cols));
+        grown
+            .slice_mut(ndarray::s![..len, ..])
+            .assign(&buf.slice(ndarray::s![..len, ..]));
+        *buf = grown;
+    }
+    buf.slice_mut(ndarray::s![len..len + 1, ..]).assign(row);
+}
+
+/// In-place Q4K-direct decode-step attention for walk engines that hold their
+/// hot K/V as **doubling-capacity** buffers (markov_residual / _codec). It
+/// projects the new token's K/V, appends the RoPE'd row into `k_cache`/`v_cache`
+/// at logical row `cache_len` (growing the buffer if full), then attends over
+/// the `[..cache_len + 1]` views — eliminating the per-step O(ctx) owned concat
+/// that [`run_attention_block_decode_step_q4k_direct`] pays. Over an L-token
+/// generation that turns the cache copy from O(L²) total into O(L).
+///
+/// On return the caller's buffers hold `cache_len + 1` logical rows and the
+/// function yields `h_post_attn`. Returns `None` — leaving the buffers
+/// **untouched** (the projection runs before any mutation) — when the index has
+/// no Q4K attention bytes for this layer, so the caller can fall back to the
+/// owned-concat path. Bit-identical to the concat form: same data attended, same
+/// kernels; only the cache representation (in-place views vs fresh owned concat)
+/// differs.
+#[allow(clippy::too_many_arguments)]
+pub fn run_attention_block_decode_step_q4k_direct_inplace(
+    weights: &larql_models::ModelWeights,
+    h_new: &Array2<f32>,
+    layer: usize,
+    k_cache: &mut Array2<f32>,
+    v_cache: &mut Array2<f32>,
+    cache_len: usize,
+    abs_position: usize,
+    backend: &dyn crate::ComputeBackend,
+    index: &dyn crate::KvIndex,
+) -> Option<Array2<f32>> {
+    let proj = decode_step_project_q4k_direct(weights, h_new, layer, abs_position, backend, index)?;
+    append_kv_row(k_cache, &proj.k_new_rope, cache_len);
+    append_kv_row(v_cache, &proj.v_new, cache_len);
+    let total = cache_len + 1;
+    decode_step_attend_q4k_direct(
+        weights,
+        h_new,
+        layer,
+        &proj.q_rope,
+        k_cache.slice(ndarray::s![..total, ..]),
+        v_cache.slice(ndarray::s![..total, ..]),
+        backend,
+        index,
+    )
+}
+
+/// Best-available in-place decode-step attention for walk engines that own a
+/// doubling-capacity K/V buffer: the Q4K-direct in-place path when the flag is
+/// on and an index with attention bytes is supplied, else `None` so the caller
+/// uses the owned-concat [`run_attention_block_decode_step_auto`]. The SAME
+/// per-layer Q4K-vs-f32 choice the dispatch path makes — see
+/// [`run_attention_block_decode_step_auto`].
+#[allow(clippy::too_many_arguments)]
+pub fn run_attention_block_decode_step_auto_inplace(
+    weights: &larql_models::ModelWeights,
+    h_new: &Array2<f32>,
+    layer: usize,
+    k_cache: &mut Array2<f32>,
+    v_cache: &mut Array2<f32>,
+    cache_len: usize,
+    abs_position: usize,
+    backend: Option<&dyn crate::ComputeBackend>,
+    index: Option<&dyn crate::KvIndex>,
+) -> Option<Array2<f32>> {
+    if q4k_direct_attn_enabled() {
+        if let (Some(be), Some(idx)) = (backend, index) {
+            return run_attention_block_decode_step_q4k_direct_inplace(
+                weights, h_new, layer, k_cache, v_cache, cache_len, abs_position, be, idx,
+            );
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -958,6 +1047,82 @@ mod tests {
         assert!(h2.iter().all(|x| x.is_finite()));
     }
 
+    /// The in-place form must be **bit-identical** to the owned-concat form
+    /// across a multi-step decode: same h_post_attn every step, and the
+    /// doubling-capacity buffer's `[..len]` view must equal the concat's owned
+    /// K/V. This is the parity gate that lets the walk engines drop the O(ctx)
+    /// concat. Runs a real multi-layer Q4K fixture for several steps so the
+    /// buffer crosses a capacity doubling.
+    #[test]
+    fn q4k_direct_inplace_is_bit_identical_to_owned_concat() {
+        let weights = make_test_q4k_weights();
+        let idx = make_q4k_fixture_index(&weights);
+        let backend = crate::CpuBackend;
+        let num_layers = weights.num_layers;
+        let kv_dim = {
+            let arch = &*weights.arch;
+            arch.num_kv_heads_for_layer(0) * arch.head_dim_for_layer(0)
+        };
+
+        // Concat-path cache: one owned SharedKV per layer (grows by concat).
+        let mut concat_kv: Vec<Option<SharedKV>> = vec![None; num_layers];
+        // In-place cache: doubling-capacity buffers per layer + a logical length.
+        let mut inplace_k: Vec<Array2<f32>> =
+            (0..num_layers).map(|_| Array2::zeros((0, kv_dim))).collect();
+        let mut inplace_v: Vec<Array2<f32>> =
+            (0..num_layers).map(|_| Array2::zeros((0, kv_dim))).collect();
+
+        for step in 0..6 {
+            // The buffer's logical length at the start of this step == `step`.
+            let len = step;
+            let h = Array2::from_elem((1, weights.hidden_size), 0.05 * (step as f32 + 1.0));
+            for layer in 0..num_layers {
+                let (h_concat, new_kv) = run_attention_block_decode_step_q4k_direct(
+                    &weights,
+                    &h,
+                    layer,
+                    concat_kv[layer].as_ref(),
+                    step,
+                    &backend,
+                    &idx,
+                )
+                .expect("concat step");
+
+                let h_inplace = run_attention_block_decode_step_q4k_direct_inplace(
+                    &weights,
+                    &h,
+                    layer,
+                    &mut inplace_k[layer],
+                    &mut inplace_v[layer],
+                    len,
+                    step,
+                    &backend,
+                    &idx,
+                )
+                .expect("inplace step");
+
+                // h_post_attn must match bit-for-bit.
+                for (a, b) in h_concat.iter().zip(h_inplace.iter()) {
+                    assert_eq!(a.to_bits(), b.to_bits(), "h_post_attn diverged step {step} layer {layer}");
+                }
+                // The in-place buffer's logical view must equal the concat K/V.
+                let total = len + 1;
+                let k_view = inplace_k[layer].slice(ndarray::s![..total, ..]);
+                let v_view = inplace_v[layer].slice(ndarray::s![..total, ..]);
+                assert_eq!(new_kv.0.shape(), k_view.shape(), "K shape step {step} layer {layer}");
+                for (a, b) in new_kv.0.iter().zip(k_view.iter()) {
+                    assert_eq!(a.to_bits(), b.to_bits(), "K diverged step {step} layer {layer}");
+                }
+                for (a, b) in new_kv.1.iter().zip(v_view.iter()) {
+                    assert_eq!(a.to_bits(), b.to_bits(), "V diverged step {step} layer {layer}");
+                }
+                concat_kv[layer] = Some(new_kv);
+            }
+        }
+        // Buffer must have grown past its first allocation (crossed a doubling).
+        assert!(inplace_k[0].shape()[0] >= 6, "buffer should have grown to hold 6 rows");
+    }
+
     #[test]
     fn q4k_direct_decode_step_all_layers_succeed() {
         let weights = make_test_q4k_weights();
@@ -1014,18 +1179,9 @@ mod tests {
         // This pins the strict <1e-3 WEIGHT parity of the *f32-activation*
         // Q4K-direct path. The int8 activation route is now on by default and
         // carries a looser (~2% scale-relative) bound by design, so disable it
-        // here. The guard restores the env even if an assertion panics.
-        struct EnvGuard(Option<std::ffi::OsString>);
-        impl Drop for EnvGuard {
-            fn drop(&mut self) {
-                match self.0.take() {
-                    Some(v) => std::env::set_var("LARQL_Q4K_ATTN_INT8", v),
-                    None => std::env::remove_var("LARQL_Q4K_ATTN_INT8"),
-                }
-            }
-        }
-        let _guard = EnvGuard(std::env::var_os("LARQL_Q4K_ATTN_INT8"));
-        std::env::set_var("LARQL_Q4K_ATTN_INT8", "0");
+        // here. Thread-local override (NOT `set_var`, which races concurrent
+        // `getenv` on the decode path → SIGSEGV); cleared on drop.
+        let _guard = crate::options::FastPathGuard::set(&[(crate::options::ENV_Q4K_ATTN_INT8, false)]);
 
         // Parity contract (roadmap #16, "<1e-3"): the Q4K-direct decode
         // step should track the f32-BLAS path that runs on the SAME bytes

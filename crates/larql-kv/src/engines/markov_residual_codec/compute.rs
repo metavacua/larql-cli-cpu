@@ -16,6 +16,7 @@ use ndarray::{s, Array2};
 
 use crate::engines::markov_residual::recompute_kv;
 use crate::engines::markov_residual_codec::codec::ColdResidualCodec;
+use crate::engines::markov_residual_codec::helpers::append_row;
 use crate::engines::markov_residual_codec::store::{EncodedColdLayer, RsStoreCodec};
 
 pub struct RsPrefillResultCodec {
@@ -118,112 +119,191 @@ pub fn rs_decode_step_codec(
         rs.max_window.is_none() && rs.cold_encoded.is_none() && rs.cold_kv.is_none();
     let mut step_new_kv: Vec<larql_inference::attention::SharedKV> =
         Vec::with_capacity(num_layers);
+    // Move the hot K/V cache out so the steady state (step 2+) can append in
+    // place — twin of `markov_residual::compute::rs_decode_step_inner`.
+    let mut hot_kv_store = rs.hot_kv;
+    let had_hot_kv = hot_kv_store.is_some();
+    let idx_kv: Option<&dyn larql_compute::KvIndex> =
+        index.map(|v| v as &dyn larql_compute::KvIndex);
+    let inplace_enabled =
+        crate::engines::markov_residual::compute::markov_inplace_kv_enabled();
 
     for layer in 0..num_layers {
-        let h_hot = &rs.stored[layer];
-        let s_hot = h_hot.shape()[0];
+        // `stored` is a doubling-capacity buffer (W8.2): logical row count is
+        // `hot_len`, not `shape()[0]`.
+        let s_hot = rs.hot_len;
         let hot_abs_start = abs_position.saturating_sub(s_hot);
-
-        let (k_full, v_full) = if let Some(hot_kv) = rs.hot_kv.as_ref().filter(|_| cache_eligible) {
-            // W2 cached path (no cold tier): hot_kv IS the full K/V — read it,
-            // skip recompute. Debug builds assert it matches a fresh recompute.
-            let (k_buf, v_buf) = &hot_kv[layer];
-            let k = k_buf.slice(s![..s_hot, ..]).to_owned();
-            let v = v_buf.slice(s![..s_hot, ..]).to_owned();
-            #[cfg(debug_assertions)]
-            if let Some((rk, rv)) =
-                recompute_kv(weights, h_hot, layer, hot_abs_start, backend, None)
-            {
-                let kd = k
-                    .iter()
-                    .zip(rk.iter())
-                    .map(|(a, b)| (a - b).abs())
-                    .fold(0.0f32, f32::max);
-                let vd = v
-                    .iter()
-                    .zip(rv.iter())
-                    .map(|(a, b)| (a - b).abs())
-                    .fold(0.0f32, f32::max);
-                debug_assert!(kd < 1e-2, "codec hot_kv K cache diverged: {kd}");
-                debug_assert!(vd < 1e-2, "codec hot_kv V cache diverged: {vd}");
-            }
-            (k, v)
-        } else if let Some(cold_kv) = &rs.cold_kv {
-            let (k_cold, v_cold) = &cold_kv[layer];
-            let (k_hot, v_hot) = recompute_kv(weights, h_hot, layer, hot_abs_start, backend, None)?;
-            let c = k_cold.shape()[0];
-            let kv_dim = k_cold.shape()[1];
-            let mut k_combined = Array2::<f32>::zeros((c + s_hot, kv_dim));
-            k_combined.slice_mut(s![..c, ..]).assign(k_cold);
-            k_combined.slice_mut(s![c.., ..]).assign(&k_hot);
-            let mut v_combined = Array2::<f32>::zeros((c + s_hot, kv_dim));
-            v_combined.slice_mut(s![..c, ..]).assign(v_cold);
-            v_combined.slice_mut(s![c.., ..]).assign(&v_hot);
-            (k_combined, v_combined)
-        } else {
-            let (h_full, full_abs_start) = if let Some(cold_layers) = &rs.cold_encoded {
-                let enc = &cold_layers[layer];
-                if enc.n_positions > 0 {
-                    let decoded = enc.decode(rs.codec);
-                    let hidden = h_hot.shape()[1];
-                    let mut combined = Array2::<f32>::zeros((decoded.shape()[0] + s_hot, hidden));
-                    combined
-                        .slice_mut(s![..decoded.shape()[0], ..])
-                        .assign(&decoded);
-                    combined
-                        .slice_mut(s![decoded.shape()[0].., ..])
-                        .assign(h_hot);
-                    (combined, rs.cold_abs_start)
-                } else {
-                    (h_hot.clone(), hot_abs_start)
-                }
-            } else {
-                (h_hot.clone(), hot_abs_start)
-            };
-            let (k, v) = recompute_kv(weights, &h_full, layer, full_abs_start, backend, None)?;
-            (k, v)
-        };
 
         new_stored.push(h_new.clone());
 
-        let (h_post_attn, new_kv) = larql_inference::attention::run_attention_block_decode_step_auto(
-            weights,
-            &h_new,
-            layer,
-            Some(&(k_full, v_full)),
-            abs_position,
-            Some(backend),
-            index.map(|v| v as &dyn larql_compute::KvIndex),
-        )?;
-        if cache_eligible {
-            step_new_kv.push(new_kv);
-        }
+        let h_post_attn = if cache_eligible && had_hot_kv {
+            // STEADY STATE (step 2+): append this token's projected+RoPE'd K/V row
+            // IN PLACE into the doubling-capacity `hot_kv` buffer and attend over
+            // the `[..s_hot+1]` views — no per-step O(ctx) owned concat (O(L)
+            // total cache copy vs O(L²)). See the markov twin for the rationale.
+            let bufs = hot_kv_store.as_mut().expect("had_hot_kv");
+            #[cfg(debug_assertions)]
+            {
+                // f32-path parity gate only (the Q4K-direct route has its own
+                // oracles: the compute-level bit-identity test + the engine A/B).
+                let q4k_on = larql_compute::options::q4k_direct_attn_enabled();
+                if !q4k_on {
+                    let (k_buf, v_buf) = &bufs[layer];
+                    let h_logical = rs.stored[layer].slice(s![..s_hot, ..]).to_owned();
+                    if let Some((rk, rv)) =
+                        recompute_kv(weights, &h_logical, layer, hot_abs_start, backend, None)
+                    {
+                        let kd = k_buf
+                            .slice(s![..s_hot, ..])
+                            .iter()
+                            .zip(rk.iter())
+                            .map(|(a, b)| (a - b).abs())
+                            .fold(0.0f32, f32::max);
+                        let vd = v_buf
+                            .slice(s![..s_hot, ..])
+                            .iter()
+                            .zip(rv.iter())
+                            .map(|(a, b)| (a - b).abs())
+                            .fold(0.0f32, f32::max);
+                        debug_assert!(kd < 1e-2, "codec hot_kv K cache diverged: {kd}");
+                        debug_assert!(vd < 1e-2, "codec hot_kv V cache diverged: {vd}");
+                    }
+                }
+            }
+            let (k_buf, v_buf) = &mut bufs[layer];
+            let inplace = if inplace_enabled {
+                larql_inference::attention::run_attention_block_decode_step_auto_inplace(
+                    weights, &h_new, layer, k_buf, v_buf, s_hot, abs_position, Some(backend), idx_kv,
+                )
+            } else {
+                None
+            };
+            match inplace {
+                Some(h) => h,
+                None => {
+                    // Q4K-direct off (flags-off parity) or no attn bytes: owned
+                    // concat over the buffer view, then replace. Bit-identical to
+                    // the legacy borrow path.
+                    let prior: SharedKV = (
+                        k_buf.slice(s![..s_hot, ..]).to_owned(),
+                        v_buf.slice(s![..s_hot, ..]).to_owned(),
+                    );
+                    let (h, new_kv) =
+                        larql_inference::attention::run_attention_block_decode_step_auto(
+                            weights,
+                            &h_new,
+                            layer,
+                            Some(&prior),
+                            abs_position,
+                            Some(backend),
+                            idx_kv,
+                        )?;
+                    *k_buf = new_kv.0;
+                    *v_buf = new_kv.1;
+                    h
+                }
+            }
+        } else {
+            // FIRST STEP (cache None → seed) or windowed/cold tier.
+            let h_hot = &rs.stored[layer];
+            let kv_arg: SharedKV = if let Some(cold_kv) = &rs.cold_kv {
+                let (k_cold, v_cold) = &cold_kv[layer];
+                let (k_hot, v_hot) =
+                    recompute_kv(weights, h_hot, layer, hot_abs_start, backend, None)?;
+                let c = k_cold.shape()[0];
+                let kv_dim = k_cold.shape()[1];
+                let mut k_combined = Array2::<f32>::zeros((c + s_hot, kv_dim));
+                k_combined.slice_mut(s![..c, ..]).assign(k_cold);
+                k_combined.slice_mut(s![c.., ..]).assign(&k_hot);
+                let mut v_combined = Array2::<f32>::zeros((c + s_hot, kv_dim));
+                v_combined.slice_mut(s![..c, ..]).assign(v_cold);
+                v_combined.slice_mut(s![c.., ..]).assign(&v_hot);
+                (k_combined, v_combined)
+            } else {
+                let (h_full, full_abs_start) = if let Some(cold_layers) = &rs.cold_encoded {
+                    let enc = &cold_layers[layer];
+                    if enc.n_positions > 0 {
+                        let decoded = enc.decode(rs.codec);
+                        let hidden = h_hot.shape()[1];
+                        let mut combined =
+                            Array2::<f32>::zeros((decoded.shape()[0] + s_hot, hidden));
+                        combined
+                            .slice_mut(s![..decoded.shape()[0], ..])
+                            .assign(&decoded);
+                        combined
+                            .slice_mut(s![decoded.shape()[0].., ..])
+                            .assign(h_hot);
+                        (combined, rs.cold_abs_start)
+                    } else {
+                        (h_hot.clone(), hot_abs_start)
+                    }
+                } else {
+                    (h_hot.clone(), hot_abs_start)
+                };
+                let (k, v) = recompute_kv(weights, &h_full, layer, full_abs_start, backend, None)?;
+                (k, v)
+            };
+
+            let (h_post_attn, new_kv) =
+                larql_inference::attention::run_attention_block_decode_step_auto(
+                    weights,
+                    &h_new,
+                    layer,
+                    Some(&kv_arg),
+                    abs_position,
+                    Some(backend),
+                    idx_kv,
+                )?;
+            if cache_eligible {
+                step_new_kv.push(new_kv);
+            }
+            h_post_attn
+        };
 
         let bffn = BackendFfn { weights, backend };
         let h_out = crate::engines::layer_ffn_or_moe(weights, &h_post_attn, layer, &bffn, moe_ffn);
         h_new = h_out;
     }
 
-    // Append the new row to each layer's hot tier.
-    let mut updated_stored: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
-    for (stored, new_row) in rs.stored.iter().zip(new_stored.iter()) {
-        let s_old = stored.shape()[0];
-        let hidden_dim = stored.shape()[1];
-        let mut combined = Array2::<f32>::zeros((s_old + 1, hidden_dim));
-        combined.slice_mut(s![..s_old, ..]).assign(stored);
-        combined.slice_mut(s![s_old.., ..]).assign(new_row);
-        updated_stored.push(combined);
-    }
+    // Append the new row to each layer's hot tier. W8.2: in the cache_eligible
+    // path `stored` is a doubling-capacity buffer (no window → never clips), so
+    // append in place rather than allocating + bzeroing a fresh `[s_old+1,
+    // hidden]` array every step (the resident walk's dominant per-step malloc;
+    // see helpers::append_row). The windowed/cold path keeps the rebuild.
+    let (updated_stored, new_hot_len) = if cache_eligible {
+        let mut buf = rs.stored;
+        for (layer, new_row) in new_stored.iter().enumerate() {
+            append_row(&mut buf[layer], new_row, rs.hot_len);
+        }
+        (buf, rs.hot_len + 1)
+    } else {
+        let mut rebuilt: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
+        for (stored, new_row) in rs.stored.iter().zip(new_stored.iter()) {
+            let s_old = stored.shape()[0];
+            let hidden_dim = stored.shape()[1];
+            let mut combined = Array2::<f32>::zeros((s_old + 1, hidden_dim));
+            combined.slice_mut(s![..s_old, ..]).assign(stored);
+            combined.slice_mut(s![s_old.., ..]).assign(new_row);
+            rebuilt.push(combined);
+        }
+        let len = rebuilt.first().map_or(0, |s| s.shape()[0]);
+        (rebuilt, len)
+    };
 
     let mut updated_rs = RsStoreCodec {
-        hot_len: updated_stored.first().map_or(0, |s| s.shape()[0]),
+        hot_len: new_hot_len,
         stored: updated_stored,
         cold_encoded: rs.cold_encoded,
         cold_kv: rs.cold_kv,
         // Cache the full K/V for next step when there's no cold tier; else None
         // (cold/windowed recomputes). clip_layer_overflow clips hot_kv in step.
+        // Step 2+ mutated `hot_kv_store` in place; the first step seeds it.
         hot_kv: if cache_eligible {
-            Some(step_new_kv)
+            if had_hot_kv {
+                hot_kv_store
+            } else {
+                Some(step_new_kv)
+            }
         } else {
             None
         },
@@ -407,5 +487,52 @@ mod tests {
         for (orig, got) in block.iter().zip(out.iter()) {
             assert!((orig - got).abs() < 0.1);
         }
+    }
+
+    /// Flags-ON parity gate for the codec engine's in-place hot-K/V fast path:
+    /// an A/B of the in-place steady state against the owned-concat reference,
+    /// both with Q4K-direct attention live. Twin of the markov test — the two
+    /// paths must produce bit-identical hidden states at every step. Twin of the
+    /// markov test; q4k flags driven via the thread-local override (no env race),
+    /// in-place path selected through the shared `LARQL_MARKOV_INPLACE_KV`
+    /// thread-local override.
+    #[test]
+    fn rs_decode_step_codec_inplace_matches_owned_concat_flags_on() {
+        use crate::engines::markov_residual::compute::set_markov_env_override;
+        use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
+
+        let _q4k = crate::engines::Q4kFlagGuard::set(&[
+            (larql_compute::options::ENV_Q4K_DIRECT_ATTN, true),
+            (larql_compute::options::ENV_Q4K_ATTN_INT8, false),
+        ]);
+
+        let weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+
+        let run = |inplace: bool| -> (Vec<Vec<u32>>, usize) {
+            set_markov_env_override("LARQL_MARKOV_INPLACE_KV", Some(if inplace { "1" } else { "0" }));
+            let prefill =
+                rs_prefill_codec(&weights, &[0u32, 1, 2], None, ColdResidualCodec::Bf16, &CpuBackend, None);
+            let mut rs = prefill.store;
+            let mut hiddens = Vec::new();
+            for tok in 3u32..=12 {
+                let (h, rs2) =
+                    rs_decode_step_codec(&weights, tok, rs, &CpuBackend, None, Some(&index))
+                        .expect("decode");
+                assert!(h.iter().all(|v| v.is_finite()));
+                hiddens.push(h.iter().map(|v| v.to_bits()).collect());
+                rs = rs2;
+            }
+            (hiddens, rs.hot_len)
+        };
+
+        let (a_hiddens, a_len) = run(true);
+        let (b_hiddens, b_len) = run(false);
+        assert_eq!(a_len, 13, "3 prompt + 10 decode rows");
+        assert_eq!(a_len, b_len);
+        assert_eq!(
+            a_hiddens, b_hiddens,
+            "codec in-place and owned-concat hidden states diverged (q4k-direct on)"
+        );
     }
 }

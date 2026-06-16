@@ -118,6 +118,87 @@ pub fn rs_extend_from_checkpoint_backend(
     })
 }
 
+/// In-place multi-token extend for the decode hot path (the W8.2/in-place twin
+/// of [`rs_extend_from_checkpoint_backend`]). Appends each token's K/V row into
+/// the caller's **doubling-capacity** `kv_cache` buffers — starting at logical
+/// row `prior_len` — and attends over the growing `[..len]` views, instead of
+/// rebuilding an owned `[len+1, kv_dim]` concat every layer every step (the
+/// O(window²) cost the owned-concat form pays). On return each buffer holds
+/// `prior_len + token_ids.len()` logical rows (track that count in the caller —
+/// the buffers are over-allocated, so `shape()[0]` is capacity, not length).
+///
+/// Per-layer fallback: if a layer has no Q4K attn bytes the in-place projection
+/// returns `None`, so this writes the owned-concat result back into the buffer
+/// for that layer — buffers stay consistent. Same numerics as the owned-concat
+/// form (engine-level A/B test), only the cache representation differs.
+#[allow(clippy::too_many_arguments)]
+pub fn rs_extend_inplace(
+    weights: &ModelWeights,
+    token_ids: &[u32],
+    kv_cache: &mut [SharedKV],
+    prior_len: usize,
+    abs_start: usize,
+    backend: &dyn ComputeBackend,
+    moe_ffn: Option<&dyn larql_inference::ffn::FfnBackend>,
+    index: Option<&larql_vindex::VectorIndex>,
+) -> Option<Array2<f32>> {
+    let num_layers = weights.num_layers;
+    if token_ids.is_empty() || kv_cache.len() != num_layers {
+        return None;
+    }
+    let idx_kv: Option<&dyn larql_compute::KvIndex> =
+        index.map(|v| v as &dyn larql_compute::KvIndex);
+    let mut last_hidden: Option<Array2<f32>> = None;
+
+    for (i, &token_id) in token_ids.iter().enumerate() {
+        let abs_position = abs_start + i;
+        // Logical row count of every buffer at the start of this token: the
+        // prior window length plus the tokens already appended this call.
+        let len = prior_len + i;
+        let mut h = embed_tokens_pub(weights, &[token_id]);
+
+        for (layer, (k_buf, v_buf)) in kv_cache.iter_mut().enumerate() {
+            let h_post_attn =
+                match larql_inference::attention::run_attention_block_decode_step_auto_inplace(
+                    weights, &h, layer, k_buf, v_buf, len, abs_position, Some(backend), idx_kv,
+                ) {
+                    Some(hp) => hp,
+                    None => {
+                        // Q4K-direct off / no attn bytes: owned concat over the
+                        // `[..len]` view, then replace the buffer.
+                        let prior: SharedKV = (
+                            k_buf.slice(ndarray::s![..len, ..]).to_owned(),
+                            v_buf.slice(ndarray::s![..len, ..]).to_owned(),
+                        );
+                        let prior_ref = if len > 0 { Some(&prior) } else { None };
+                        let (hp, new_kv) =
+                            larql_inference::attention::run_attention_block_decode_step_auto(
+                                weights,
+                                &h,
+                                layer,
+                                prior_ref,
+                                abs_position,
+                                Some(backend),
+                                idx_kv,
+                            )?;
+                        *k_buf = new_kv.0;
+                        *v_buf = new_kv.1;
+                        hp
+                    }
+                };
+
+            let bffn = BackendFfn { weights, backend };
+            let h_out =
+                crate::engines::layer_ffn_or_moe(weights, &h_post_attn, layer, &bffn, moe_ffn);
+            h = h_out;
+        }
+
+        last_hidden = Some(h);
+    }
+
+    last_hidden
+}
+
 /// CPU Q4K variant of [`rs_extend_from_checkpoint_backend`].
 ///
 /// Uses `WalkFfn` (reads Q4K bytes directly from `index`) for FFN instead of

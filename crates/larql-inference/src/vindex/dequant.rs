@@ -86,21 +86,21 @@ mod tests {
     /// Pin `LARQL_Q4K_ATTN_INT8=0` for the f32-activation Q4K-direct parity
     /// tests below: they assert the strict `<1e-3` weight bound, which only the
     /// f32-activation route satisfies. The int8 route is on by default and
-    /// carries a looser (~2% scale-relative) bound by design. Restores the
-    /// prior env value on drop (even if an assertion panics).
-    struct Int8OffGuard(Option<std::ffi::OsString>);
+    /// carries a looser (~2% scale-relative) bound by design. Uses the
+    /// thread-local override (NOT `std::env::set_var`, which races concurrent
+    /// `getenv` on the decode path → SIGSEGV); cleared on drop.
+    struct Int8OffGuard;
     impl Drop for Int8OffGuard {
         fn drop(&mut self) {
-            match self.0.take() {
-                Some(v) => std::env::set_var("LARQL_Q4K_ATTN_INT8", v),
-                None => std::env::remove_var("LARQL_Q4K_ATTN_INT8"),
-            }
+            larql_compute::options::clear_fast_path_overrides();
         }
     }
     fn pin_int8_off() -> Int8OffGuard {
-        let guard = Int8OffGuard(std::env::var_os("LARQL_Q4K_ATTN_INT8"));
-        std::env::set_var("LARQL_Q4K_ATTN_INT8", "0");
-        guard
+        larql_compute::options::set_fast_path_override(
+            larql_compute::options::ENV_Q4K_ATTN_INT8,
+            false,
+        );
+        Int8OffGuard
     }
 
     /// `ensure_attn_tensors_dequantised` populates every layer's

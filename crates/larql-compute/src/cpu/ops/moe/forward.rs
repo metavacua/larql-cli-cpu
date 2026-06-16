@@ -494,33 +494,22 @@ mod tests {
         );
     }
 
-    // ENV_LOCK protects tests that set process-wide env vars. The cpu_moe_forward
-    // hot path reads `LARQL_SKIP_MOE`, `LARQL_MOE_DEBUG`, and (once per thread,
-    // through a TLS cache) `LARQL_MOE_FWD_TIMING`.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+    // Override env flags on the current thread (`LARQL_SKIP_MOE`,
+    // `LARQL_MOE_DEBUG`, `LARQL_MOE_FWD_TIMING` — all read via the override-aware
+    // `options::env_flag`) WITHOUT `std::env::set_var`, which races concurrent
+    // `getenv` → SIGSEGV. Per-thread, cleared on drop → no lock, no leakage.
     fn with_env<T>(vars: &[(&'static str, Option<&'static str>)], f: impl FnOnce() -> T) -> T {
-        // Recover from prior-test panics so an unrelated failure in one
-        // env-sensitive test doesn't cascade-fail the others.
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let previous: Vec<_> = vars
-            .iter()
-            .map(|(name, _)| (*name, std::env::var_os(name)))
-            .collect();
+        struct Clear;
+        impl Drop for Clear {
+            fn drop(&mut self) {
+                crate::options::clear_fast_path_overrides();
+            }
+        }
+        let _clear = Clear;
         for (name, value) in vars {
-            match value {
-                Some(v) => std::env::set_var(name, v),
-                None => std::env::remove_var(name),
-            }
+            crate::options::set_env_override(name, *value);
         }
-        let result = f();
-        for (name, value) in previous {
-            match value {
-                Some(v) => std::env::set_var(name, v),
-                None => std::env::remove_var(name),
-            }
-        }
-        result
+        f()
     }
 
     fn trivial_moe_inputs() -> (usize, usize, Vec<u8>, Vec<u8>, Vec<f32>, Vec<f32>) {

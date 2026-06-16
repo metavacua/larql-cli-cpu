@@ -23,6 +23,7 @@ use serde::Serialize;
 use super::checkpoint_store::CheckpointStore;
 use super::extend::{
     empty_prior, rs_extend_from_checkpoint_backend, rs_extend_from_checkpoint_quant,
+    rs_extend_inplace,
 };
 use super::token_archive::TokenArchive;
 use crate::engines::markov_residual::ensure_attn_tensors_dequantised;
@@ -331,35 +332,69 @@ impl UnlimitedContextEngine {
             return Some(());
         }
 
-        let prior = if self.current_window_tokens.is_empty() {
+        // `prior_len` is the prior's LOGICAL row count — the window-KV counter
+        // mid-window, the checkpoint's row count at a window start, or 0.
+        let (mut prior, prior_len) = if self.current_window_tokens.is_empty() {
             if self.current_window_id > 0 && self.checkpoints.contains(self.current_window_id - 1) {
                 let (ckpt, _) = self.checkpoints.load(self.current_window_id - 1)?;
-                ckpt
+                let len = ckpt.first().map_or(0, |(k, _)| k.shape()[0]);
+                (ckpt, len)
             } else {
-                empty_prior(weights)
+                (empty_prior(weights), 0)
             }
         } else {
-            self.current_window_kv
-                .take()
-                .unwrap_or_else(|| empty_prior(weights))
+            (
+                self.current_window_kv
+                    .take()
+                    .unwrap_or_else(|| empty_prior(weights)),
+                self.current_window_kv_len,
+            )
         };
 
         let abs_start = self.abs_offset + self.current_window_tokens.len();
-        let out = rs_extend_from_checkpoint_backend(
-            weights,
-            chunk,
-            prior,
-            abs_start,
-            self.backend.as_ref(),
-            moe_ffn,
-            index,
-        )?;
 
-        self.last_hidden = Some(out.last_hidden);
-        // CPU walk path: see comment on extend_current_quant — narrow
-        // arrays, counter == shape[0].
-        self.current_window_kv_len = out.kv_cache.first().map_or(0, |(k, _)| k.shape()[0]);
-        self.current_window_kv = Some(out.kv_cache);
+        // In-place fast path: append the chunk's K/V rows into the window's
+        // doubling-capacity buffers instead of rebuilding an owned `[len+1]`
+        // concat every layer every step (O(window) → O(1) per step). Gated to
+        // the Q4K-direct route (with the shared `LARQL_MARKOV_INPLACE_KV`
+        // toggle); flags-off keeps the unchanged owned-concat path bit-for-bit,
+        // which is what `resident_identity_tests` pins. The window's existing
+        // `current_window_kv_len` counter already treats the buffers as
+        // over-allocated (the dispatch path does too), so close_window /
+        // current_kv_bytes need no change.
+        let use_inplace = index.is_some()
+            && crate::engines::markov_residual::compute::markov_inplace_kv_enabled()
+            && larql_compute::options::q4k_direct_attn_enabled();
+
+        if use_inplace {
+            let last = rs_extend_inplace(
+                weights,
+                chunk,
+                &mut prior,
+                prior_len,
+                abs_start,
+                self.backend.as_ref(),
+                moe_ffn,
+                index,
+            )?;
+            self.last_hidden = Some(last);
+            self.current_window_kv_len = prior_len + chunk.len();
+            self.current_window_kv = Some(prior);
+        } else {
+            let out = rs_extend_from_checkpoint_backend(
+                weights,
+                chunk,
+                prior,
+                abs_start,
+                self.backend.as_ref(),
+                moe_ffn,
+                index,
+            )?;
+            self.last_hidden = Some(out.last_hidden);
+            // CPU walk path: narrow arrays, counter == shape[0].
+            self.current_window_kv_len = out.kv_cache.first().map_or(0, |(k, _)| k.shape()[0]);
+            self.current_window_kv = Some(out.kv_cache);
+        }
         self.current_window_tokens.extend_from_slice(chunk);
         Some(())
     }
@@ -975,6 +1010,49 @@ mod tests {
             .decode_step_quant(&mut weights, &ffn, &index, 2, &*backend)
             .expect("decode_step_quant Q4K cpu fallback");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
+    }
+
+    /// Flags-ON parity gate for the in-place window K/V fast path: an A/B of the
+    /// in-place steady state vs the owned-concat reference, both driving the
+    /// resident decode path (`extend_current`) with Q4K-direct attention live.
+    /// The two must produce bit-identical hidden states every step — the
+    /// in-place append only changes the window-buffer representation (doubling +
+    /// views vs fresh owned concat). 13 tokens < window(512), so it stays in one
+    /// window (no close). Serialised on `Q4K_FLAG_ENV_LOCK`; path selected via
+    /// the shared `LARQL_MARKOV_INPLACE_KV` thread-local override.
+    #[test]
+    fn decode_inplace_matches_owned_concat_flags_on() {
+        use crate::engines::markov_residual::compute::set_markov_env_override;
+        use larql_inference::ffn::NullFfn;
+        use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
+
+        let _q4k = crate::engines::Q4kFlagGuard::set(&[
+            (larql_compute::options::ENV_Q4K_DIRECT_ATTN, true),
+            (larql_compute::options::ENV_Q4K_ATTN_INT8, false),
+        ]);
+
+        let weights = make_test_q4k_weights();
+        let index = make_test_q4k_vindex(&weights);
+        let ffn = NullFfn;
+
+        let run = |inplace: bool| -> Vec<Vec<u32>> {
+            set_markov_env_override("LARQL_MARKOV_INPLACE_KV", Some(if inplace { "1" } else { "0" }));
+            let mut engine = UnlimitedContextEngine::new(512);
+            engine.prefill(&weights, &ffn, &[0u32, 1, 2]).expect("prefill");
+            let mut hiddens = Vec::new();
+            for tok in 3u32..=12 {
+                let h = engine
+                    .decode_step_resident(&weights, &ffn, &index, tok)
+                    .expect("decode_step_resident");
+                assert!(h.iter().all(|v| v.is_finite()));
+                hiddens.push(h.iter().map(|v| v.to_bits()).collect());
+            }
+            hiddens
+        };
+
+        let a = run(true);
+        let b = run(false);
+        assert_eq!(a, b, "unlimited in-place vs owned-concat hidden states diverged (q4k on)");
     }
 
     #[test]

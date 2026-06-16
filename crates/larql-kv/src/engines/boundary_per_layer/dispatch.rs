@@ -81,6 +81,7 @@ pub(super) fn try_prefill_via_dispatch(
         stored,
         cold_encoded: None,
         cold_kv: None,
+        hot_kv: None,
         cold_abs_start: 0,
         next_position: prompt_len,
         max_window: window_size,

@@ -942,11 +942,10 @@ mod tests {
         use crate::test_fixtures::make_q4k_fixture_index;
         use larql_models::test_fixtures::make_test_q4k_weights;
 
-        std::env::set_var("LARQL_Q4K_DIRECT_ATTN", "1");
-        // Sanity: the gate now reads as enabled (first read seeds the
-        // OnceLock to `true` for the remainder of the test binary; nothing
-        // else here passes an index to `attention_step`, so leaving it set
-        // is harmless).
+        // Thread-local override (NOT `set_var`, which races concurrent `getenv`
+        // → SIGSEGV); cleared on drop, so it can't leak to a sibling test.
+        let _guard =
+            crate::options::FastPathGuard::set(&[(crate::options::ENV_Q4K_DIRECT_ATTN, true)]);
         assert!(q4k_direct_attn_enabled());
 
         let b = backend();
@@ -981,9 +980,9 @@ mod tests {
     fn attention_step_q4k_direct_falls_back_to_f32_on_empty_index() {
         use larql_models::test_fixtures::make_test_q4k_weights;
 
-        // Flag is already (or will be) enabled process-wide by the sibling
-        // test; set it again defensively so this test is order-independent.
-        std::env::set_var("LARQL_Q4K_DIRECT_ATTN", "1");
+        // Enable the q4k-direct gate on this thread (override, not `set_var`).
+        let _guard =
+            crate::options::FastPathGuard::set(&[(crate::options::ENV_Q4K_DIRECT_ATTN, true)]);
 
         struct EmptyIdx;
         impl crate::KvIndex for EmptyIdx {}

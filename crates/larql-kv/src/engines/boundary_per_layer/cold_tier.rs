@@ -156,6 +156,7 @@ mod tests {
                 .collect(),
             cold_encoded: None,
             cold_kv: None,
+            hot_kv: None,
             cold_abs_start: 0,
             next_position: 0,
             max_window: None,
