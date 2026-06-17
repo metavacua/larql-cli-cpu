@@ -1,22 +1,28 @@
-//! Synthetic-safetensors fixtures for the streaming-extract MoE arms.
+//! Synthetic fixtures for the streaming-extract pipeline.
 //!
 //! Hand-built, deterministic, in-process — no HuggingFace, no large
-//! model downloads. Each fixture writes a tempdir tree (`config.json` +
-//! `tokenizer.json` + `model.safetensors`) shaped like a real
-//! architecture and drives [`larql_vindex::build_vindex_streaming`]
-//! against it. The point is to exercise the per-format arms inside
-//! `extract::streaming::stages::*` that the dense Llama fixture in
-//! `test_vindex.rs` doesn't reach:
+//! model downloads. Fixtures write a tempdir tree (safetensors:
+//! `config.json` + `tokenizer.json` + `model.safetensors`; GGUF: a
+//! single `model.gguf`) shaped like a real architecture and drive
+//! [`larql_vindex::build_vindex_streaming`] against it.
 //!
-//! - `gate_vectors::write_gate_vectors` — standard MoE arm
-//! - `down_meta::write_down_meta` — standard MoE arm
+//! Coverage targets across `extract::streaming::{mod, context, stages}`
+//! that the dense Llama fixture in `test_vindex.rs` doesn't reach:
+//!
+//! - `gate_vectors::write_gate_vectors` / `down_meta::write_down_meta` —
+//!   standard MoE arms (Mixtral happy path)
 //! - `router_weights::write_router_weights` — whole body (early-returns
 //!   on dense; only fires when `is_moe`)
 //! - `index_json::write_index_json` — MoE config branch + has-experts
 //!   per-layer tracking
-//!
-//! Single Mixtral-shaped happy path is enough to flip all four files
-//! into "MoE arm exercised" territory.
+//! - the **GGUF arms**: arch detection in `streaming::mod`, the
+//!   `GgufTensorSource` branch of `context::new`, and `detect_gguf_entry`
+//!   (single-file, multi-shard, largest-fallback) — driven by a hand-
+//!   built `GgufWriter` llama model
+//! - `down_meta` **edge arms**: missing-tensor `continue`s (dense and
+//!   per-expert MoE down absent), the resume-skip path (checkpoint marks
+//!   down_meta complete), and the `TopKEntry` keep arm (full-vocab
+//!   tokenizer so the down argmax decodes to a non-empty token)
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -760,9 +766,7 @@ fn write_synthetic_mixtral_model_with_real_tokenizer(
     // earlier capped at ID 8 never reached, because the argmax always
     // landed on a higher ID). The complementary empty-string skip path
     // stays covered by the empty-tokenizer fixtures above.
-    let vocab_entries: Vec<String> = (0..vocab)
-        .map(|i| format!("\"tok{i}\":{i}"))
-        .collect();
+    let vocab_entries: Vec<String> = (0..vocab).map(|i| format!("\"tok{i}\":{i}")).collect();
     let tok_json = format!(
         r#"{{"version":"1.0","model":{{"type":"BPE","vocab":{{{}}},"merges":[]}},"added_tokens":[]}}"#,
         vocab_entries.join(",")
