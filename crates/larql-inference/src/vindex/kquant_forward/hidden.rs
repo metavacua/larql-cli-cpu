@@ -162,6 +162,34 @@ pub fn moe_ffn_block_cpu(
     ple_input: Option<&Array2<f32>>,
     moe_remote: Option<&crate::ffn::RemoteMoeBackend>,
 ) -> Array2<f32> {
+    moe_ffn_block_cpu_with_index(weights, h_post_attn, layer, ffn, ple_input, moe_remote, None)
+}
+
+/// `LARQL_Q4K_DIRECT_FFN=1` routes the hybrid-MoE *dense slab* through the
+/// direct Q4_K/Q6_K matvec (`ffn_decode_step_native`) instead of the
+/// f32-resident `run_ffn` — on the 26B-A4B this drops the slab's per-token
+/// traffic ~7× (2.14 GB f32 → ~0.3 GB quantised). Decode-only (single-row):
+/// prefill stays on the f32 BLAS gemm, where repeated quantised matvec
+/// loses (the task-#16 prefill falsification). **Default on**
+/// (`LARQL_Q4K_DIRECT_FFN=0` opts out); see [`larql_compute::options`].
+fn q4k_direct_ffn_enabled() -> bool {
+    larql_compute::options::q4k_direct_ffn_enabled()
+}
+
+/// Index-aware variant of [`moe_ffn_block_cpu`]: when `index` is provided
+/// (the resident engine path threads it) and `LARQL_Q4K_DIRECT_FFN=1`, the
+/// dense `h1` contribution reads quantised gate/up/down bytes directly;
+/// otherwise byte-identical to [`moe_ffn_block_cpu`].
+#[allow(clippy::too_many_arguments)]
+pub fn moe_ffn_block_cpu_with_index(
+    weights: &ModelWeights,
+    h_post_attn: &Array2<f32>,
+    layer: usize,
+    ffn: &dyn crate::ffn::FfnBackend,
+    ple_input: Option<&Array2<f32>>,
+    moe_remote: Option<&crate::ffn::RemoteMoeBackend>,
+    index: Option<&larql_vindex::VectorIndex>,
+) -> Array2<f32> {
     let arch = &*weights.arch;
     let norm_offset = arch.norm_weight_offset();
     let eps = arch.norm_eps();
@@ -175,7 +203,23 @@ pub fn moe_ffn_block_cpu(
     }
 
     let _t_dense = std::time::Instant::now();
-    let (h_post_ffn_dense, _) = crate::forward::run_ffn(weights, h_post_attn, layer, ffn, false);
+    // Dense slab: quantised-direct on the decode step when enabled, with a
+    // per-layer fallback to the f32 path (`ffn_decode_step_native` returns
+    // `None` on unsupported formats/shapes).
+    let h_post_ffn_dense = index
+        .filter(|_| q4k_direct_ffn_enabled() && h_post_attn.nrows() == 1)
+        .and_then(|idx| {
+            super::cached::ffn_decode_step_native(
+                weights,
+                idx,
+                &larql_compute::CpuBackend,
+                h_post_attn,
+                layer,
+            )
+        })
+        .unwrap_or_else(|| {
+            crate::forward::run_ffn(weights, h_post_attn, layer, ffn, false).0
+        });
     crate::decode_stages::record_dense(_t_dense.elapsed().as_nanos());
     let h1 = &h_post_ffn_dense - h_post_attn;
 
@@ -193,6 +237,10 @@ pub fn moe_ffn_block_cpu(
             }
         }
     } else {
+        // Local experts count toward the expert stage too (`LARQL_DECODE_STAGES`)
+        // — previously only the remote branch recorded, so in-process MoE
+        // decode showed 0 expert time and the split was unusable.
+        let _t_expert = std::time::Instant::now();
         let moe_weights =
             crate::layer_graph::pipeline_layer::build_moe_weights(weights, arch, layer);
         if let Some(ref moe) = moe_weights {
@@ -209,6 +257,7 @@ pub fn moe_ffn_block_cpu(
                     *dst = *src;
                 }
             }
+            crate::decode_stages::record_expert(_t_expert.elapsed().as_nanos());
         } else {
             let out = h_post_ffn_dense;
             let mut h_ple =
@@ -442,44 +491,42 @@ mod tests {
     /// `predict_kquant_hidden` with both `LARQL_CPU_DUMP_LAYERS` and
     /// `LARQL_CPU_STAGE_DUMP` set drives the dump branches inside the
     /// main loop (lines 30-33, 78-84) and inside `run_moe_layer_cpu`
-    /// (lines 143-147, 190-194). Serialized via a local mutex because
-    /// `DumpConfig::get()` reads process-global env vars on every call.
+    /// (lines 143-147, 190-194). The flags are toggled via the thread-local
+    /// override (NOT `std::env::set_var`, which races concurrent `getenv` on
+    /// the decode path → SIGSEGV); `DumpConfig::from_env` reads them through
+    /// the override-aware `options::env_value` helper, so the override reaches
+    /// the producer in this same thread. No serialising mutex needed — the
+    /// override is per-thread, so it can't leak into a parallel test.
     #[test]
     fn predict_kquant_hidden_writes_dumps_when_env_vars_set() {
-        use std::sync::{Mutex, OnceLock};
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _g = LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        use larql_compute::forward::dump_config::{ENV_CPU_DUMP_LAYERS, ENV_CPU_STAGE_DUMP};
+
+        /// Clears the thread-local overrides on drop so a panicking assert
+        /// can't leak them into a later test on the same worker thread.
+        struct DumpEnvGuard;
+        impl Drop for DumpEnvGuard {
+            fn drop(&mut self) {
+                larql_compute::options::clear_fast_path_overrides();
+            }
+        }
 
         let layer_dir = tempfile::tempdir().expect("layer dump tempdir");
         let stage_dir = tempfile::tempdir().expect("stage dump tempdir");
-        let prev_l = std::env::var("LARQL_CPU_DUMP_LAYERS").ok();
-        let prev_s = std::env::var("LARQL_CPU_STAGE_DUMP").ok();
-        // SAFETY: held lock serialises env reads/writes for this test.
-        unsafe {
-            std::env::set_var("LARQL_CPU_DUMP_LAYERS", layer_dir.path());
-            std::env::set_var("LARQL_CPU_STAGE_DUMP", stage_dir.path());
-        }
+        let _guard = DumpEnvGuard;
+        larql_compute::options::set_env_override(
+            ENV_CPU_DUMP_LAYERS,
+            Some(layer_dir.path().to_str().expect("utf-8 tempdir path")),
+        );
+        larql_compute::options::set_env_override(
+            ENV_CPU_STAGE_DUMP,
+            Some(stage_dir.path().to_str().expect("utf-8 tempdir path")),
+        );
 
         use crate::test_utils::{make_test_gemma4_moe_weights, make_test_q4k_vindex};
         let mut weights = make_test_gemma4_moe_weights();
         let index = make_test_q4k_vindex(&weights);
         let h = predict_kquant_hidden(&mut weights, &[0u32, 1], &index, None);
         assert_eq!(h.shape(), &[2, weights.hidden_size]);
-
-        // Restore env (or remove if not previously set).
-        unsafe {
-            match prev_l {
-                Some(v) => std::env::set_var("LARQL_CPU_DUMP_LAYERS", v),
-                None => std::env::remove_var("LARQL_CPU_DUMP_LAYERS"),
-            }
-            match prev_s {
-                Some(v) => std::env::set_var("LARQL_CPU_STAGE_DUMP", v),
-                None => std::env::remove_var("LARQL_CPU_STAGE_DUMP"),
-            }
-        }
 
         // Embed dump must exist (written at line 33 unconditionally when
         // layer_dir is Some). Per-layer dumps land under cpu_layer_NN.f32.

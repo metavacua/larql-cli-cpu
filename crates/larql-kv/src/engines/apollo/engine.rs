@@ -257,6 +257,26 @@ impl ApolloEngine {
         let boundary = store.boundaries.get(top_window as usize).cloned();
         let crystal = store.manifest.crystal_layer;
 
+        // Guard the silent-no-op footgun: the compressed forward runs only
+        // `crystal..num_layers`, so an `injection_layer < crystal` never reaches
+        // the perturbation layer and the retrieval-injection is silently dropped
+        // (the engine then degrades to plain boundary replay). Warn once rather
+        // than failing — Apollo is experimental and the contract is only
+        // task-level — but make the misconfiguration loud. (Selector example
+        // `apollo:layer=25` against a default `crystal=30` store trips this.)
+        if boundary.is_some() && self.config.injection_layer < crystal {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| {
+                eprintln!(
+                    "[apollo] WARNING: injection_layer ({}) < crystal_layer ({crystal}): the \
+                     compressed forward starts at crystal_layer, so the injection at \
+                     injection_layer is SKIPPED (no retrieval-injection occurs). Set \
+                     injection_layer >= crystal_layer.",
+                    self.config.injection_layer,
+                );
+            });
+        }
+
         Some((context, Array1::from(delta), boundary, crystal))
     }
 

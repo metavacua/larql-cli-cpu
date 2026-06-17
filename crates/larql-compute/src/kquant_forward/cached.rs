@@ -25,16 +25,14 @@
 // across two files.
 #![allow(clippy::needless_range_loop, clippy::type_complexity)]
 
-use crate::cpu::ops::q4k_q8k_dot::{
-    q4k_q8k_matvec_into, q6k_q8k_matvec_into, quantize_x_to_q8k_into, Q8KActivation,
-};
+use crate::cpu::ops::q4k_q8k_dot::{quantize_x_to_q8k_into, Q8KActivation};
 use crate::ComputeBackend;
 use larql_models::ModelWeights;
 use ndarray::Array2;
 
 use crate::attention::{
     decode::{gqa_attention_decode_step, run_attention_block_decode_step_backend},
-    rope::apply_rope_partial_at,
+    rope::apply_rope_partial_at_full,
     run_attention_with_kv_backend,
 };
 use crate::ffn::WeightFfn;
@@ -276,30 +274,10 @@ fn matvec_q4k_or_q6k_q8k(
     // `q4k_matvec_into` in `q4_common.rs`. Without this, decode runs
     // single-threaded and the sdot path actually regresses vs the
     // (rayon-parallel) f32 path despite each row being faster.
-    use rayon::prelude::*;
-    const CHUNK_ROWS: usize = 32;
     let mut out = vec![0.0f32; rows];
-    let w_ref = bytes;
-    out.par_chunks_mut(CHUNK_ROWS)
-        .enumerate()
-        .for_each(|(chunk_idx, chunk)| {
-            let row_start = chunk_idx * CHUNK_ROWS;
-            let chunk_len = chunk.len().min(rows.saturating_sub(row_start));
-            if chunk_len == 0 {
-                return;
-            }
-            let w_chunk =
-                &w_ref[row_start * bytes_per_row..(row_start + chunk_len) * bytes_per_row];
-            match format {
-                "Q4_K" => {
-                    q4k_q8k_matvec_into(&mut chunk[..chunk_len], x_q8k, w_chunk, chunk_len, cols)
-                }
-                "Q6_K" => {
-                    q6k_q8k_matvec_into(&mut chunk[..chunk_len], x_q8k, w_chunk, chunk_len, cols)
-                }
-                _ => {}
-            }
-        });
+    crate::cpu::ops::q4k_q8k_dot::q4k_q8k_matvec_parallel(
+        &mut out, x_q8k, bytes, rows, cols, format,
+    );
     Some(out)
 }
 
@@ -630,15 +608,26 @@ pub fn attention_decode_step_native(
         Some(norm_w) => rms_norm_heads(&q_full, norm_w, num_q, head_dim, qk_norm_off),
         None => q_full,
     };
-    let layer_rope_base = arch.rope_base_for_layer(layer);
+    // RoPE must match the staged path / prefill exactly: override-aware
+    // base, the per-layer position divisor (Gemma 3 linear rope_scaling
+    // applies ÷factor on GLOBAL layers only), and llama3 frequency
+    // scaling. The unscaled `apply_rope_partial_at` here was the direct-
+    // path divergence on gemma3-4b (global-layer K/Q rope'd at 8× the
+    // position the prefill cache used).
+    let layer_rope_base = crate::forward_overrides::effective_rope_base_for_layer(arch, layer);
     let rotary_frac = arch.rotary_fraction_for_layer(layer);
-    let q_rope = apply_rope_partial_at(
+    let pos_divisor =
+        crate::forward_overrides::effective_rope_position_divisor_for_layer(arch, layer);
+    let llama3 = crate::forward_overrides::effective_llama3_rope_scaling(arch);
+    let q_rope = apply_rope_partial_at_full(
         &q_normed,
         num_q,
         head_dim,
         layer_rope_base,
         rotary_frac,
         abs_position,
+        pos_divisor,
+        llama3,
     );
 
     let k_vec = matvec_q4k_or_q6k_q8k(k_bytes, k_fmt, &h_norm_q8k, kv_dim, hidden)?;
@@ -667,13 +656,15 @@ pub fn attention_decode_step_native(
         Some(norm_w) => rms_norm_heads(&k_full_new, norm_w, num_kv, head_dim, qk_norm_off),
         None => k_full_new,
     };
-    let k_new_rope = apply_rope_partial_at(
+    let k_new_rope = apply_rope_partial_at_full(
         &k_normed,
         num_kv,
         head_dim,
         layer_rope_base,
         rotary_frac,
         abs_position,
+        pos_divisor,
+        llama3,
     );
 
     let (k_concat, v_concat) = match kv_entry {
@@ -819,36 +810,73 @@ fn run_ffn_decode_step_q4k_direct(
     let gate_vec = matvec_q4k_or_q6k_q8k(gate_bytes, gate_fmt, &h_in_q8k, intermediate, hidden)?;
     let up_vec = matvec_q4k_or_q6k_q8k(up_bytes, up_fmt, &h_in_q8k, intermediate, hidden)?;
 
-    // Element-wise activation: activation(gate) * up.
+    // Element-wise activation: activation(gate) * up. Rayon-chunked — the
+    // per-element math (libm tanh/exp included) is unchanged, so the output
+    // is bit-identical to the serial loop; the decode sample showed this
+    // scalar pass serial on the main thread while the workers slept.
     let mut activated = vec![0.0f32; intermediate];
-    match arch.activation() {
-        larql_models::Activation::GeluTanh => {
-            let sqrt_2_over_pi = (2.0f32 / std::f32::consts::PI).sqrt();
-            for i in 0..intermediate {
-                let x = gate_vec[i];
-                let inner = sqrt_2_over_pi * (x + 0.044715 * x * x * x);
-                let g = 0.5 * x * (1.0 + inner.tanh());
-                activated[i] = g * up_vec[i];
+    {
+        let gelu = matches!(arch.activation(), larql_models::Activation::GeluTanh);
+        let sqrt_2_over_pi = (2.0f32 / std::f32::consts::PI).sqrt();
+        let gate_ref = &gate_vec[..];
+        let up_ref = &up_vec[..];
+        crate::cpu::spin_pool::par_chunks_mut(&mut activated, 256, |ci, a_c| {
+            let start = ci * 256;
+            let g_c = &gate_ref[start..start + a_c.len()];
+            let u_c = &up_ref[start..start + a_c.len()];
+            if gelu {
+                for ((a, &x), &u) in a_c.iter_mut().zip(g_c.iter()).zip(u_c.iter()) {
+                    let inner = sqrt_2_over_pi * (x + 0.044715 * x * x * x);
+                    *a = 0.5 * x * (1.0 + inner.tanh()) * u;
+                }
+            } else {
+                // SiLU = x * sigmoid(x). Same shape as dense_ffn_forward_backend.
+                for ((a, &x), &u) in a_c.iter_mut().zip(g_c.iter()).zip(u_c.iter()) {
+                    let sig = 1.0 / (1.0 + (-x).exp());
+                    *a = x * sig * u;
+                }
             }
-        }
-        _ => {
-            // SiLU = x * sigmoid(x). Same shape as dense_ffn_forward_backend.
-            for i in 0..intermediate {
-                let x = gate_vec[i];
-                let sig = 1.0 / (1.0 + (-x).exp());
-                let g = x * sig;
-                activated[i] = g * up_vec[i];
-            }
-        }
+        });
     }
 
     // down projection: out = activated @ W_down.T → [hidden].
     // Re-quantise the post-activation vector (`intermediate`-wide) for
     // the down matvec — different input from gate/up.
-    let mut activated_q8k = Q8KActivation::with_capacity(intermediate);
-    quantize_x_to_q8k_into(&mut activated_q8k, &activated);
+    //
+    // The stored down row width may be PADDED up to a 256-multiple when
+    // `intermediate` isn't one (e.g. the 26B-A4B hybrid-MoE dense slab:
+    // intermediate 2112 stored as 2304-col Q6_K rows). Derive the stored
+    // width from the byte length and zero-pad the activation to match —
+    // pad columns multiply zero activations, so the result is exact.
+    // (Twin of the same handling in larql-inference's cached.rs — keep in
+    // lockstep, see the consolidation hazard in q4k-direct-attention.md.)
+    let down_sb_bytes = match down_fmt {
+        "Q4_K" => 144,
+        "Q6_K" => 210,
+        _ => return None,
+    };
+    let down_bytes_per_row = down_bytes.len() / hidden;
+    if down_bytes_per_row == 0 || !down_bytes_per_row.is_multiple_of(down_sb_bytes) {
+        return None;
+    }
+    let stored_cols =
+        down_bytes_per_row / down_sb_bytes * larql_models::quant::ggml::Q4_K_BLOCK_ELEMS;
+    if stored_cols < intermediate {
+        return None;
+    }
+    let activated_padded: Vec<f32>;
+    let act_slice: &[f32] = if stored_cols != intermediate {
+        let mut p = vec![0.0f32; stored_cols];
+        p[..intermediate].copy_from_slice(&activated);
+        activated_padded = p;
+        &activated_padded
+    } else {
+        &activated
+    };
+    let mut activated_q8k = Q8KActivation::with_capacity(stored_cols);
+    quantize_x_to_q8k_into(&mut activated_q8k, act_slice);
     let down_vec =
-        matvec_q4k_or_q6k_q8k(down_bytes, down_fmt, &activated_q8k, hidden, intermediate)?;
+        matvec_q4k_or_q6k_q8k(down_bytes, down_fmt, &activated_q8k, hidden, stored_cols)?;
     let mut out = vec_to_2d_row(down_vec);
     if let Some(bias) = arch
         .ffn_down_bias_key(layer)

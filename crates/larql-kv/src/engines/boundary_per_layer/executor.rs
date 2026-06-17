@@ -52,6 +52,7 @@ pub(super) fn run_prefill(
         stored,
         cold_encoded: None,
         cold_kv: None,
+        hot_kv: None,
         cold_abs_start: 0,
         next_position: seq_len,
         max_window: window_size,

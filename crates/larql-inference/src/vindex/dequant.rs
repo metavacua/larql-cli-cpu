@@ -83,6 +83,26 @@ mod tests {
     use super::*;
     use crate::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
 
+    /// Pin `LARQL_Q4K_ATTN_INT8=0` for the f32-activation Q4K-direct parity
+    /// tests below: they assert the strict `<1e-3` weight bound, which only the
+    /// f32-activation route satisfies. The int8 route is on by default and
+    /// carries a looser (~2% scale-relative) bound by design. Uses the
+    /// thread-local override (NOT `std::env::set_var`, which races concurrent
+    /// `getenv` on the decode path → SIGSEGV); cleared on drop.
+    struct Int8OffGuard;
+    impl Drop for Int8OffGuard {
+        fn drop(&mut self) {
+            larql_compute::options::clear_fast_path_overrides();
+        }
+    }
+    fn pin_int8_off() -> Int8OffGuard {
+        larql_compute::options::set_fast_path_override(
+            larql_compute::options::ENV_Q4K_ATTN_INT8,
+            false,
+        );
+        Int8OffGuard
+    }
+
     /// `ensure_attn_tensors_dequantised` populates every layer's
     /// Q/K/V/O tensors when the vindex carries Q4K attention bytes.
     #[test]
@@ -310,6 +330,7 @@ mod tests {
     /// PARITY GATE (task #16, step 3) — all-Q4_K attn (Q/K/V/O).
     #[test]
     fn q4k_direct_decode_step_matches_q4k_dequant() {
+        let _int8_off = pin_int8_off();
         let weights = make_test_q4k_weights();
         let index = make_test_q4k_vindex(&weights);
         assert_q4k_direct_matches_dequant(&index);
@@ -320,6 +341,7 @@ mod tests {
     /// dispatch + Q6_K reference dequant that the all-Q4_K fixture never hits.
     #[test]
     fn q4k_direct_decode_step_matches_dequant_with_q6k_v() {
+        let _int8_off = pin_int8_off();
         let weights = make_test_q4k_weights();
         let index = make_attn_vindex_v_as_q6k(&weights);
         assert_q4k_direct_matches_dequant(&index);
@@ -337,6 +359,7 @@ mod tests {
     /// Mixed V=Q6_K index so Q6_K compounds through both sides too.
     #[test]
     fn q4k_direct_decode_multistep_parity_compounds_within_noise() {
+        let _int8_off = pin_int8_off();
         use larql_compute::attention::{
             run_attention_block_decode_step_backend, run_attention_block_decode_step_q4k_direct,
             SharedKV,

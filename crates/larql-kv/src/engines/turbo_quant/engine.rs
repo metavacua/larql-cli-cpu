@@ -238,25 +238,34 @@ pub(super) fn decompress_matrix(
     let heads_per_vec = kv_dim / head_dim;
     let bytes_per_head = tq.bytes_per_vector(head_dim);
     let mut data = vec![0.0f32; num_vecs * kv_dim];
-    // Scratch buffers reused across every chunk (mirrors
-    // compress_matrix). `decoded` is small (head_dim wide) and
-    // written-then-copied per chunk; without reuse this Vec was
-    // reallocated once per `(vec, head)` pair.
-    let mut decoded = Vec::with_capacity(head_dim);
-    let mut scratch_u8 = Vec::with_capacity(head_dim);
-    for i in 0..num_vecs {
-        for h in 0..heads_per_vec {
-            let offset = (i * heads_per_vec + h) * bytes_per_head;
-            tq.decode_vector_into(
-                &bytes[offset..offset + bytes_per_head],
-                head_dim,
-                &mut decoded,
-                &mut scratch_u8,
-            );
-            let row_start = i * kv_dim + h * head_dim;
-            data[row_start..row_start + head_dim].copy_from_slice(&decoded);
+    // The per-vector WHT/codebook decode (`decode_vector_into`) is the per-step
+    // bottleneck (a `/usr/bin/sample` profile put ~35% of the decode driver in
+    // here, serial). Each vector writes a disjoint `kv_dim`-wide row, so fan it
+    // across the spin pool — this keeps the cache COMPRESSED (the engine's
+    // point: still decoded every step) but makes the decode parallel instead of
+    // single-threaded. Per-chunk scratch (decode needs mutable scratch),
+    // amortised over `CHUNK_VECS` vectors so it isn't reallocated per (vec,head).
+    const CHUNK_VECS: usize = 8;
+    larql_compute::cpu::spin_pool::par_chunks_mut(&mut data, kv_dim * CHUNK_VECS, |ci, chunk| {
+        let mut decoded = Vec::with_capacity(head_dim);
+        let mut scratch_u8 = Vec::with_capacity(head_dim);
+        let base_vec = ci * CHUNK_VECS;
+        let vecs_in_chunk = chunk.len() / kv_dim;
+        for v in 0..vecs_in_chunk {
+            let i = base_vec + v;
+            for h in 0..heads_per_vec {
+                let offset = (i * heads_per_vec + h) * bytes_per_head;
+                tq.decode_vector_into(
+                    &bytes[offset..offset + bytes_per_head],
+                    head_dim,
+                    &mut decoded,
+                    &mut scratch_u8,
+                );
+                let row_start = v * kv_dim + h * head_dim;
+                chunk[row_start..row_start + head_dim].copy_from_slice(&decoded);
+            }
         }
-    }
+    });
     Array2::from_shape_vec((num_vecs, kv_dim), data).expect("shape mismatch")
 }
 
@@ -307,6 +316,83 @@ impl TurboQuantEngine {
 // `decode_step_via_dispatch`) live in [`super::dispatch`] as an
 // additional `impl TurboQuantEngine` block. They mutate the
 // `pub(super)` fields above.
+
+impl TurboQuantEngine {
+    /// Shared body for `decode_step` / `decode_step_resident`.
+    fn decode_step_impl(
+        &mut self,
+        weights: &ModelWeights,
+        ffn: &dyn FfnBackend,
+        token_id: u32,
+        index: Option<&larql_vindex::VectorIndex>,
+    ) -> Result<Array2<f32>, EngineError> {
+        let num_layers = weights.num_layers;
+        let abs_position = self.abs_position;
+        let mut h = embed_tokens_pub(weights, &[token_id]);
+
+        for layer in 0..num_layers {
+            // Decompress full prior K/V for attention.
+            let prior_kv = self.layers[layer].decompress(&self.tq);
+
+            // Decode step returns updated K/V (prior + new token).
+            let (h_post_attn, updated_kv) =
+                larql_inference::attention::run_attention_block_decode_step_auto(
+                    weights,
+                    &h,
+                    layer,
+                    Some(&prior_kv),
+                    abs_position,
+                    Some(self.backend.as_ref()),
+                    index.map(|v| v as &dyn larql_compute::KvIndex),
+                )
+                .ok_or_else(|| EngineError::BackendFailure {
+                    details: "run_attention_block_decode_step_backend returned None".into(),
+                })?;
+
+            // Append-only codec path: encode just the new row head-by-
+            // head and push onto the existing compressed buffer.
+            let arch = &*weights.arch;
+            let kv_dim = arch.num_kv_heads_for_layer(layer) * arch.head_dim_for_layer(layer);
+            let head_dim = detect_head_dim(kv_dim);
+            let layer_slot = &mut self.layers[layer];
+            let new_rows = updated_kv.0.shape()[0];
+            let k_last = updated_kv.0.row(new_rows - 1).to_owned();
+            let v_last = updated_kv.1.row(new_rows - 1).to_owned();
+            let mut scratch_f32: Vec<f32> = Vec::new();
+            let mut scratch_u8: Vec<u8> = Vec::new();
+            for chunk in k_last.as_slice().expect("k row contig").chunks(head_dim) {
+                self.tq.encode_vector_into(
+                    chunk,
+                    &mut layer_slot.compressed_k,
+                    &mut scratch_f32,
+                    &mut scratch_u8,
+                );
+            }
+            for chunk in v_last.as_slice().expect("v row contig").chunks(head_dim) {
+                self.tq.encode_vector_into(
+                    chunk,
+                    &mut layer_slot.compressed_v,
+                    &mut scratch_f32,
+                    &mut scratch_u8,
+                );
+            }
+            layer_slot.num_vecs = new_rows;
+            layer_slot.kv_dim = kv_dim;
+            layer_slot.head_dim = head_dim;
+
+            let bffn = BackendFfn {
+                weights,
+                backend: self.backend.as_ref(),
+            };
+            let h_out =
+                crate::engines::layer_ffn_or_moe(weights, &h_post_attn, layer, &bffn, Some(ffn));
+            h = h_out;
+        }
+
+        self.abs_position += 1;
+        Ok(last_row(&h))
+    }
+}
 
 impl KvEngine for TurboQuantEngine {
     fn name(&self) -> &str {
@@ -368,70 +454,21 @@ impl KvEngine for TurboQuantEngine {
         ffn: &dyn FfnBackend,
         token_id: u32,
     ) -> Result<Array2<f32>, EngineError> {
-        let num_layers = weights.num_layers;
-        let abs_position = self.abs_position;
-        let mut h = embed_tokens_pub(weights, &[token_id]);
-
-        for layer in 0..num_layers {
-            // Decompress full prior K/V for attention.
-            let prior_kv = self.layers[layer].decompress(&self.tq);
-
-            // Decode step returns updated K/V (prior + new token).
-            let (h_post_attn, updated_kv) = run_attention_block_decode_step_backend(
-                weights,
-                &h,
-                layer,
-                Some(&prior_kv),
-                abs_position,
-                Some(self.backend.as_ref()),
-            )
-            .ok_or_else(|| EngineError::BackendFailure {
-                details: "run_attention_block_decode_step_backend returned None".into(),
-            })?;
-
-            // Append-only codec path: encode just the new row head-by-
-            // head and push onto the existing compressed buffer.
-            let arch = &*weights.arch;
-            let kv_dim = arch.num_kv_heads_for_layer(layer) * arch.head_dim_for_layer(layer);
-            let head_dim = detect_head_dim(kv_dim);
-            let layer_slot = &mut self.layers[layer];
-            let new_rows = updated_kv.0.shape()[0];
-            let k_last = updated_kv.0.row(new_rows - 1).to_owned();
-            let v_last = updated_kv.1.row(new_rows - 1).to_owned();
-            let mut scratch_f32: Vec<f32> = Vec::new();
-            let mut scratch_u8: Vec<u8> = Vec::new();
-            for chunk in k_last.as_slice().expect("k row contig").chunks(head_dim) {
-                self.tq.encode_vector_into(
-                    chunk,
-                    &mut layer_slot.compressed_k,
-                    &mut scratch_f32,
-                    &mut scratch_u8,
-                );
-            }
-            for chunk in v_last.as_slice().expect("v row contig").chunks(head_dim) {
-                self.tq.encode_vector_into(
-                    chunk,
-                    &mut layer_slot.compressed_v,
-                    &mut scratch_f32,
-                    &mut scratch_u8,
-                );
-            }
-            layer_slot.num_vecs = new_rows;
-            layer_slot.kv_dim = kv_dim;
-            layer_slot.head_dim = head_dim;
-
-            let bffn = BackendFfn {
-                weights,
-                backend: self.backend.as_ref(),
-            };
-            let h_out =
-                crate::engines::layer_ffn_or_moe(weights, &h_post_attn, layer, &bffn, Some(ffn));
-            h = h_out;
-        }
-
-        self.abs_position += 1;
-        Ok(last_row(&h))
+        self.decode_step_impl(weights, ffn, token_id, None)
     }
+
+    /// Resident-path decode: threads `index` to the attention step's
+    /// Q4K-direct route (the non-standard-engine structural-gap fix).
+    fn decode_step_resident(
+        &mut self,
+        weights: &ModelWeights,
+        ffn: &dyn FfnBackend,
+        index: &larql_vindex::VectorIndex,
+        token_id: u32,
+    ) -> Result<Array2<f32>, EngineError> {
+        self.decode_step_impl(weights, ffn, token_id, Some(index))
+    }
+
 
     fn memory_bytes(&self) -> usize {
         self.layers.iter().map(|l| l.memory_bytes()).sum()
