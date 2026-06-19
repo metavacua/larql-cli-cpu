@@ -98,6 +98,7 @@
 //!     re-packs from the strided source into this form so the hot
 //!     `matvec_i2s_f32` loop never has to handle the strided
 //!     addressing.
+//!
 //! Conflating the two scrambles every weight; see the decode-fix PR
 //! and the format spec for the authoritative description.
 

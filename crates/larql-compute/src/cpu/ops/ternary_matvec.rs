@@ -192,7 +192,7 @@ pub fn matvec_i2s_f32_into(
     let row_bytes = w.row_bytes();
     debug_assert_eq!(row_bytes * 4, w.cols);
 
-    for r in 0..w.rows {
+    for (r, y_r) in y.iter_mut().enumerate().take(w.rows) {
         let row = &w.i2s_bytes[r * row_bytes..(r + 1) * row_bytes];
         // Sum activations at +1 positions, subtract at -1 positions.
         // Skip 0 / reserved slots entirely (no work in the inner
@@ -211,12 +211,12 @@ pub fn matvec_i2s_f32_into(
             // matmul because the LUT factors are exactly
             // {-1.0, 0.0, +1.0}.
             const TRIT: [f32; 4] = [0.0, 1.0, -1.0, 0.0];
-            acc += TRIT[((byte >> 0) & 0b11) as usize] * x[base];
+            acc += TRIT[(byte & 0b11) as usize] * x[base];
             acc += TRIT[((byte >> 2) & 0b11) as usize] * x[base + 1];
             acc += TRIT[((byte >> 4) & 0b11) as usize] * x[base + 2];
             acc += TRIT[((byte >> 6) & 0b11) as usize] * x[base + 3];
         }
-        y[r] = acc * w.channel_scales[r];
+        *y_r = acc * w.channel_scales[r];
     }
 
     Ok(())
@@ -231,7 +231,7 @@ mod tests {
     /// Encode an f32 row of `{-d, 0, +d}` trits into I2_S bytes.
     /// Used by tests; mirrors the bit-pattern map in the decoder.
     fn encode_row(row: &[f32], d: f32) -> Vec<u8> {
-        assert!(row.len() % 4 == 0);
+        assert!(row.len().is_multiple_of(4));
         let inv = if d > 0.0 { 1.0 / d } else { 0.0 };
         let mut out = vec![0u8; row.len() / 4];
         for (i, chunk) in row.chunks_exact(4).enumerate() {
@@ -254,10 +254,10 @@ mod tests {
     /// against ground truth.
     fn naive_dequant_matvec(w: &BitLinearWeight, x: &[f32]) -> Vec<f32> {
         let mut y = vec![0.0f32; w.rows];
-        for r in 0..w.rows {
+        let row_bytes = w.row_bytes();
+        for (r, y_r) in y.iter_mut().enumerate() {
             let scale = w.channel_scales[r];
-            let row_bytes = w.row_bytes();
-            for c in 0..w.cols {
+            for (c, &x_c) in x.iter().enumerate().take(w.cols) {
                 let byte = w.i2s_bytes[r * row_bytes + c / 4];
                 let bits = (byte >> (2 * (c % 4))) & 0b11;
                 let trit = match bits {
@@ -265,7 +265,7 @@ mod tests {
                     0b10 => -1.0_f32,
                     _ => 0.0_f32,
                 };
-                y[r] += trit * scale * x[c];
+                *y_r += trit * scale * x_c;
             }
         }
         y
