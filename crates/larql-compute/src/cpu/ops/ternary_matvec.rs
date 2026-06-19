@@ -11,6 +11,19 @@
 //! per-channel scale) instead of once per *element* (the dense f16/
 //! f32 path), which is the entire point of native BitNet inference.
 //!
+//! ## Status: correct reference, not yet the optimized fast path
+//!
+//! This is a scalar implementation: it walks the packed trits and
+//! does `acc += sign * activation` in f32 (the "no multiplies"
+//! property above describes the *algorithm* — the current code still
+//! branches/selects per element in plain f32, it is not yet the
+//! vectorised form).  It is validated against a dequant-and-matmul
+//! reference and is correct.  The optimized path — int8-quantized
+//! activations + a sign-select NEON/AVX2 kernel dispatched through
+//! the compute backend — is future work that slots into the
+//! `FormatRoute` / quant-registry machinery; this reference kernel
+//! is what the BitNet forward uses today.
+//!
 //! For Microsoft's BitNet b1.58 2 B 4 T (`general.architecture =
 //! "bitnet-b1.58"`) the saving is dramatic: the weight tensor stays
 //! in its on-disk 2-bpw form (1.4 GB total at f16-equivalent rank
@@ -351,7 +364,12 @@ mod tests {
         let x: Vec<f32> = (0..16).map(|i| i as f32).collect();
         let y = matvec_i2s_f32(&w, &x).unwrap();
         let expected = (x[11] - x[3]) * 0.5;
-        assert!((y[0] - expected).abs() < 1e-6, "got {} expected {}", y[0], expected);
+        assert!(
+            (y[0] - expected).abs() < 1e-6,
+            "got {} expected {}",
+            y[0],
+            expected
+        );
     }
 
     /// Reference equivalence: kernel result must match naive dequant
@@ -366,9 +384,7 @@ mod tests {
             let row_trits = synth_ternary(cols, 42 + r as u64);
             bytes.extend(encode_row(&row_trits, 1.0));
         }
-        let scales: Vec<f32> = (0..rows)
-            .map(|i| 0.1 + (i as f32) * 0.01)
-            .collect();
+        let scales: Vec<f32> = (0..rows).map(|i| 0.1 + (i as f32) * 0.01).collect();
         let w = BitLinearWeight::new(rows, cols, bytes, scales).unwrap();
 
         let x = synth(cols, 9999);
