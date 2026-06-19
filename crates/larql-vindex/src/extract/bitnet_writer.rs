@@ -131,15 +131,12 @@ pub fn write_bitnet_artifacts(
         }
         // Bytes must be in raw_bytes (kept verbatim); shape comes
         // from the dequantised tensor (loader populates both).
-        let bytes = weights
-            .raw_bytes
-            .get(key)
-            .ok_or_else(|| {
-                VindexError::Parse(format!(
-                    "BitNet --keep-quant: tensor {key} has no raw I2_S bytes; \
+        let bytes = weights.raw_bytes.get(key).ok_or_else(|| {
+            VindexError::Parse(format!(
+                "BitNet --keep-quant: tensor {key} has no raw I2_S bytes; \
                      loader must populate raw_bytes for type 36 tensors"
-                ))
-            })?;
+            ))
+        })?;
         let arr = weights
             .tensors
             .get(key)
@@ -349,9 +346,10 @@ mod tests {
         let mut weights = larql_models::test_fixtures::make_test_weights();
         // Dequantised array is only used by the writer for shape; the
         // values don't affect the scale (which comes from raw_bytes).
-        weights
-            .tensors
-            .insert(key.clone(), Array2::<f32>::zeros((rows, cols)).into_shared());
+        weights.tensors.insert(
+            key.clone(),
+            Array2::<f32>::zeros((rows, cols)).into_shared(),
+        );
         weights
             .raw_bytes
             .insert(key.clone(), vec![0u8; rows * cols / 4]);
@@ -366,8 +364,7 @@ mod tests {
         // One entry, rows scale slots, all equal to want_scale.
         assert_eq!(layout.tensors.len(), 1);
         assert_eq!(layout.total_scale_count, rows);
-        let scales_bytes =
-            std::fs::read(out.join(BITNET_SCALES_BIN)).expect("scales.f32");
+        let scales_bytes = std::fs::read(out.join(BITNET_SCALES_BIN)).expect("scales.f32");
         assert_eq!(scales_bytes.len(), rows * 4);
         for r in 0..rows {
             let s = f32::from_le_bytes([

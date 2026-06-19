@@ -236,8 +236,7 @@ impl GgufFile {
                     if let Some(se) = end.checked_add(4) {
                         if se <= mmap.len() {
                             let sb = &mmap[end..se];
-                            let scale =
-                                f32::from_le_bytes([sb[0], sb[1], sb[2], sb[3]]);
+                            let scale = f32::from_le_bytes([sb[0], sb[1], sb[2], sb[3]]);
                             raw_bytes.insert(
                                 format!("{key}{I2S_SCALE_SUFFIX}"),
                                 scale.to_le_bytes().to_vec(),
@@ -431,10 +430,7 @@ pub fn load_gguf(path: &Path) -> Result<ModelWeights, ModelError> {
 /// `keep_types` should be the list of GGML type IDs whose bytes
 /// you want preserved.  For BitNet pass `&[36]` (TYPE_I2_S); for
 /// future TQ1_0/TQ2_0 native paths pass `&[34, 35]`.
-pub fn load_gguf_keep_quant(
-    path: &Path,
-    keep_types: &[u32],
-) -> Result<ModelWeights, ModelError> {
+pub fn load_gguf_keep_quant(path: &Path, keep_types: &[u32]) -> Result<ModelWeights, ModelError> {
     load_gguf_keep_quant_filtered(path, &|_| false, keep_types)
 }
 
