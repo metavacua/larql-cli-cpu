@@ -6,7 +6,7 @@ use ndarray::Array2;
 
 use super::{gelu_tanh, gelu_tanh_gate_up, sigmoid, silu_gate_up, FfnBackend};
 use crate::forward::add_bias;
-use larql_models::ModelWeights;
+use larql_models::{ModelWeights, WeightsView};
 
 /// Dense FFN: follows the model architecture exactly (CPU BLAS).
 /// Gated: activation(x @ gate.T) * (x @ up.T) @ down.T + bias
@@ -17,11 +17,11 @@ pub struct WeightFfn<'a> {
 
 impl<'a> FfnBackend for WeightFfn<'a> {
     fn forward(&self, layer: usize, x: &Array2<f32>) -> Array2<f32> {
-        dense_ffn_forward(self.weights, layer, x).0
+        dense_ffn_forward(WeightsView::dense(self.weights), layer, x).0
     }
 
     fn forward_with_activation(&self, layer: usize, x: &Array2<f32>) -> (Array2<f32>, Array2<f32>) {
-        dense_ffn_forward(self.weights, layer, x)
+        dense_ffn_forward(WeightsView::dense(self.weights), layer, x)
     }
 
     fn name(&self) -> &str {
@@ -39,11 +39,11 @@ pub struct BackendFfn<'a, 'b> {
 
 impl<'a, 'b> FfnBackend for BackendFfn<'a, 'b> {
     fn forward(&self, layer: usize, x: &Array2<f32>) -> Array2<f32> {
-        dense_ffn_forward_backend(self.weights, layer, x, Some(self.backend)).0
+        dense_ffn_forward_backend(WeightsView::dense(self.weights), layer, x, Some(self.backend)).0
     }
 
     fn forward_with_activation(&self, layer: usize, x: &Array2<f32>) -> (Array2<f32>, Array2<f32>) {
-        dense_ffn_forward_backend(self.weights, layer, x, Some(self.backend))
+        dense_ffn_forward_backend(WeightsView::dense(self.weights), layer, x, Some(self.backend))
     }
 
     fn name(&self) -> &str {
@@ -78,7 +78,7 @@ impl FfnBackend for NullFfn {
 
 /// Architecture-correct dense FFN — CPU BLAS path.
 pub fn dense_ffn_forward(
-    weights: &ModelWeights,
+    weights: WeightsView,
     layer: usize,
     x: &Array2<f32>,
 ) -> (Array2<f32>, Array2<f32>) {
@@ -88,8 +88,12 @@ pub fn dense_ffn_forward(
 /// Architecture-correct dense FFN with optional backend dispatch.
 /// `backend = None` → plain ndarray BLAS (same as `dense_ffn_forward`).
 /// `backend = Some(be)` → gate/up/down matmuls through `be.matmul_transb`.
+///
+/// Resolves FFN weights through [`WeightsView::tensor`] (engine scratch first,
+/// then canonical) so the quant forward's dequantised FFN tensors are visible
+/// without mutating `ModelWeights`. Dense callers pass a `dense()` view.
 pub fn dense_ffn_forward_backend(
-    weights: &ModelWeights,
+    weights: WeightsView,
     layer: usize,
     x: &Array2<f32>,
     backend: Option<&dyn ComputeBackend>,
@@ -100,18 +104,15 @@ pub fn dense_ffn_forward_backend(
         (or re-extract without `--compact` if you need dense matmul).";
 
     let w_up = weights
-        .tensors
-        .get(&arch.ffn_up_key(layer))
+        .tensor(&arch.ffn_up_key(layer))
         .unwrap_or_else(|| panic!("{compact_hint} (key: {})", arch.ffn_up_key(layer)));
     let w_down = weights
-        .tensors
-        .get(&arch.ffn_down_key(layer))
+        .tensor(&arch.ffn_down_key(layer))
         .unwrap_or_else(|| panic!("{compact_hint} (key: {})", arch.ffn_down_key(layer)));
 
     let activation = if arch.ffn_type() == larql_models::FfnType::Gated {
         let w_gate = weights
-            .tensors
-            .get(&arch.ffn_gate_key(layer))
+            .tensor(&arch.ffn_gate_key(layer))
             .unwrap_or_else(|| panic!("{compact_hint} (key: {})", arch.ffn_gate_key(layer)));
         let gate = dot_proj_gpu(x, w_gate, backend);
         let up = dot_proj_gpu(x, w_up, backend);
@@ -166,7 +167,7 @@ mod tests {
     fn dense_ffn_forward_shape() {
         let weights = make_test_weights();
         let input = x(3, weights.hidden_size);
-        let (out, act) = dense_ffn_forward(&weights, 0, &input);
+        let (out, act) = dense_ffn_forward(WeightsView::dense(&weights), 0, &input);
         assert_eq!(out.shape(), &[3, weights.hidden_size]);
         assert_eq!(act.shape(), &[3, weights.intermediate_size]);
     }
@@ -175,7 +176,7 @@ mod tests {
     fn dense_ffn_forward_output_finite() {
         let weights = make_test_weights();
         let input = x(2, weights.hidden_size);
-        let (out, act) = dense_ffn_forward(&weights, 0, &input);
+        let (out, act) = dense_ffn_forward(WeightsView::dense(&weights), 0, &input);
         assert!(
             out.iter().all(|v| v.is_finite()),
             "FFN output has non-finite values"
@@ -191,8 +192,8 @@ mod tests {
         // backend=None should produce the same result as dense_ffn_forward
         let weights = make_test_weights();
         let input = x(2, weights.hidden_size);
-        let (out1, act1) = dense_ffn_forward(&weights, 0, &input);
-        let (out2, act2) = dense_ffn_forward_backend(&weights, 0, &input, None);
+        let (out1, act1) = dense_ffn_forward(WeightsView::dense(&weights), 0, &input);
+        let (out2, act2) = dense_ffn_forward_backend(WeightsView::dense(&weights), 0, &input, None);
         assert_eq!(
             out1, out2,
             "output should match between dense_ffn_forward and backend(None)"
@@ -205,7 +206,7 @@ mod tests {
         let weights = make_test_weights();
         let input = x(1, weights.hidden_size);
         for layer in 0..weights.num_layers {
-            let (out, _) = dense_ffn_forward(&weights, layer, &input);
+            let (out, _) = dense_ffn_forward(WeightsView::dense(&weights), layer, &input);
             assert_eq!(
                 out.shape(),
                 &[1, weights.hidden_size],
@@ -291,7 +292,7 @@ mod tests {
         // Edge case: one row at the smallest meaningful seq_len.
         let weights = make_test_weights();
         let input = x(1, weights.hidden_size);
-        let (out, act) = dense_ffn_forward(&weights, 0, &input);
+        let (out, act) = dense_ffn_forward(WeightsView::dense(&weights), 0, &input);
         assert_eq!(out.shape(), &[1, weights.hidden_size]);
         assert_eq!(act.shape(), &[1, weights.intermediate_size]);
     }
@@ -303,7 +304,7 @@ mod tests {
         // change to the gated path.
         let weights = make_test_weights();
         let input = Array2::<f32>::zeros((2, weights.hidden_size));
-        let (out, act) = dense_ffn_forward(&weights, 0, &input);
+        let (out, act) = dense_ffn_forward(WeightsView::dense(&weights), 0, &input);
         assert!(out.iter().all(|v| v.is_finite()));
         assert!(act.iter().all(|v| v.is_finite()));
     }
@@ -315,9 +316,9 @@ mod tests {
         // output (within float noise).
         let weights = make_test_weights();
         let input = x(2, weights.hidden_size);
-        let (out_none, act_none) = dense_ffn_forward_backend(&weights, 0, &input, None);
+        let (out_none, act_none) = dense_ffn_forward_backend(WeightsView::dense(&weights), 0, &input, None);
         let (out_some, act_some) =
-            dense_ffn_forward_backend(&weights, 0, &input, Some(&crate::CpuBackend));
+            dense_ffn_forward_backend(WeightsView::dense(&weights), 0, &input, Some(&crate::CpuBackend));
         for (a, b) in out_none.iter().zip(out_some.iter()) {
             assert!((a - b).abs() < 1e-4, "out diverged: {a} vs {b}");
         }
@@ -334,7 +335,7 @@ mod tests {
         // the `else` branch (no gate matrix; just up + activation + down).
         let weights = larql_models::test_fixtures::make_starcoder2_test_weights();
         let input = x(2, weights.hidden_size);
-        let (out, act) = dense_ffn_forward(&weights, 0, &input);
+        let (out, act) = dense_ffn_forward(WeightsView::dense(&weights), 0, &input);
         assert_eq!(out.shape(), &[2, weights.hidden_size]);
         assert!(out.iter().all(|v| v.is_finite()));
         // Non-gated activation has shape (seq, intermediate).
@@ -348,7 +349,7 @@ mod tests {
         // bias)` calls fire.
         let weights = larql_models::test_fixtures::make_starcoder2_test_weights();
         let input = x(1, weights.hidden_size);
-        let (out, _) = dense_ffn_forward(&weights, 0, &input);
+        let (out, _) = dense_ffn_forward(WeightsView::dense(&weights), 0, &input);
         assert!(out.iter().all(|v| v.is_finite()));
     }
 
@@ -360,7 +361,7 @@ mod tests {
         // `gelu_tanh_gate_up` branch instead of the default silu.
         let weights = larql_models::test_fixtures::make_gemma3_test_weights();
         let input = x(2, weights.hidden_size);
-        let (out, _) = dense_ffn_forward(&weights, 0, &input);
+        let (out, _) = dense_ffn_forward(WeightsView::dense(&weights), 0, &input);
         assert_eq!(out.shape(), &[2, weights.hidden_size]);
         assert!(out.iter().all(|v| v.is_finite()));
     }
