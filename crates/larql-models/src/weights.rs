@@ -27,45 +27,71 @@ pub type WeightArray = ArcArray2<f32>;
 /// evict, not merely that the resolver still finds it.)
 pub type DequantScratch = HashMap<String, WeightArray>;
 
-/// Read-only resolver bundling canonical [`ModelWeights`] with the engine's
-/// [`DequantScratch`]. The single read path for layer weight tensors on the
-/// quant forward.
+/// Read-only resolver bundling canonical [`ModelWeights`] with an optional
+/// engine-owned [`DequantScratch`]. The single read path for layer weight
+/// tensors across the shared forward (dense and quant).
 ///
 /// Derefs to `ModelWeights`, so every non-tensor access (`view.hidden_size`,
 /// `view.arch`, `view.embed`, …) works unchanged; only the layer-tensor reads
 /// switch from `weights.tensors.get(key)` to [`tensor`](Self::tensor), which
 /// resolves **scratch first, then canonical**. Returns a borrow (no clone, no
-/// lock): the dense f32 path, whose scratch is always empty, pays nothing
-/// beyond one extra empty-map lookup.
+/// lock).
+///
+/// `Copy` and two words wide (a ref + an `Option<ref>`), so threading it by
+/// value through the forward is free. The dense / non-quant path constructs it
+/// via [`dense`](Self::dense) (or `(&weights).into()`) — `scratch == None`, so
+/// it's a transparent pass-through over canonical `tensors` and pays nothing.
+/// The quant forward constructs it via [`with_scratch`](Self::with_scratch)
+/// from the engine's per-forward `DequantScratch`.
+#[derive(Clone, Copy)]
 pub struct WeightsView<'a> {
     weights: &'a ModelWeights,
-    scratch: &'a DequantScratch,
+    scratch: Option<&'a DequantScratch>,
 }
 
 impl<'a> WeightsView<'a> {
-    /// Bundle canonical weights with the engine's per-forward dequant scratch.
-    pub fn new(weights: &'a ModelWeights, scratch: &'a DequantScratch) -> Self {
-        Self { weights, scratch }
+    /// View with no dequant scratch — the dense f32 / non-quant path. Reads
+    /// resolve straight to canonical `tensors`.
+    pub fn dense(weights: &'a ModelWeights) -> Self {
+        Self {
+            weights,
+            scratch: None,
+        }
     }
 
-    /// Resolve a layer tensor by key: engine scratch first, then canonical
-    /// `tensors`. The drop-in replacement for `weights.tensors.get(key)` on
-    /// the quant forward.
-    pub fn tensor(&self, key: &str) -> Option<&WeightArray> {
+    /// View overlaying the engine's per-forward dequant scratch on canonical
+    /// weights. Reads resolve scratch-first-then-canonical.
+    pub fn with_scratch(weights: &'a ModelWeights, scratch: &'a DequantScratch) -> Self {
+        Self {
+            weights,
+            scratch: Some(scratch),
+        }
+    }
+
+    /// Resolve a layer tensor by key: engine scratch first (when present),
+    /// then canonical `tensors`. The drop-in replacement for
+    /// `weights.tensors.get(key)` on the shared forward.
+    pub fn tensor(&self, key: &str) -> Option<&'a WeightArray> {
         self.scratch
-            .get(key)
+            .and_then(|s| s.get(key))
             .or_else(|| self.weights.tensors.get(key))
     }
 
     /// Whether a layer tensor resolves via [`tensor`](Self::tensor).
     pub fn has_tensor(&self, key: &str) -> bool {
-        self.scratch.contains_key(key) || self.weights.tensors.contains_key(key)
+        self.scratch.is_some_and(|s| s.contains_key(key)) || self.weights.tensors.contains_key(key)
     }
 
     /// The canonical (immutable) weights, for the rare caller that needs the
     /// `&ModelWeights` directly rather than via `Deref`.
     pub fn canonical(&self) -> &'a ModelWeights {
         self.weights
+    }
+}
+
+impl<'a> From<&'a ModelWeights> for WeightsView<'a> {
+    fn from(weights: &'a ModelWeights) -> Self {
+        Self::dense(weights)
     }
 }
 
@@ -372,7 +398,7 @@ mod weights_view_tests {
         scratch.insert("shared".into(), scratch_override.clone()); // shadows canonical
         scratch.insert("scratch_only".into(), scratch_only.clone());
 
-        let view = WeightsView::new(&weights, &scratch);
+        let view = WeightsView::with_scratch(&weights, &scratch);
 
         // scratch shadows canonical for the same key
         assert_eq!(view.tensor("shared").unwrap(), &scratch_override);
@@ -393,17 +419,21 @@ mod weights_view_tests {
         assert_eq!(view.canonical().num_layers, weights.num_layers);
     }
 
-    /// An empty scratch (the dense f32 path's steady state) makes the view a
-    /// transparent pass-through over canonical `tensors` — the "dense pays
-    /// nothing" property.
+    /// The dense / non-quant view (no scratch) is a transparent pass-through
+    /// over canonical `tensors` — the "dense pays nothing" property. `From`
+    /// builds the same thing.
     #[test]
-    fn weights_view_empty_scratch_is_passthrough() {
+    fn weights_view_dense_is_passthrough() {
         let mut weights = make_test_weights();
         let w = arr2(&[[1.0f32]]).into_shared();
         weights.tensors.insert("k".into(), w.clone());
-        let scratch = DequantScratch::new();
-        let view = WeightsView::new(&weights, &scratch);
+
+        let view = WeightsView::dense(&weights);
         assert_eq!(view.tensor("k").unwrap(), &w);
         assert!(view.tensor("absent").is_none());
+        assert!(view.has_tensor("k") && !view.has_tensor("absent"));
+
+        let via_from: WeightsView = (&weights).into();
+        assert_eq!(via_from.tensor("k").unwrap(), &w);
     }
 }
