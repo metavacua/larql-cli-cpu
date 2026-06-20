@@ -726,6 +726,7 @@ fn make_test_vindex_dir(tag: &str) -> std::path::PathBuf {
         model_config: None,
         fp4: None,
         ffn_layout: None,
+        bitnet_layout: None,
     };
     index.save_vindex(&dir, &mut config).unwrap();
 
@@ -881,6 +882,7 @@ fn make_rich_test_vindex_dir(tag: &str) -> std::path::PathBuf {
         model_config: None,
         fp4: None,
         ffn_layout: None,
+        bitnet_layout: None,
     };
     index.save_vindex(&dir, &mut config).unwrap();
 
@@ -1061,6 +1063,7 @@ fn make_full_test_vindex_dir(tag: &str) -> std::path::PathBuf {
         model_config: Some(model_config),
         fp4: None,
         ffn_layout: None,
+        bitnet_layout: None,
     };
 
     // 1. Save the index (gate vectors + down_meta + config).
@@ -1290,6 +1293,7 @@ fn make_large_test_vindex_dir(tag: &str) -> std::path::PathBuf {
         model_config: Some(model_config),
         fp4: None,
         ffn_layout: None,
+        bitnet_layout: None,
     };
 
     vindex.save_vindex(&dir, &mut config).unwrap();
@@ -1444,6 +1448,7 @@ fn make_moe_test_vindex_dir(tag: &str) -> std::path::PathBuf {
         model_config: Some(model_config),
         fp4: None,
         ffn_layout: None,
+        bitnet_layout: None,
     };
 
     vindex.save_vindex(&dir, &mut config).unwrap();
@@ -2546,6 +2551,7 @@ fn knn_insert_q4k_flagged_no_weights_uses_embedding_fallback() {
         model_config: None,
         fp4: None,
         ffn_layout: None,
+        bitnet_layout: None,
     };
     index.save_vindex(&dir, &mut config).unwrap();
     let embed_bytes = vec![0u8; vocab_size * hidden * 4];
@@ -2636,6 +2642,7 @@ fn trace_on_q4k_vindex_returns_clear_error() {
         model_config: None,
         fp4: None,
         ffn_layout: None,
+        bitnet_layout: None,
     };
     index.save_vindex(&dir, &mut config).unwrap();
     let embed_bytes = vec![0u8; vocab_size * hidden * 4];
@@ -4448,6 +4455,7 @@ fn make_modified_test_vindex_dir(tag: &str) -> std::path::PathBuf {
         model_config: None,
         fp4: None,
         ffn_layout: None,
+        bitnet_layout: None,
     };
     index.save_vindex(&dir, &mut config).unwrap();
 
