@@ -288,8 +288,7 @@ mod tests {
         });
 
         for layer in 0..weights.num_layers {
-            let (h_deq, (k_deq, v_deq)) = run_attention_block_decode_step_backend(
-                &deq_weights,
+            let (h_deq, (k_deq, v_deq)) = run_attention_block_decode_step_backend(larql_models::WeightsView::dense(&deq_weights),
                 &h_new,
                 layer,
                 None,
@@ -383,8 +382,7 @@ mod tests {
             let h_new = Array2::from_shape_fn((1, weights.hidden_size), |(_, j)| {
                 (((j + step) % 11) as f32 - 5.0) * 0.03
             });
-            let (h_deq, new_deq) = run_attention_block_decode_step_backend(
-                &deq_weights,
+            let (h_deq, new_deq) = run_attention_block_decode_step_backend(larql_models::WeightsView::dense(&deq_weights),
                 &h_new,
                 layer,
                 kv_deq.as_ref(),

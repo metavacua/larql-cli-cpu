@@ -296,8 +296,7 @@ pub fn rs_extend_from_checkpoint_quant(
                 t_attn_helper_misses += 1;
             }
             let (h_post_attn, new_kv) = attn_native.or_else(|| {
-                run_attention_block_decode_step_backend(
-                    weights,
+                run_attention_block_decode_step_backend(larql_inference::WeightsView::dense(weights),
                     &h,
                     layer,
                     kv_entry,

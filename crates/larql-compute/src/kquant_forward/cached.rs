@@ -192,8 +192,7 @@ pub fn predict_kquant_decode_step(
         timings.dequant_ms += t0.elapsed().as_secs_f64() * 1000.0;
 
         let kv_entry = cache[layer].as_ref();
-        let (h_post_attn, new_kv) = match run_attention_block_decode_step_backend(
-            weights,
+        let (h_post_attn, new_kv) = match run_attention_block_decode_step_backend(larql_models::WeightsView::dense(weights),
             &h,
             layer,
             kv_entry,

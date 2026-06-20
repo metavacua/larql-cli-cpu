@@ -716,8 +716,7 @@ impl TurboQuantEngine {
                 abs_position,
             )
             .or_else(|| {
-                run_attention_block_decode_step_backend(
-                    weights,
+                run_attention_block_decode_step_backend(larql_inference::WeightsView::dense(weights),
                     &h,
                     layer,
                     Some(&prior_kv),

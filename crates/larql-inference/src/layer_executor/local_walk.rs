@@ -92,8 +92,7 @@ impl<'a> LayerExecutor for LocalWalkExecutor<'a> {
         // both the post-attention hidden + the extended K/V. The
         // engine integrates the K/V per policy (store it, discard it,
         // mix with cold tier, etc.).
-        let (h_post_attn, new_kv) = run_attention_block_decode_step_backend(
-            weights,
+        let (h_post_attn, new_kv) = run_attention_block_decode_step_backend(larql_models::WeightsView::dense(weights),
             hidden_in,
             layer,
             Some(prior_kv),

@@ -141,7 +141,7 @@ pub fn run_attention_block_decode_step(
     kv_entry: Option<&SharedKV>,
     abs_position: usize,
 ) -> Option<(Array2<f32>, SharedKV)> {
-    run_attention_block_decode_step_backend(weights, h_new, layer, kv_entry, abs_position, None)
+    run_attention_block_decode_step_backend(larql_models::WeightsView::dense(weights), h_new, layer, kv_entry, abs_position, None)
 }
 
 /// Decode-step attention with optional GPU-accelerated projections
@@ -152,7 +152,7 @@ pub fn run_attention_block_decode_step(
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
 pub fn run_attention_block_decode_step_backend(
-    weights: &larql_models::ModelWeights,
+    weights: larql_models::WeightsView,
     h_new: &Array2<f32>,
     layer: usize,
     kv_entry: Option<&SharedKV>,
@@ -177,14 +177,14 @@ pub fn run_attention_block_decode_step_backend(
     let position = abs_position;
 
     let h_norm = crate::forward::apply_norm(
-        weights,
+        &weights,
         h_new,
         &arch.input_layernorm_key(layer),
         norm_offset,
     );
 
-    let w_q = weights.tensors.get(&arch.attn_q_key(layer))?;
-    let w_o = weights.tensors.get(&arch.attn_o_key(layer))?;
+    let w_q = weights.tensor(&arch.attn_q_key(layer))?;
+    let w_o = weights.tensor(&arch.attn_o_key(layer))?;
     let mut q_full = dot_proj_gpu(&h_norm, w_q, backend);
     if let Some(bias) = arch
         .attn_q_bias_key(layer)
@@ -223,12 +223,12 @@ pub fn run_attention_block_decode_step_backend(
     );
 
     // New token's K, V — RoPE'd at `position`, then appended to cache.
-    let w_k = weights.tensors.get(&arch.attn_k_key(layer))?;
-    let v_from_k = !weights.tensors.contains_key(&arch.attn_v_key(layer));
+    let w_k = weights.tensor(&arch.attn_k_key(layer))?;
+    let v_from_k = !weights.has_tensor(&arch.attn_v_key(layer));
     let w_v = if v_from_k {
         w_k
     } else {
-        weights.tensors.get(&arch.attn_v_key(layer))?
+        weights.tensor(&arch.attn_v_key(layer))?
     };
 
     let mut k_full_new = dot_proj_gpu(&h_norm, w_k, backend);
@@ -306,7 +306,7 @@ pub fn run_attention_block_decode_step_backend(
     let res_mult = arch.residual_multiplier();
     let h_post_attn = if arch.has_post_norms() {
         let normed = crate::forward::apply_norm(
-            weights,
+            &weights,
             &attn_projected,
             &arch.post_attention_layernorm_key(layer),
             norm_offset,
@@ -369,7 +369,7 @@ pub fn run_attention_block_decode_step_auto(
             }
         }
     }
-    run_attention_block_decode_step_backend(weights, h_new, layer, kv_entry, abs_position, backend)
+    run_attention_block_decode_step_backend(larql_models::WeightsView::dense(weights), h_new, layer, kv_entry, abs_position, backend)
 }
 
 /// `LARQL_Q4K_ATTN_INT8=1`: upgrade the Q4K-direct attention projections from
@@ -1245,7 +1245,7 @@ mod tests {
         let inserted = crate::kquant_forward::insert_q4k_layer_tensors(&mut weights, &idx, 0)
             .expect("dequant layer 0 tensors");
         let (h_dequant, _) =
-            run_attention_block_decode_step_backend(&weights, &h, 0, None, 0, Some(&backend))
+            run_attention_block_decode_step_backend(larql_models::WeightsView::dense(&weights), &h, 0, None, 0, Some(&backend))
                 .expect("f32 dequant step");
         let _ = inserted;
 

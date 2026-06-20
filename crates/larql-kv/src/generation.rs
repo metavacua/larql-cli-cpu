@@ -525,8 +525,7 @@ pub fn kv_decode_step_run(
         hook.on_pre_layer(layer, &h_step);
 
         let kv_entry = cache.layers[layer].as_ref();
-        let (mut h_post_attn, new_kv) = run_attention_block_decode_step_backend(
-            weights,
+        let (mut h_post_attn, new_kv) = run_attention_block_decode_step_backend(larql_inference::WeightsView::dense(weights),
             &h_step,
             layer,
             kv_entry,
@@ -754,8 +753,7 @@ where
         let mut h_step = h_new;
         for layer in 0..num_layers {
             let kv_entry = cache.layers[layer].as_ref();
-            let (h_post_attn, new_kv) = match run_attention_block_decode_step_backend(
-                weights,
+            let (h_post_attn, new_kv) = match run_attention_block_decode_step_backend(larql_inference::WeightsView::dense(weights),
                 &h_step,
                 layer,
                 kv_entry,

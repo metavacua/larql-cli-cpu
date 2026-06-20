@@ -386,8 +386,7 @@ impl KvDispatch for CpuBackend {
         // leaves the handle intact — same semantics as the pre-refactor
         // clone, and this path is cold whenever the q4k flags are on.
         let prior_kv = cpu_handle(kv).to_shared();
-        let (h_post_attn, new_kv) = run_attention_block_decode_step_backend(
-            weights,
+        let (h_post_attn, new_kv) = run_attention_block_decode_step_backend(larql_models::WeightsView::dense(weights),
             query,
             layer,
             prior_kv.as_ref(),
