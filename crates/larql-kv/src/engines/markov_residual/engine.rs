@@ -214,7 +214,9 @@ impl KvEngine for MarkovResidualEngine {
         if let Some(hidden) = self.try_prefill_via_dispatch(weights, index, token_ids) {
             return Ok(hidden);
         }
-        ensure_attn_tensors_dequantised(weights, index);
+        let mut scratch = larql_inference::DequantScratch::new();
+        ensure_attn_tensors_dequantised(&mut scratch, weights, index);
+        weights.tensors.extend(scratch);
         let result = rs_prefill_walk(weights, index, token_ids, self.window_size, backend);
         let hidden = result.hidden.clone();
         self.store = Some(result.store);
@@ -241,7 +243,9 @@ impl KvEngine for MarkovResidualEngine {
                     details: "decode_step_via_dispatch returned None".into(),
                 });
         }
-        ensure_attn_tensors_dequantised(weights, index);
+        let mut scratch = larql_inference::DequantScratch::new();
+        ensure_attn_tensors_dequantised(&mut scratch, weights, index);
+        weights.tensors.extend(scratch);
         let rs = self
             .store
             .take()
@@ -294,7 +298,9 @@ impl KvEngine for MarkovResidualEngine {
 
         // Q4K attn weights need dequant once before the per-layer
         // executor can drive f32 attention against them.
-        ensure_attn_tensors_dequantised(weights, index);
+        let mut scratch = larql_inference::DequantScratch::new();
+        ensure_attn_tensors_dequantised(&mut scratch, weights, index);
+        weights.tensors.extend(scratch);
 
         let backend = executor.backend();
         let num_layers = weights.num_layers;
@@ -378,7 +384,11 @@ impl KvEngine for MarkovResidualEngine {
             return self.decode_step_quant(weights, ffn, index, token_id, executor.backend());
         }
 
-        ensure_attn_tensors_dequantised(weights, index);
+        let mut scratch = larql_inference::DequantScratch::new();
+
+        ensure_attn_tensors_dequantised(&mut scratch, weights, index);
+
+        weights.tensors.extend(scratch);
 
         let backend = executor.backend();
         let rs = self

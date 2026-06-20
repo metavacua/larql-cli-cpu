@@ -278,7 +278,9 @@ impl KvEngine for BoundaryPerLayerEngine {
         }
         // Fall back to dense f32 walk (compact vindexes / CPU backend).
         self.kv_handle = None;
-        larql_inference::vindex::dequant::ensure_attn_tensors_dequantised(weights, index);
+        let mut scratch = larql_inference::DequantScratch::new();
+        larql_inference::vindex::dequant::ensure_attn_tensors_dequantised(&mut scratch, weights, index);
+        weights.tensors.extend(scratch);
         self.prefill(weights, ffn, token_ids)
     }
 
@@ -329,7 +331,9 @@ impl KvEngine for BoundaryPerLayerEngine {
                 }
             }
         }
-        larql_inference::vindex::dequant::ensure_attn_tensors_dequantised(weights, index);
+        let mut scratch = larql_inference::DequantScratch::new();
+        larql_inference::vindex::dequant::ensure_attn_tensors_dequantised(&mut scratch, weights, index);
+        weights.tensors.extend(scratch);
         self.decode_step(weights, ffn, token_id)
     }
 

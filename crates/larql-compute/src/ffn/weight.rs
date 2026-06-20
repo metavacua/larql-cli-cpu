@@ -29,6 +29,29 @@ impl<'a> FfnBackend for WeightFfn<'a> {
     }
 }
 
+/// FFN backend over a [`WeightsView`] — the quant forward's scratch-aware FFN.
+/// Identical math to [`WeightFfn`], but resolves gate/up/down through the view
+/// (engine scratch first, then canonical), so the per-layer dequantised FFN
+/// tensors are visible without mutating `ModelWeights`. The quant forward loops
+/// construct this with a `with_scratch` view; everything else keeps `WeightFfn`.
+pub struct ViewFfn<'a> {
+    pub view: WeightsView<'a>,
+}
+
+impl FfnBackend for ViewFfn<'_> {
+    fn forward(&self, layer: usize, x: &Array2<f32>) -> Array2<f32> {
+        dense_ffn_forward(self.view, layer, x).0
+    }
+
+    fn forward_with_activation(&self, layer: usize, x: &Array2<f32>) -> (Array2<f32>, Array2<f32>) {
+        dense_ffn_forward(self.view, layer, x)
+    }
+
+    fn name(&self) -> &str {
+        "view"
+    }
+}
+
 /// Backend-dispatched dense FFN. Matmuls route through `ComputeBackend` when
 /// `backend` is `Some` — useful for prefill on Metal where gate/up/down
 /// projections are the dominant cost.

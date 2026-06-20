@@ -456,10 +456,12 @@ impl RetrievalEngine for ApolloEngine {
         index: &larql_inference::larql_vindex::VectorIndex,
         token_ids: &[u32],
     ) -> Result<Array2<f32>, EngineError> {
-        larql_inference::vindex::ensure_attn_tensors_dequantised(weights, index);
+        let mut scratch = larql_inference::DequantScratch::new();
+        larql_inference::vindex::ensure_attn_tensors_dequantised(&mut scratch, weights, index);
         for layer in 0..weights.num_layers {
-            let _ = larql_inference::vindex::insert_q4k_layer_tensors(weights, index, layer);
+            let _ = larql_inference::vindex::insert_q4k_layer_tensors(&mut scratch, weights, index, layer);
         }
+        weights.tensors.extend(scratch);
         self.prefill(weights, token_ids)
     }
 
@@ -469,10 +471,12 @@ impl RetrievalEngine for ApolloEngine {
         index: &larql_inference::larql_vindex::VectorIndex,
         token_id: u32,
     ) -> Result<Array2<f32>, EngineError> {
-        larql_inference::vindex::ensure_attn_tensors_dequantised(weights, index);
+        let mut scratch = larql_inference::DequantScratch::new();
+        larql_inference::vindex::ensure_attn_tensors_dequantised(&mut scratch, weights, index);
         for layer in 0..weights.num_layers {
-            let _ = larql_inference::vindex::insert_q4k_layer_tensors(weights, index, layer);
+            let _ = larql_inference::vindex::insert_q4k_layer_tensors(&mut scratch, weights, index, layer);
         }
+        weights.tensors.extend(scratch);
         self.decode_step(weights, token_id)
     }
 

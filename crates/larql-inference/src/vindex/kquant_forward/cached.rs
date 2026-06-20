@@ -36,7 +36,6 @@ use crate::attention::{
     rope::apply_rope_partial_at_full,
     run_attention_with_kv_backend,
 };
-use crate::ffn::WeightFfn;
 use crate::forward::embed_tokens_pub;
 use crate::forward::layer::apply_layer_scalar;
 use crate::forward::ple::{apply_per_layer_embedding, precompute_per_layer_inputs};
@@ -103,7 +102,7 @@ pub fn predict_kquant_prefill(
 /// from a single prefill pass without a follow-up CPU re-walk. When
 /// `state` is `None`, bit-identical to [`predict_kquant_prefill`].
 pub fn predict_kquant_prefill_with_state(
-    weights: &mut ModelWeights,
+    weights: &ModelWeights,
     token_ids: &[u32],
     index: &VectorIndex,
     mut state: Option<&mut crate::PerLayerDecodeState>,
@@ -111,14 +110,17 @@ pub fn predict_kquant_prefill_with_state(
     let num_layers = weights.num_layers;
     let mut cache: CpuKvCache = vec![None; num_layers];
     let mut timings = CachedTimings::default();
+    // Forward-local dequant scratch — per-forward derived state, so `weights`
+    // stays immutable. Insert/evict per layer; readers resolve via with_scratch.
+    let mut scratch = larql_models::DequantScratch::new();
 
     let mut h = embed_tokens_pub(weights, token_ids);
     let ple_inputs = precompute_per_layer_inputs(weights, &h, token_ids);
 
     for layer in 0..num_layers {
         let t0 = std::time::Instant::now();
-        let inserted =
-            insert_q4k_layer_tensors(weights, index, layer).unwrap_or_else(|err| panic!("{err}"));
+        let inserted = insert_q4k_layer_tensors(&mut scratch, weights, index, layer)
+            .unwrap_or_else(|err| panic!("{err}"));
         timings.dequant_ms += t0.elapsed().as_secs_f64() * 1000.0;
 
         // Snapshot pre-attention residual for this layer if engine wants it.
@@ -132,14 +134,18 @@ pub fn predict_kquant_prefill_with_state(
         // Attention with K/V capture. Backend stays None — we want the
         // CPU BLAS path for the dequantised f32 tensors that
         // `insert_q4k_layer_tensors` just placed in `weights.tensors`.
-        let (h_post_attn, k_rope, v_final) =
-            match run_attention_with_kv_backend(larql_models::WeightsView::dense(weights), &h, layer, None) {
-                Some(t) => t,
-                None => {
-                    remove_layer_tensors(weights, inserted);
-                    return (h, cache, timings);
-                }
-            };
+        let (h_post_attn, k_rope, v_final) = match run_attention_with_kv_backend(
+            larql_models::WeightsView::with_scratch(weights, &scratch),
+            &h,
+            layer,
+            None,
+        ) {
+            Some(t) => t,
+            None => {
+                remove_layer_tensors(&mut scratch, inserted);
+                return (h, cache, timings);
+            }
+        };
 
         if let Some(s) = state.as_deref_mut() {
             // Prefill K/V for THIS layer = full seq_len × kv_dim.
@@ -153,13 +159,15 @@ pub fn predict_kquant_prefill_with_state(
                 ));
         }
 
-        let ffn = WeightFfn { weights };
+        let ffn = larql_compute::ffn::ViewFfn {
+            view: larql_models::WeightsView::with_scratch(weights, &scratch),
+        };
         let (h_post_ffn, _) = run_ffn(weights, &h_post_attn, layer, &ffn, false);
         let mut h_out =
             apply_per_layer_embedding(weights, &h_post_ffn, layer, ple_inputs.get(layer));
         apply_layer_scalar(weights, &mut h_out, layer);
 
-        remove_layer_tensors(weights, inserted);
+        remove_layer_tensors(&mut scratch, inserted);
 
         cache[layer] = Some((k_rope, v_final));
         h = h_out;
@@ -176,7 +184,7 @@ pub fn predict_kquant_prefill_with_state(
 /// `prompt_len + steps_already_decoded`. The caller maintains this
 /// counter (typical: `prompt_len + step_index` starting at 0).
 pub fn predict_kquant_decode_step(
-    weights: &mut ModelWeights,
+    weights: &ModelWeights,
     token_id: u32,
     index: &VectorIndex,
     cache: &mut CpuKvCache,
@@ -187,6 +195,7 @@ pub fn predict_kquant_decode_step(
         return None;
     }
     let mut timings = CachedTimings::default();
+    let mut scratch = larql_models::DequantScratch::new();
 
     // 1-row embed + 1-row PLE for the new token.
     let mut h = embed_tokens_pub(weights, &[token_id]);
@@ -194,12 +203,13 @@ pub fn predict_kquant_decode_step(
 
     for layer in 0..num_layers {
         let t0 = std::time::Instant::now();
-        let inserted =
-            insert_q4k_layer_tensors(weights, index, layer).unwrap_or_else(|err| panic!("{err}"));
+        let inserted = insert_q4k_layer_tensors(&mut scratch, weights, index, layer)
+            .unwrap_or_else(|err| panic!("{err}"));
         timings.dequant_ms += t0.elapsed().as_secs_f64() * 1000.0;
 
         let kv_entry = cache[layer].as_ref();
-        let (h_post_attn, new_kv) = match run_attention_block_decode_step_backend(larql_models::WeightsView::dense(weights),
+        let (h_post_attn, new_kv) = match run_attention_block_decode_step_backend(
+            larql_models::WeightsView::with_scratch(weights, &scratch),
             &h,
             layer,
             kv_entry,
@@ -208,19 +218,21 @@ pub fn predict_kquant_decode_step(
         ) {
             Some(t) => t,
             None => {
-                remove_layer_tensors(weights, inserted);
+                remove_layer_tensors(&mut scratch, inserted);
                 return None;
             }
         };
         cache[layer] = Some(new_kv);
 
-        let ffn = WeightFfn { weights };
+        let ffn = larql_compute::ffn::ViewFfn {
+            view: larql_models::WeightsView::with_scratch(weights, &scratch),
+        };
         let (h_post_ffn, _) = run_ffn(weights, &h_post_attn, layer, &ffn, false);
         let mut h_out =
             apply_per_layer_embedding(weights, &h_post_ffn, layer, ple_inputs.get(layer));
         apply_layer_scalar(weights, &mut h_out, layer);
 
-        remove_layer_tensors(weights, inserted);
+        remove_layer_tensors(&mut scratch, inserted);
 
         h = h_out;
     }
@@ -1128,7 +1140,7 @@ mod tests {
             .collect();
 
         let (h_new, _step_timings) =
-            predict_kquant_decode_step(&mut fx.weights, 4, &fx.index, &mut cache, token_ids.len())
+            predict_kquant_decode_step(&fx.weights, 4, &fx.index, &mut cache, token_ids.len())
                 .expect("decode step must succeed on a populated cache");
 
         assert_eq!(h_new.shape(), &[1, fx.weights.hidden_size]);
@@ -1145,10 +1157,10 @@ mod tests {
 
     #[test]
     fn predict_kquant_decode_step_rejects_mismatched_cache_length() {
-        let mut fx = Q4KTestFixtures::build();
+        let fx = Q4KTestFixtures::build();
         // Cache length doesn't match num_layers — function must return None.
         let mut bad_cache: CpuKvCache = vec![None; fx.weights.num_layers + 1];
-        let result = predict_kquant_decode_step(&mut fx.weights, 1, &fx.index, &mut bad_cache, 0);
+        let result = predict_kquant_decode_step(&fx.weights, 1, &fx.index, &mut bad_cache, 0);
         assert!(result.is_none());
     }
 
@@ -1167,7 +1179,7 @@ mod tests {
         let (_, mut cache_a, _) =
             predict_kquant_prefill(&mut fx_a.weights, &token_ids, &fx_a.index);
         let (h_staged, _) =
-            predict_kquant_decode_step(&mut fx_a.weights, 4, &fx_a.index, &mut cache_a, 3)
+            predict_kquant_decode_step(&fx_a.weights, 4, &fx_a.index, &mut cache_a, 3)
                 .expect("staged step");
 
         let mut fx_b = Q4KTestFixtures::build();
@@ -1237,7 +1249,7 @@ mod tests {
 
         let (_, mut cache_a, _) = predict_kquant_prefill(&mut weights_a, &token_ids, &index);
         let (h_staged, _) =
-            predict_kquant_decode_step(&mut weights_a, next, &index, &mut cache_a, token_ids.len())
+            predict_kquant_decode_step(&weights_a, next, &index, &mut cache_a, token_ids.len())
                 .expect("staged step");
 
         let mut weights_b = make_test_q4k_weights_rope_scaled();
@@ -1530,7 +1542,7 @@ mod branch_tests {
         let token_ids = vec![1u32, 2];
         let (_, mut cache, _) = predict_kquant_prefill(&mut weights, &token_ids, &index);
         let (h_new, _) =
-            predict_kquant_decode_step(&mut weights, 3, &index, &mut cache, token_ids.len())
+            predict_kquant_decode_step(&weights, 3, &index, &mut cache, token_ids.len())
                 .expect("SiLU dequant decode step must succeed");
         assert!(h_new.iter().all(|v| v.is_finite()));
     }

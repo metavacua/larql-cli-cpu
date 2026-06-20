@@ -25,7 +25,7 @@ use larql_inference::forward::{
     infer_patched, infer_patched_early_exit, KnnRouteMode, KNN_COSINE_THRESHOLD, KNN_VERIFY_TOPK,
 };
 use larql_inference::load_tokenizer;
-use larql_inference::vindex::insert_q4k_layer_tensors;
+use larql_inference::vindex::insert_q4k_layer_tensors_resident;
 use larql_vindex::PatchedVindex;
 use std::time::Instant;
 
@@ -91,7 +91,7 @@ fn main() {
         .min(last);
     eprintln!("Dequantising {num_layers} layers to f32 ...");
     for layer in 0..num_layers {
-        insert_q4k_layer_tensors(&mut weights, &index, layer).expect("dequant");
+        insert_q4k_layer_tensors_resident(&mut weights, &index, layer).expect("dequant");
     }
     let patched = PatchedVindex::new(index);
 

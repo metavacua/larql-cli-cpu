@@ -66,7 +66,7 @@ fn main() {
 
     let abs_position = prompt_ids.len();
     let (h_staged, _) = predict_kquant_decode_step(
-        &mut weights,
+        &weights,
         first_id,
         &index,
         &mut cache_staged,

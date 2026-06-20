@@ -88,7 +88,7 @@ pub fn run_ffn(
         Some(arch.post_attention_layernorm_key(layer))
     };
     let h_ffn = match pre_ffn_key {
-        Some(key) => apply_norm(&weights, h_post_attn, &key, norm_offset),
+        Some(key) => apply_norm(weights, h_post_attn, &key, norm_offset),
         None => rms_norm_for_arch(h_post_attn, None, norm_offset, &*weights.arch),
     };
     dump_f32("ffn_norm_out", &h_ffn);
@@ -104,7 +104,7 @@ pub fn run_ffn(
     let res_mult = arch.residual_multiplier();
     let h_out = if arch.has_post_norms() {
         let normed = match arch.post_feedforward_layernorm_key(layer) {
-            Some(key) => apply_norm(&weights, &ffn_out, &key, norm_offset),
+            Some(key) => apply_norm(weights, &ffn_out, &key, norm_offset),
             None => rms_norm_for_arch(&ffn_out, None, norm_offset, &*weights.arch),
         };
         if res_mult != 1.0 {

@@ -556,7 +556,9 @@ impl KvEngine for TurboQuantEngine {
         if matches!(executor.dispatch_kind(), ExecutorDispatchKind::Fused) {
             return self.prefill_quant(weights, ffn, index, token_ids, executor.backend());
         }
-        ensure_attn_tensors_dequantised(weights, index);
+        let mut scratch = larql_inference::DequantScratch::new();
+        ensure_attn_tensors_dequantised(&mut scratch, weights, index);
+        weights.tensors.extend(scratch);
         let num_layers = weights.num_layers;
         let mut h = embed_tokens_pub(weights, token_ids);
         self.layers.clear();
@@ -587,7 +589,9 @@ impl KvEngine for TurboQuantEngine {
         if matches!(executor.dispatch_kind(), ExecutorDispatchKind::Fused) {
             return self.decode_step_quant(weights, ffn, index, token_id, executor.backend());
         }
-        ensure_attn_tensors_dequantised(weights, index);
+        let mut scratch = larql_inference::DequantScratch::new();
+        ensure_attn_tensors_dequantised(&mut scratch, weights, index);
+        weights.tensors.extend(scratch);
         let num_layers = weights.num_layers;
         let abs_position = self.abs_position;
         let mut h = embed_tokens_pub(weights, &[token_id]);
@@ -627,7 +631,9 @@ impl TurboQuantEngine {
         token_ids: &[u32],
         backend: &dyn ComputeBackend,
     ) -> Option<Array2<f32>> {
-        ensure_attn_tensors_dequantised(weights, index);
+        let mut scratch = larql_inference::DequantScratch::new();
+        ensure_attn_tensors_dequantised(&mut scratch, weights, index);
+        weights.tensors.extend(scratch);
         let num_layers = weights.num_layers;
         let be = Some(backend);
         let mut h = embed_tokens_pub(weights, token_ids);
@@ -669,7 +675,9 @@ impl TurboQuantEngine {
         backend: &dyn ComputeBackend,
     ) -> Option<Array2<f32>> {
         use std::time::Instant;
-        ensure_attn_tensors_dequantised(weights, index);
+        let mut scratch = larql_inference::DequantScratch::new();
+        ensure_attn_tensors_dequantised(&mut scratch, weights, index);
+        weights.tensors.extend(scratch);
         let num_layers = weights.num_layers;
         let abs_position = self.abs_position;
         let timing = self.profiling;

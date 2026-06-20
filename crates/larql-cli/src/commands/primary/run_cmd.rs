@@ -784,7 +784,7 @@ fn run_with_moe_shards(
             // Dequantize attn + dense FFN to f32 for every layer, kept resident
             // for the whole generation (experts are not loaded on the client).
             for layer in 0..weights.num_layers {
-                larql_inference::vindex::insert_q4k_layer_tensors(&mut weights, &index, layer)
+                larql_inference::vindex::insert_q4k_layer_tensors_resident(&mut weights, &index, layer)
                     .map_err(|e| format!("failed to dequantize layer {layer} to f32: {e}"))?;
             }
             let moe_ffn = larql_inference::ffn::RemoteMoeFfn {

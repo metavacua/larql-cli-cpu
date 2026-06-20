@@ -333,7 +333,9 @@ impl KvEngine for StandardEngine {
         // Backend doesn't have a coarse path (e.g. f32 model, or
         // hybrid-MoE / cross-layer-KV models that don't fit the cached
         // shape). Fall back to per-layer dispatch with dequant.
-        larql_inference::vindex::ensure_attn_tensors_dequantised(weights, index);
+        let mut scratch = larql_inference::DequantScratch::new();
+        larql_inference::vindex::ensure_attn_tensors_dequantised(&mut scratch, weights, index);
+        weights.tensors.extend(scratch);
         self.do_prefill(weights, ffn, token_ids, Some(index))
     }
 
@@ -378,7 +380,9 @@ impl KvEngine for StandardEngine {
             }
         }
         // Per-layer dispatch fallback.
-        larql_inference::vindex::ensure_attn_tensors_dequantised(weights, index);
+        let mut scratch = larql_inference::DequantScratch::new();
+        larql_inference::vindex::ensure_attn_tensors_dequantised(&mut scratch, weights, index);
+        weights.tensors.extend(scratch);
         self.do_decode_step(weights, ffn, token_id, Some(index))
     }
 

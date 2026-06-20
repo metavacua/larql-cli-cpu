@@ -216,7 +216,9 @@ impl KvEngine for MarkovResidualCodecEngine {
         if let Some(hidden) = self.try_prefill_via_dispatch(weights, index, token_ids) {
             return Ok(hidden);
         }
-        ensure_attn_tensors_dequantised(weights, index);
+        let mut scratch = larql_inference::DequantScratch::new();
+        ensure_attn_tensors_dequantised(&mut scratch, weights, index);
+        weights.tensors.extend(scratch);
         let result = rs_prefill_codec_walk(
             weights,
             index,
@@ -247,7 +249,9 @@ impl KvEngine for MarkovResidualCodecEngine {
                     details: "decode_step_via_dispatch returned None".into(),
                 });
         }
-        ensure_attn_tensors_dequantised(weights, index);
+        let mut scratch = larql_inference::DequantScratch::new();
+        ensure_attn_tensors_dequantised(&mut scratch, weights, index);
+        weights.tensors.extend(scratch);
         let rs = self
             .store
             .take()

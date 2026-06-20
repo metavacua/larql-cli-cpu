@@ -116,7 +116,9 @@ impl KvEngine for NoCacheEngine {
         // `WalkFfn` constructed from the vindex (the bench passes
         // `NullFfn` because Q4K FFN is engine-side; using `_ffn` would
         // silently skip the FFN). See `kv-dispatch-quantization.md`.
-        larql_inference::vindex::ensure_attn_tensors_dequantised(weights, index);
+        let mut scratch = larql_inference::DequantScratch::new();
+        larql_inference::vindex::ensure_attn_tensors_dequantised(&mut scratch, weights, index);
+        weights.tensors.extend(scratch);
         let walk_ffn = larql_inference::vindex::WalkFfn::from_config(
             weights,
             index,
@@ -134,7 +136,9 @@ impl KvEngine for NoCacheEngine {
         token_id: u32,
         backend: &dyn larql_inference::ComputeBackend,
     ) -> Result<Array2<f32>, EngineError> {
-        larql_inference::vindex::ensure_attn_tensors_dequantised(weights, index);
+        let mut scratch = larql_inference::DequantScratch::new();
+        larql_inference::vindex::ensure_attn_tensors_dequantised(&mut scratch, weights, index);
+        weights.tensors.extend(scratch);
         let walk_ffn = larql_inference::vindex::WalkFfn::from_config(
             weights,
             index,
@@ -163,7 +167,9 @@ impl KvEngine for NoCacheEngine {
         // No K/V cache so we don't need to drive the per-layer loop
         // through the executor; the existing prefill (which honors the
         // FFN parameter) is the right path. Just dequant first.
-        larql_inference::vindex::ensure_attn_tensors_dequantised(weights, index);
+        let mut scratch = larql_inference::DequantScratch::new();
+        larql_inference::vindex::ensure_attn_tensors_dequantised(&mut scratch, weights, index);
+        weights.tensors.extend(scratch);
         self.prefill(weights, ffn, token_ids)
     }
 
@@ -175,7 +181,9 @@ impl KvEngine for NoCacheEngine {
         index: &larql_inference::larql_vindex::VectorIndex,
         token_id: u32,
     ) -> Result<Array2<f32>, EngineError> {
-        larql_inference::vindex::ensure_attn_tensors_dequantised(weights, index);
+        let mut scratch = larql_inference::DequantScratch::new();
+        larql_inference::vindex::ensure_attn_tensors_dequantised(&mut scratch, weights, index);
+        weights.tensors.extend(scratch);
         self.decode_step(weights, ffn, token_id)
     }
 

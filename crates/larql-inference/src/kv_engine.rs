@@ -542,7 +542,9 @@ pub trait RetrievalEngine: Send {
         index: &larql_vindex::VectorIndex,
         token_ids: &[u32],
     ) -> Result<Array2<f32>, EngineError> {
-        crate::vindex::ensure_attn_tensors_dequantised(weights, index);
+        let mut scratch = larql_models::DequantScratch::new();
+        crate::vindex::ensure_attn_tensors_dequantised(&mut scratch, weights, index);
+        weights.tensors.extend(scratch);
         self.prefill(weights, token_ids)
     }
 
@@ -555,7 +557,9 @@ pub trait RetrievalEngine: Send {
         index: &larql_vindex::VectorIndex,
         token_id: u32,
     ) -> Result<Array2<f32>, EngineError> {
-        crate::vindex::ensure_attn_tensors_dequantised(weights, index);
+        let mut scratch = larql_models::DequantScratch::new();
+        crate::vindex::ensure_attn_tensors_dequantised(&mut scratch, weights, index);
+        weights.tensors.extend(scratch);
         self.decode_step(weights, token_id)
     }
 

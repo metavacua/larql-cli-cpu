@@ -600,7 +600,9 @@ impl KvEngine for UnlimitedContextEngine {
             return Ok(hidden);
         }
         self.kv_handle = None;
-        ensure_attn_tensors_dequantised(weights, index);
+        let mut scratch = larql_inference::DequantScratch::new();
+        ensure_attn_tensors_dequantised(&mut scratch, weights, index);
+        weights.tensors.extend(scratch);
         self.process_quant(weights, index, token_ids, backend)
             .ok_or_else(|| EngineError::BackendFailure {
                 details: "process_quant returned None during prefill_quant".into(),
@@ -627,7 +629,9 @@ impl KvEngine for UnlimitedContextEngine {
                     details: "decode_step_via_dispatch returned None".into(),
                 });
         }
-        ensure_attn_tensors_dequantised(weights, index);
+        let mut scratch = larql_inference::DequantScratch::new();
+        ensure_attn_tensors_dequantised(&mut scratch, weights, index);
+        weights.tensors.extend(scratch);
         self.process_quant(weights, index, &[token_id], backend)
             .ok_or_else(|| EngineError::BackendFailure {
                 details: "process_quant returned None during decode_step_quant".into(),
@@ -668,7 +672,9 @@ impl KvEngine for UnlimitedContextEngine {
         if matches!(executor.dispatch_kind(), ExecutorDispatchKind::Fused) {
             return self.prefill_quant(weights, ffn, index, token_ids, executor.backend());
         }
-        ensure_attn_tensors_dequantised(weights, index);
+        let mut scratch = larql_inference::DequantScratch::new();
+        ensure_attn_tensors_dequantised(&mut scratch, weights, index);
+        weights.tensors.extend(scratch);
         self.process_via_executor(weights, executor, ffn, token_ids)
             .ok_or_else(|| EngineError::BackendFailure {
                 details: "process_via_executor returned None during prefill_quant_via_executor"
@@ -693,7 +699,9 @@ impl KvEngine for UnlimitedContextEngine {
         if matches!(executor.dispatch_kind(), ExecutorDispatchKind::Fused) {
             return self.decode_step_quant(weights, ffn, index, token_id, executor.backend());
         }
-        ensure_attn_tensors_dequantised(weights, index);
+        let mut scratch = larql_inference::DequantScratch::new();
+        ensure_attn_tensors_dequantised(&mut scratch, weights, index);
+        weights.tensors.extend(scratch);
         self.process_via_executor(weights, executor, ffn, &[token_id])
             .ok_or_else(|| EngineError::BackendFailure {
                 details: "process_via_executor returned None during decode_step_quant_via_executor"

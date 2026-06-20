@@ -30,7 +30,9 @@ impl MarkovResidualCodecEngine {
         index: &larql_inference::larql_vindex::VectorIndex,
         token_ids: &[u32],
     ) -> Option<Array2<f32>> {
-        ensure_attn_tensors_dequantised(weights, index);
+        let mut scratch = larql_inference::DequantScratch::new();
+        ensure_attn_tensors_dequantised(&mut scratch, weights, index);
+        weights.tensors.extend(scratch);
 
         let backend = executor.backend();
         let num_layers = weights.num_layers;
@@ -104,7 +106,9 @@ impl MarkovResidualCodecEngine {
         index: &larql_inference::larql_vindex::VectorIndex,
         token_id: u32,
     ) -> Option<Array2<f32>> {
-        ensure_attn_tensors_dequantised(weights, index);
+        let mut scratch = larql_inference::DequantScratch::new();
+        ensure_attn_tensors_dequantised(&mut scratch, weights, index);
+        weights.tensors.extend(scratch);
 
         let backend = executor.backend();
         let rs = self.store.take()?;

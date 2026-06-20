@@ -70,7 +70,7 @@ fn main() {
     let mut full_ids = prompt_ids.clone();
     full_ids.push(first_id);
     let mut gold = PerLayerDecodeState::with_capacity(weights.num_layers);
-    let _ = predict_kquant_prefill_with_state(&mut weights, &full_ids, &index, Some(&mut gold));
+    let _ = predict_kquant_prefill_with_state(&weights, &full_ids, &index, Some(&mut gold));
 
     // Direct: fresh prompt-only prefill cache, one direct step with capture.
     let (_h2, mut cache, _) = predict_kquant_prefill(&mut weights, &prompt_ids, &index);

@@ -47,21 +47,22 @@ where
         ));
     }
 
+    let mut scratch = larql_models::DequantScratch::new();
     let mut h = embed_tokens_pub(weights, token_ids);
     let ple_inputs = precompute_per_layer_inputs(weights, &h, token_ids);
     let mut kv_cache: HashMap<usize, SharedKV> = HashMap::new();
 
     for layer in 0..weights.num_layers {
-        let inserted = insert_q4k_layer_tensors(weights, index, layer)?;
+        let inserted = insert_q4k_layer_tensors(&mut scratch, weights, index, layer)?;
         let shared_kv = weights
             .arch
             .kv_shared_source_layer(layer)
             .and_then(|src| kv_cache.get(&src));
-        let ffn_backend = crate::ffn::WeightFfn { weights };
+        let view = larql_models::WeightsView::with_scratch(weights, &scratch);
+        let ffn_backend = crate::ffn::ViewFfn { view };
 
         let step = if layer == target_layer {
-            run_target_layer(
-                weights,
+            run_target_layer(view.canonical(),
                 &h,
                 layer,
                 &ffn_backend,
@@ -69,7 +70,8 @@ where
                 shared_kv,
             )?
         } else {
-            run_layer_with_ffn(larql_models::WeightsView::dense(weights),
+            run_layer_with_ffn(
+                view,
                 &h,
                 layer,
                 &ffn_backend,
@@ -81,14 +83,14 @@ where
         };
 
         let Some((h_new, kv_out)) = step else {
-            remove_layer_tensors(weights, inserted);
+            remove_layer_tensors(&mut scratch, inserted);
             return Err(format!("{label} failed at layer {layer}"));
         };
         h = h_new;
         if let Some(kv) = kv_out {
             kv_cache.insert(layer, kv);
         }
-        remove_layer_tensors(weights, inserted);
+        remove_layer_tensors(&mut scratch, inserted);
     }
 
     Ok(h)
