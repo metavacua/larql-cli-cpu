@@ -130,7 +130,7 @@ pub fn predict_kquant_prefill_with_state(
         // CPU BLAS path for the dequantised f32 tensors that
         // `insert_q4k_layer_tensors` just placed in `weights.tensors`.
         let (h_post_attn, k_rope, v_final) =
-            match run_attention_with_kv_backend(weights, &h, layer, None) {
+            match run_attention_with_kv_backend(larql_models::WeightsView::dense(weights), &h, layer, None) {
                 Some(t) => t,
                 None => {
                     remove_layer_tensors(weights, inserted);

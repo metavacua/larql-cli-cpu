@@ -151,12 +151,12 @@ pub fn run_attention_with_kv(
     h: &Array2<f32>,
     layer: usize,
 ) -> Option<(Array2<f32>, Array2<f32>, Array2<f32>)> {
-    run_attention_with_kv_backend(weights, h, layer, None)
+    run_attention_with_kv_backend(larql_models::WeightsView::dense(weights), h, layer, None)
 }
 
 /// Run attention with optional compute backend for accelerated projections.
 pub fn run_attention_with_kv_backend(
-    weights: &larql_models::ModelWeights,
+    weights: larql_models::WeightsView,
     h: &Array2<f32>,
     layer: usize,
     backend: Option<&dyn crate::ComputeBackend>,
@@ -177,16 +177,16 @@ pub fn run_attention_with_kv_backend(
     let seq_len = h.shape()[0];
     let norm_off = arch.norm_weight_offset();
 
-    let h_norm = apply_norm(weights, h, &arch.input_layernorm_key(layer), norm_off);
-    let wq = weights.tensors.get(&arch.attn_q_key(layer))?;
-    let wk = weights.tensors.get(&arch.attn_k_key(layer))?;
-    let v_from_k = !weights.tensors.contains_key(&arch.attn_v_key(layer));
+    let h_norm = apply_norm(&weights, h, &arch.input_layernorm_key(layer), norm_off);
+    let wq = weights.tensor(&arch.attn_q_key(layer))?;
+    let wk = weights.tensor(&arch.attn_k_key(layer))?;
+    let v_from_k = !weights.has_tensor(&arch.attn_v_key(layer));
     let wv = if v_from_k {
         wk
     } else {
-        weights.tensors.get(&arch.attn_v_key(layer))?
+        weights.tensor(&arch.attn_v_key(layer))?
     };
-    let wo = weights.tensors.get(&arch.attn_o_key(layer))?;
+    let wo = weights.tensor(&arch.attn_o_key(layer))?;
 
     let (mut q, mut k, mut v) = (
         crate::dot_proj_gpu(&h_norm, wq, backend),
@@ -276,7 +276,7 @@ pub fn run_attention_with_kv_backend(
     let rm = arch.residual_multiplier();
     let h_out = if arch.has_post_norms() {
         let n = apply_norm(
-            weights,
+            &weights,
             &o,
             &arch.post_attention_layernorm_key(layer),
             norm_off,
@@ -434,7 +434,7 @@ mod tests {
         // `run_attention_block_gpu`).
         let weights = larql_models::test_fixtures::make_gemma3_test_weights();
         let input = h(2, weights.hidden_size);
-        let (h_out, k, v) = run_attention_with_kv_backend(&weights, &input, 0, None).unwrap();
+        let (h_out, k, v) = run_attention_with_kv_backend(larql_models::WeightsView::dense(&weights), &input, 0, None).unwrap();
         assert_eq!(h_out.shape(), &[2, weights.hidden_size]);
         let kv_dim = weights.num_kv_heads * weights.head_dim;
         assert_eq!(k.shape(), &[2, kv_dim]);
@@ -459,7 +459,7 @@ mod tests {
         let input = h(5, weights.hidden_size);
         for layer in 0..weights.num_layers {
             let engine =
-                run_attention_with_kv_backend(&weights, &input, layer, Some(&crate::CpuBackend))
+                run_attention_with_kv_backend(larql_models::WeightsView::dense(&weights), &input, layer, Some(&crate::CpuBackend))
                     .expect("engine attention");
             let recompute = crate::attention::block::run_attention_block_with_kv_out(
                 &weights, &input, layer, false, None,
@@ -480,7 +480,7 @@ mod tests {
         // `run_attention_with_kv_backend`.
         let weights = larql_models::test_fixtures::make_starcoder2_test_weights();
         let input = h(2, weights.hidden_size);
-        let (h_out, _, _) = run_attention_with_kv_backend(&weights, &input, 0, None).unwrap();
+        let (h_out, _, _) = run_attention_with_kv_backend(larql_models::WeightsView::dense(&weights), &input, 0, None).unwrap();
         assert_eq!(h_out.shape(), &[2, weights.hidden_size]);
         assert!(h_out.iter().all(|x| x.is_finite()));
     }
@@ -492,9 +492,9 @@ mod tests {
         // post-norm + QK-norm branches.
         let weights = larql_models::test_fixtures::make_gemma3_test_weights();
         let input = h(2, weights.hidden_size);
-        let (h_no, _, _) = run_attention_with_kv_backend(&weights, &input, 0, None).unwrap();
+        let (h_no, _, _) = run_attention_with_kv_backend(larql_models::WeightsView::dense(&weights), &input, 0, None).unwrap();
         let (h_cpu, _, _) =
-            run_attention_with_kv_backend(&weights, &input, 0, Some(&crate::CpuBackend)).unwrap();
+            run_attention_with_kv_backend(larql_models::WeightsView::dense(&weights), &input, 0, Some(&crate::CpuBackend)).unwrap();
         for (a, b) in h_no.iter().zip(h_cpu.iter()) {
             assert!((a - b).abs() < 1e-4, "diverged: {a} vs {b}");
         }
@@ -525,9 +525,9 @@ mod tests {
     fn run_attention_with_kv_backend_matches_no_backend() {
         let weights = make_test_weights();
         let input = h(2, weights.hidden_size);
-        let (h_no, k_no, v_no) = run_attention_with_kv_backend(&weights, &input, 0, None).unwrap();
+        let (h_no, k_no, v_no) = run_attention_with_kv_backend(larql_models::WeightsView::dense(&weights), &input, 0, None).unwrap();
         let (h_cpu, k_cpu, v_cpu) =
-            run_attention_with_kv_backend(&weights, &input, 0, Some(&crate::CpuBackend)).unwrap();
+            run_attention_with_kv_backend(larql_models::WeightsView::dense(&weights), &input, 0, Some(&crate::CpuBackend)).unwrap();
         for (a, b) in h_no.iter().zip(h_cpu.iter()) {
             assert!((a - b).abs() < 1e-4);
         }

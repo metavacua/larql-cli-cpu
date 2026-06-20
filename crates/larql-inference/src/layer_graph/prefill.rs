@@ -20,7 +20,7 @@ pub fn prefill_with_kv(
 
     for layer in layer_range {
         let (h_post_attn, k_rope, v) =
-            crate::attention::gpu::run_attention_with_kv_backend(weights, &h, layer, Some(backend))
+            crate::attention::gpu::run_attention_with_kv_backend(larql_models::WeightsView::dense(weights), &h, layer, Some(backend))
                 .unwrap();
 
         if backend.has_kv_cache() {

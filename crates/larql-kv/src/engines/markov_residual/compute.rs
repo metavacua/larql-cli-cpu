@@ -97,7 +97,7 @@ pub fn rs_prefill(
 
     for layer in 0..num_layers {
         stored.push(h.clone());
-        let (h_post_attn, _k, _v) = run_attention_with_kv_backend(weights, &h, layer, be)
+        let (h_post_attn, _k, _v) = run_attention_with_kv_backend(larql_inference::WeightsView::dense(weights), &h, layer, be)
             .expect("attention failed during MarkovRS prefill");
         let bffn = BackendFfn { weights, backend };
         let h_out = crate::engines::layer_ffn_or_moe(weights, &h_post_attn, layer, &bffn, moe_ffn);

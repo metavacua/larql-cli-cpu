@@ -428,7 +428,7 @@ impl KvEngine for TurboQuantEngine {
         self.layers.clear();
 
         for layer in 0..num_layers {
-            let (h_post_attn, k, v) = run_attention_with_kv_backend(weights, &h, layer, be)
+            let (h_post_attn, k, v) = run_attention_with_kv_backend(larql_inference::WeightsView::dense(weights), &h, layer, be)
                 .ok_or_else(|| EngineError::BackendFailure {
                     details: "run_attention_with_kv_backend returned None".into(),
                 })?;
@@ -639,7 +639,7 @@ impl TurboQuantEngine {
             .with_backend(backend);
 
         for layer in 0..num_layers {
-            let (h_post_attn, k, v) = run_attention_with_kv_backend(weights, &h, layer, be)?;
+            let (h_post_attn, k, v) = run_attention_with_kv_backend(larql_inference::WeightsView::dense(weights), &h, layer, be)?;
             self.layers
                 .push(CompressedLayer::compress(&(k, v), &self.tq));
 

@@ -475,7 +475,7 @@ pub fn kv_prefill_run(
         hook.on_pre_layer(layer, &h);
 
         let (mut h_post_attn, k_rope, v) =
-            run_attention_with_kv_backend(weights, &h, layer, backend)?;
+            run_attention_with_kv_backend(larql_inference::WeightsView::dense(weights), &h, layer, backend)?;
         cache.layers[layer] = Some((k_rope, v));
         cache.clip_layer(layer);
 
@@ -722,7 +722,7 @@ where
 
     let mut h = embed_tokens_pub(weights, prompt_ids);
     for layer in 0..num_layers {
-        let (h_post_attn, k_rope, v) = match run_attention_with_kv_backend(weights, &h, layer, None)
+        let (h_post_attn, k_rope, v) = match run_attention_with_kv_backend(larql_inference::WeightsView::dense(weights), &h, layer, None)
         {
             Some(t) => t,
             None => return Vec::new(),

@@ -408,7 +408,7 @@ impl KvDispatch for CpuBackend {
     ) -> Option<(Array2<f32>, KvHandle)> {
         // See `attention_step` doc for the `_index` convention.
         let (h_post_attn, k_rope, v) =
-            run_attention_with_kv_backend(weights, tokens_embedded, layer, Some(self))?;
+            run_attention_with_kv_backend(larql_models::WeightsView::dense(weights), tokens_embedded, layer, Some(self))?;
         let kv_dim = k_rope.shape()[1];
         let mut handle = CpuKvHandle::new(layer, kv_dim);
         handle.replace_state((k_rope, v));

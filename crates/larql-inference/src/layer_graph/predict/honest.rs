@@ -160,8 +160,7 @@ pub fn predict_honest(
                     let mut h_cpu = h.clone();
                     for (rel_idx, abs_layer) in layer_range.clone().enumerate() {
                         let (h_post_attn, k_rope, v) =
-                            crate::attention::gpu::run_attention_with_kv_backend(
-                                weights,
+                            crate::attention::gpu::run_attention_with_kv_backend(larql_models::WeightsView::dense(weights),
                                 &h_cpu,
                                 abs_layer,
                                 Some(backend),
