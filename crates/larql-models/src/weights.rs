@@ -9,6 +9,73 @@ use std::collections::{HashMap, HashSet};
 /// Owned: from safetensors loading (heap). Shared: from mmap (zero-copy).
 pub type WeightArray = ArcArray2<f32>;
 
+/// Engine-owned, per-forward dequantisation scratch: lazily-dequantised Q4K
+/// layer tensors (attention / FFN → f32), keyed by the **same** tensor names
+/// as [`ModelWeights::tensors`] (`arch.attn_q_key(layer)` etc.).
+///
+/// Lives in the **engine** — per-forward derived state, the same category as
+/// the KV cache — NOT in `ModelWeights`. This keeps `ModelWeights` truly
+/// immutable so it can be shared as `Arc<ModelWeights>` across **concurrent**
+/// generations (each engine its own scratch, no lock, no race). See ROADMAP
+/// "P-B.1" for why the interior-mutable alternative was rejected on the
+/// server-serialisation evidence.
+///
+/// Eviction identity: the per-layer memory bound inserts and removes entries
+/// under these same keys, and [`WeightsView::tensor`] resolves by them, so an
+/// insert for layer L and its post-L evict cancel exactly. (Guarded by a
+/// `resident_identity_tests` case that asserts L's entry is *gone* after L's
+/// evict, not merely that the resolver still finds it.)
+pub type DequantScratch = HashMap<String, WeightArray>;
+
+/// Read-only resolver bundling canonical [`ModelWeights`] with the engine's
+/// [`DequantScratch`]. The single read path for layer weight tensors on the
+/// quant forward.
+///
+/// Derefs to `ModelWeights`, so every non-tensor access (`view.hidden_size`,
+/// `view.arch`, `view.embed`, …) works unchanged; only the layer-tensor reads
+/// switch from `weights.tensors.get(key)` to [`tensor`](Self::tensor), which
+/// resolves **scratch first, then canonical**. Returns a borrow (no clone, no
+/// lock): the dense f32 path, whose scratch is always empty, pays nothing
+/// beyond one extra empty-map lookup.
+pub struct WeightsView<'a> {
+    weights: &'a ModelWeights,
+    scratch: &'a DequantScratch,
+}
+
+impl<'a> WeightsView<'a> {
+    /// Bundle canonical weights with the engine's per-forward dequant scratch.
+    pub fn new(weights: &'a ModelWeights, scratch: &'a DequantScratch) -> Self {
+        Self { weights, scratch }
+    }
+
+    /// Resolve a layer tensor by key: engine scratch first, then canonical
+    /// `tensors`. The drop-in replacement for `weights.tensors.get(key)` on
+    /// the quant forward.
+    pub fn tensor(&self, key: &str) -> Option<&WeightArray> {
+        self.scratch
+            .get(key)
+            .or_else(|| self.weights.tensors.get(key))
+    }
+
+    /// Whether a layer tensor resolves via [`tensor`](Self::tensor).
+    pub fn has_tensor(&self, key: &str) -> bool {
+        self.scratch.contains_key(key) || self.weights.tensors.contains_key(key)
+    }
+
+    /// The canonical (immutable) weights, for the rare caller that needs the
+    /// `&ModelWeights` directly rather than via `Deref`.
+    pub fn canonical(&self) -> &'a ModelWeights {
+        self.weights
+    }
+}
+
+impl std::ops::Deref for WeightsView<'_> {
+    type Target = ModelWeights;
+    fn deref(&self) -> &ModelWeights {
+        self.weights
+    }
+}
+
 pub(crate) const PACKED_EXPERTS_GATE_UP_PROJ: &str = "experts.gate_up_proj";
 pub(crate) const PACKED_EXPERTS_DOWN_PROJ: &str = "experts.down_proj";
 
@@ -281,3 +348,62 @@ pub fn per_layer_ffn_key(layer: usize, entry: usize, component: &str) -> String 
 pub const PER_LAYER_FFN_GATE_UP: &str = "gate_up";
 /// Component string for the down half of a per-layer FFN entry.
 pub const PER_LAYER_FFN_DOWN: &str = "down";
+
+#[cfg(test)]
+mod weights_view_tests {
+    use super::*;
+    use crate::test_fixtures::make_test_weights;
+    use ndarray::arr2;
+
+    /// The resolver reads scratch-first-then-canonical, so an engine's
+    /// dequant scratch transparently shadows the canonical map for the same
+    /// key, and canonical-only keys still fall through. This is the contract
+    /// the 19 read sites migrate onto in P-B.1.
+    #[test]
+    fn weights_view_resolves_scratch_before_canonical() {
+        let mut weights = make_test_weights();
+        let canonical = arr2(&[[1.0f32, 2.0]]).into_shared();
+        let scratch_override = arr2(&[[9.0f32, 9.0]]).into_shared();
+        let scratch_only = arr2(&[[3.0f32]]).into_shared();
+        weights.tensors.insert("shared".into(), canonical.clone());
+        weights.tensors.insert("canon_only".into(), canonical.clone());
+
+        let mut scratch = DequantScratch::new();
+        scratch.insert("shared".into(), scratch_override.clone()); // shadows canonical
+        scratch.insert("scratch_only".into(), scratch_only.clone());
+
+        let view = WeightsView::new(&weights, &scratch);
+
+        // scratch shadows canonical for the same key
+        assert_eq!(view.tensor("shared").unwrap(), &scratch_override);
+        // scratch-only resolves
+        assert_eq!(view.tensor("scratch_only").unwrap(), &scratch_only);
+        // canonical-only falls through
+        assert_eq!(view.tensor("canon_only").unwrap(), &canonical);
+        // absent everywhere
+        assert!(view.tensor("nope").is_none());
+
+        assert!(view.has_tensor("shared"));
+        assert!(view.has_tensor("scratch_only"));
+        assert!(view.has_tensor("canon_only"));
+        assert!(!view.has_tensor("nope"));
+
+        // Deref: non-tensor fields reachable through the view unchanged.
+        assert_eq!(view.hidden_size, weights.hidden_size);
+        assert_eq!(view.canonical().num_layers, weights.num_layers);
+    }
+
+    /// An empty scratch (the dense f32 path's steady state) makes the view a
+    /// transparent pass-through over canonical `tensors` — the "dense pays
+    /// nothing" property.
+    #[test]
+    fn weights_view_empty_scratch_is_passthrough() {
+        let mut weights = make_test_weights();
+        let w = arr2(&[[1.0f32]]).into_shared();
+        weights.tensors.insert("k".into(), w.clone());
+        let scratch = DequantScratch::new();
+        let view = WeightsView::new(&weights, &scratch);
+        assert_eq!(view.tensor("k").unwrap(), &w);
+        assert!(view.tensor("absent").is_none());
+    }
+}
