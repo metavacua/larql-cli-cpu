@@ -188,8 +188,7 @@ pub(super) fn capture_layer_input_hidden(
                 .kv_shared_source_layer(layer)
                 .and_then(|src| kv_cache.get(&src));
             let ffn = WeightFfn { weights };
-            run_layer_with_ffn(
-                weights,
+            run_layer_with_ffn(larql_inference::WeightsView::dense(weights),
                 &h,
                 layer,
                 &ffn,
@@ -238,8 +237,7 @@ pub(super) fn capture_prev_ffn_feature_keys(
                 .kv_shared_source_layer(layer)
                 .and_then(|src| kv_cache.get(&src));
             let ffn = WeightFfn { weights };
-            run_layer_with_ffn(
-                weights,
+            run_layer_with_ffn(larql_inference::WeightsView::dense(weights),
                 &h,
                 layer,
                 &ffn,
@@ -304,8 +302,7 @@ pub(super) fn capture_ffn_first_feature_keys(
                 .kv_shared_source_layer(layer)
                 .and_then(|src| kv_cache.get(&src));
             let ffn = WeightFfn { weights };
-            run_layer_with_ffn(
-                weights,
+            run_layer_with_ffn(larql_inference::WeightsView::dense(weights),
                 &h,
                 layer,
                 &ffn,
@@ -347,8 +344,7 @@ pub(super) fn capture_attention_relation_rows(
                 .arch
                 .kv_shared_source_layer(layer)
                 .and_then(|src| kv_cache.get(&src));
-            let (_, _, all_weights) = run_attention_block_with_pre_o_and_all_attention_weights(
-                weights, &h, layer, shared_kv,
+            let (_, _, all_weights) = run_attention_block_with_pre_o_and_all_attention_weights(larql_models::WeightsView::dense(weights), &h, layer, shared_kv,
             )
             .ok_or_else(|| {
                 format!(
@@ -368,8 +364,7 @@ pub(super) fn capture_attention_relation_rows(
                 .kv_shared_source_layer(layer)
                 .and_then(|src| kv_cache.get(&src));
             let ffn = WeightFfn { weights };
-            run_layer_with_ffn(
-                weights,
+            run_layer_with_ffn(larql_inference::WeightsView::dense(weights),
                 &h,
                 layer,
                 &ffn,
@@ -413,8 +408,7 @@ pub(super) fn capture_reduced_qk_attention_rows(
                 .kv_shared_source_layer(layer)
                 .and_then(|src| kv_cache.get(&src));
             let (_, _, all_weights) =
-                run_attention_block_with_pre_o_and_reduced_qk_attention_weights(
-                    weights, &h, layer, shared_kv, qk_rank,
+                run_attention_block_with_pre_o_and_reduced_qk_attention_weights(larql_models::WeightsView::dense(weights), &h, layer, shared_kv, qk_rank,
                 )
                 .ok_or_else(|| {
                     format!(
@@ -438,8 +432,7 @@ pub(super) fn capture_reduced_qk_attention_rows(
                 .kv_shared_source_layer(layer)
                 .and_then(|src| kv_cache.get(&src));
             let ffn = WeightFfn { weights };
-            run_layer_with_ffn(
-                weights,
+            run_layer_with_ffn(larql_inference::WeightsView::dense(weights),
                 &h,
                 layer,
                 &ffn,

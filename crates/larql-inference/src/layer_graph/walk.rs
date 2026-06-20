@@ -22,7 +22,7 @@ impl<'a> LayerGraph for WalkLayerGraph<'a> {
         layer: usize,
     ) -> Option<LayerOutput> {
         let (h_post_attn, _attn_proj, _) =
-            crate::attention::run_attention_block_gpu(weights, h, layer, false, self.backend)?;
+            crate::attention::run_attention_block_gpu(larql_models::WeightsView::dense(weights), h, layer, false, self.backend)?;
         let (h_out, _) = crate::forward::run_ffn(weights, &h_post_attn, layer, self.ffn, false);
         Some(LayerOutput {
             residual: h_out,
@@ -68,7 +68,7 @@ impl<'a> LayerGraph for PipelinedLayerGraph<'a> {
 
         // Attention: CPU BLAS (fast, no GPU overhead)
         let (h_post_attn, _attn_proj, _) =
-            crate::attention::run_attention_block_gpu(weights, h, layer, false, None)?;
+            crate::attention::run_attention_block_gpu(larql_models::WeightsView::dense(weights), h, layer, false, None)?;
 
         // FFN: use WalkFfn which handles Q4 dispatch internally.
         // WalkFfn checks for Q4 interleaved data and routes to Metal Q4

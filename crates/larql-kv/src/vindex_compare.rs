@@ -161,7 +161,7 @@ pub fn forward_to_logits_traced(
         let walk_ffn = WalkFfn::new_unlimited(weights, index).with_dispatch_trace();
 
         if let Some((h_new, _, kv_out)) =
-            run_layer_with_ffn(weights, &h, layer, &walk_ffn, false, None, shared_kv)
+            run_layer_with_ffn(larql_inference::WeightsView::dense(weights), &h, layer, &walk_ffn, false, None, shared_kv)
         {
             h = h_new;
             if let Some(kv) = kv_out {

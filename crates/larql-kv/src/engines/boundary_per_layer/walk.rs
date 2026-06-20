@@ -163,8 +163,7 @@ pub(super) fn run_decode(
             }
             let (k_buf, v_buf) = &mut bufs[layer];
             let inplace = if inplace_enabled {
-                larql_inference::attention::run_attention_block_decode_step_auto_inplace(
-                    weights,
+                larql_inference::attention::run_attention_block_decode_step_auto_inplace(weights,
                     &h_new,
                     layer,
                     k_buf,
@@ -187,8 +186,7 @@ pub(super) fn run_decode(
                         v_buf.slice(s![..s_hot, ..]).to_owned(),
                     );
                     let (h, new_kv) =
-                        larql_inference::attention::run_attention_block_decode_step_auto(
-                            weights,
+                        larql_inference::attention::run_attention_block_decode_step_auto(weights,
                             &h_new,
                             layer,
                             Some(&prior),
@@ -244,8 +242,7 @@ pub(super) fn run_decode(
             };
 
             let (h_post_attn, new_kv) =
-                larql_inference::attention::run_attention_block_decode_step_auto(
-                    weights,
+                larql_inference::attention::run_attention_block_decode_step_auto(weights,
                     &h_new,
                     layer,
                     Some(&(k_full, v_full)),

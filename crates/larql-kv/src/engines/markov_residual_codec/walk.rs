@@ -222,8 +222,7 @@ pub fn rs_decode_step_codec_walk(
             abs_position,
         );
         let (h_post_attn, new_kv_full) = native_result.or_else(|| {
-            larql_inference::attention::run_attention_block_decode_step_auto(
-                weights,
+            larql_inference::attention::run_attention_block_decode_step_auto(weights,
                 &h_new,
                 layer,
                 Some(&kv_pair),

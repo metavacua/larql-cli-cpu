@@ -11,7 +11,7 @@ use ndarray::Array2;
 /// GPU-accelerated attention block. Same as `run_attention_block` but routes
 /// Q/K/V/O projections through the ComputeBackend (Metal, CUDA, or CPU).
 pub fn run_attention_block_gpu(
-    weights: &larql_models::ModelWeights,
+    weights: larql_models::WeightsView,
     h: &Array2<f32>,
     layer: usize,
     capture_attention: bool,
@@ -35,17 +35,17 @@ pub fn run_attention_block_gpu(
     let norm_offset = arch.norm_weight_offset();
 
     let h_norm =
-        crate::forward::apply_norm(weights, h, &arch.input_layernorm_key(layer), norm_offset);
+        crate::forward::apply_norm(&weights, h, &arch.input_layernorm_key(layer), norm_offset);
 
-    let w_q = weights.tensors.get(&arch.attn_q_key(layer))?;
-    let w_k = weights.tensors.get(&arch.attn_k_key(layer)).unwrap();
-    let v_from_k = !weights.tensors.contains_key(&arch.attn_v_key(layer));
+    let w_q = weights.tensor(&arch.attn_q_key(layer))?;
+    let w_k = weights.tensor(&arch.attn_k_key(layer)).unwrap();
+    let v_from_k = !weights.has_tensor(&arch.attn_v_key(layer));
     let w_v = if v_from_k {
         w_k
     } else {
-        weights.tensors.get(&arch.attn_v_key(layer)).unwrap()
+        weights.tensor(&arch.attn_v_key(layer)).unwrap()
     };
-    let w_o = weights.tensors.get(&arch.attn_o_key(layer)).unwrap();
+    let w_o = weights.tensor(&arch.attn_o_key(layer)).unwrap();
 
     let mut q_full = dot_proj_gpu(&h_norm, w_q, backend);
     let mut k_full = dot_proj_gpu(&h_norm, w_k, backend);
@@ -124,8 +124,7 @@ pub fn run_attention_block_gpu(
 
     let res_mult = arch.residual_multiplier();
     let h_post_attn = if arch.has_post_norms() {
-        let normed = crate::forward::apply_norm(
-            weights,
+        let normed = crate::forward::apply_norm(&weights,
             &attn_projected,
             &arch.post_attention_layernorm_key(layer),
             norm_offset,
@@ -342,7 +341,7 @@ mod tests {
         let weights = make_test_weights();
         let input = h(2, weights.hidden_size);
         let (h_post, attn_proj, attn_w) =
-            run_attention_block_gpu(&weights, &input, 0, false, None).unwrap();
+            run_attention_block_gpu(larql_models::WeightsView::dense(&weights), &input, 0, false, None).unwrap();
         assert_eq!(h_post.shape(), &[2, weights.hidden_size]);
         assert_eq!(attn_proj.shape()[0], 2);
         assert!(attn_w.is_none());
@@ -352,9 +351,9 @@ mod tests {
     fn run_attention_block_gpu_with_cpu_backend_matches_no_backend() {
         let weights = make_test_weights();
         let input = h(2, weights.hidden_size);
-        let (h_no, _, _) = run_attention_block_gpu(&weights, &input, 0, false, None).unwrap();
+        let (h_no, _, _) = run_attention_block_gpu(larql_models::WeightsView::dense(&weights), &input, 0, false, None).unwrap();
         let (h_cpu, _, _) =
-            run_attention_block_gpu(&weights, &input, 0, false, Some(&crate::CpuBackend)).unwrap();
+            run_attention_block_gpu(larql_models::WeightsView::dense(&weights), &input, 0, false, Some(&crate::CpuBackend)).unwrap();
         for (a, b) in h_no.iter().zip(h_cpu.iter()) {
             assert!(
                 (a - b).abs() < 1e-4,
@@ -367,7 +366,7 @@ mod tests {
     fn run_attention_block_gpu_capture_attention_returns_weights() {
         let weights = make_test_weights();
         let input = h(3, weights.hidden_size);
-        let (_, _, attn_w) = run_attention_block_gpu(&weights, &input, 0, true, None).unwrap();
+        let (_, _, attn_w) = run_attention_block_gpu(larql_models::WeightsView::dense(&weights), &input, 0, true, None).unwrap();
         let aw = attn_w.expect("capture=true must yield weights");
         assert_eq!(aw.heads.len(), weights.num_q_heads);
     }
@@ -378,7 +377,7 @@ mod tests {
         let input = h(2, weights.hidden_size);
         for layer in 0..weights.num_layers {
             let (h_out, _, _) =
-                run_attention_block_gpu(&weights, &input, layer, false, None).unwrap();
+                run_attention_block_gpu(larql_models::WeightsView::dense(&weights), &input, layer, false, None).unwrap();
             assert!(
                 h_out.iter().all(|v| v.is_finite()),
                 "layer {layer} non-finite"
@@ -391,7 +390,7 @@ mod tests {
         let weights = make_test_weights();
         let input = h(2, weights.hidden_size);
         let bogus = weights.num_layers + 5;
-        assert!(run_attention_block_gpu(&weights, &input, bogus, false, None).is_none());
+        assert!(run_attention_block_gpu(larql_models::WeightsView::dense(&weights), &input, bogus, false, None).is_none());
     }
 
     #[test]
@@ -412,7 +411,7 @@ mod tests {
         // rms_norm_heads branches and post-norm residual path.
         let weights = larql_models::test_fixtures::make_gemma3_test_weights();
         let input = h(2, weights.hidden_size);
-        let (h_post, _, _) = run_attention_block_gpu(&weights, &input, 0, false, None).unwrap();
+        let (h_post, _, _) = run_attention_block_gpu(larql_models::WeightsView::dense(&weights), &input, 0, false, None).unwrap();
         assert_eq!(h_post.shape(), &[2, weights.hidden_size]);
         assert!(h_post.iter().all(|v| v.is_finite()));
     }
@@ -422,7 +421,7 @@ mod tests {
         // Starcoder2 has Q/K/V/O bias keys → all four `add_bias` arms fire.
         let weights = larql_models::test_fixtures::make_starcoder2_test_weights();
         let input = h(2, weights.hidden_size);
-        let (h_post, _, _) = run_attention_block_gpu(&weights, &input, 0, false, None).unwrap();
+        let (h_post, _, _) = run_attention_block_gpu(larql_models::WeightsView::dense(&weights), &input, 0, false, None).unwrap();
         assert_eq!(h_post.shape(), &[2, weights.hidden_size]);
         assert!(h_post.iter().all(|v| v.is_finite()));
     }
@@ -461,8 +460,7 @@ mod tests {
             let engine =
                 run_attention_with_kv_backend(larql_models::WeightsView::dense(&weights), &input, layer, Some(&crate::CpuBackend))
                     .expect("engine attention");
-            let recompute = crate::attention::block::run_attention_block_with_kv_out(
-                &weights, &input, layer, false, None,
+            let recompute = crate::attention::block::run_attention_block_with_kv_out(larql_models::WeightsView::dense(&weights), &input, layer, false, None,
             )
             .expect("full-recompute attention");
             for (a, b) in engine.0.iter().zip(recompute.0.iter()) {

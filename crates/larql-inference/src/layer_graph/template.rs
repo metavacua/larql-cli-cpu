@@ -163,7 +163,7 @@ impl<'a> LayerGraph for GuidedWalkLayerGraph<'a> {
     ) -> Option<LayerOutput> {
         // Attention: dense matmul
         let (h_post_attn, _attn_proj, _) =
-            crate::attention::run_attention_block(weights, h, layer, false)?;
+            crate::attention::run_attention_block(larql_models::WeightsView::dense(weights), h, layer, false)?;
 
         // FFN: guided walk — score only template universe features
         let residual = guided_walk_ffn(weights, &h_post_attn, layer, self.universe, self.index);

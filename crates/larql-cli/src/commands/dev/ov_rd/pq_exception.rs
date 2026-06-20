@@ -617,7 +617,7 @@ fn fit_exception_catalogs(
         for layer in 0..weights.num_layers {
             let inserted = insert_q4k_layer_tensors(weights, index, layer)?;
             if let Some(layer_heads) = heads_by_layer.get(&layer) {
-                let (_, pre_o) = run_attention_block_with_pre_o(weights, &h, layer)
+                let (_, pre_o) = run_attention_block_with_pre_o(larql_models::WeightsView::dense(weights), &h, layer)
                     .ok_or_else(|| format!("pre-W_O capture failed at layer {layer}"))?;
                 let head_dim = weights.arch.head_dim_for_layer(layer);
                 for head in layer_heads {
@@ -674,7 +674,7 @@ fn fit_exception_catalogs(
             {
                 let ffn = WeightFfn { weights };
                 if let Some((h_new, _, _)) =
-                    run_layer_with_ffn(weights, &h, layer, &ffn, false, ple_inputs.get(layer), None)
+                    run_layer_with_ffn(larql_inference::WeightsView::dense(weights), &h, layer, &ffn, false, ple_inputs.get(layer), None)
                 {
                     h = h_new;
                 }
@@ -930,7 +930,7 @@ fn capture_head_position_sq_errors(
         let inserted = insert_q4k_layer_tensors(weights, index, layer)?;
         if layer == head.layer {
             let result = (|| -> Result<Vec<(usize, f64)>, Box<dyn std::error::Error>> {
-                let (_, pre_o) = run_attention_block_with_pre_o(weights, &h, layer)
+                let (_, pre_o) = run_attention_block_with_pre_o(larql_models::WeightsView::dense(weights), &h, layer)
                     .ok_or_else(|| format!("pre-W_O capture failed at layer {layer}"))?;
                 let head_dim = weights.arch.head_dim_for_layer(layer);
                 let start = head.head * head_dim;
@@ -963,7 +963,7 @@ fn capture_head_position_sq_errors(
         {
             let ffn = WeightFfn { weights };
             if let Some((h_new, _, _)) =
-                run_layer_with_ffn(weights, &h, layer, &ffn, false, ple_inputs.get(layer), None)
+                run_layer_with_ffn(larql_inference::WeightsView::dense(weights), &h, layer, &ffn, false, ple_inputs.get(layer), None)
             {
                 h = h_new;
             }

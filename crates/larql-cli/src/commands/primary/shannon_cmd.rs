@@ -1430,8 +1430,7 @@ fn forward_hidden(
             .arch
             .kv_shared_source_layer(layer)
             .and_then(|src| kv_cache.get(&src));
-        if let Some((h_new, _, kv_out)) = larql_inference::forward::run_layer_with_ffn(
-            weights,
+        if let Some((h_new, _, kv_out)) = larql_inference::forward::run_layer_with_ffn(larql_inference::WeightsView::dense(weights),
             &h,
             layer,
             &ffn,
@@ -1468,8 +1467,7 @@ fn forward_hidden_all_layers(
             .arch
             .kv_shared_source_layer(layer)
             .and_then(|src| kv_cache.get(&src));
-        if let Some((h_new, _, kv_out)) = larql_inference::forward::run_layer_with_ffn(
-            weights,
+        if let Some((h_new, _, kv_out)) = larql_inference::forward::run_layer_with_ffn(larql_inference::WeightsView::dense(weights),
             &h,
             layer,
             &ffn,

@@ -336,8 +336,7 @@ impl TurboQuantEngine {
 
             // Decode step returns updated K/V (prior + new token).
             let (h_post_attn, updated_kv) =
-                larql_inference::attention::run_attention_block_decode_step_auto(
-                    weights,
+                larql_inference::attention::run_attention_block_decode_step_auto(weights,
                     &h,
                     layer,
                     Some(&prior_kv),

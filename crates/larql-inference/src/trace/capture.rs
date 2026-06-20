@@ -76,8 +76,7 @@ pub fn trace_residuals(
             .kv_shared_source_layer(layer)
             .and_then(|src| kv_cache.get(&src));
         let mut hook = TraceLayerHook::default();
-        let Some((h_out, _, attn_weights, kv_out)) = run_layer_with_capture_hooked(
-            weights,
+        let Some((h_out, _, attn_weights, kv_out)) = run_layer_with_capture_hooked(larql_models::WeightsView::dense(weights),
             &h,
             layer,
             ffn,

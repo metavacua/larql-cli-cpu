@@ -195,8 +195,7 @@ fn forward_layer_range(
             .kv_shared_source_layer(layer)
             .and_then(|src| kv_cache.get(&src));
 
-        if let Some((h_new, _, kv_out)) = run_layer_with_ffn(
-            weights,
+        if let Some((h_new, _, kv_out)) = run_layer_with_ffn(larql_models::WeightsView::dense(weights),
             &h,
             layer,
             &ffn,

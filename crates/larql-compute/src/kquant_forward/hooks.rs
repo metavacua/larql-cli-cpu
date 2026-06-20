@@ -42,8 +42,7 @@ pub fn predict_kquant_hidden_hooked(
             .kv_shared_source_layer(layer)
             .and_then(|src| kv_cache.get(&src));
         let ffn_backend = crate::ffn::WeightFfn { weights };
-        let step = run_layer_with_capture_hooked(
-            weights,
+        let step = run_layer_with_capture_hooked(larql_models::WeightsView::dense(weights),
             &h,
             layer,
             &ffn_backend,

@@ -217,7 +217,7 @@ pub fn predict_honest(
         let walk_ffn = crate::vindex::WalkFfn::new_unlimited(weights, index);
         for layer in layer_range {
             let (h_post_attn, _, _) =
-                crate::attention::run_attention_block_gpu(weights, &h, layer, false, None).unwrap();
+                crate::attention::run_attention_block_gpu(larql_models::WeightsView::dense(weights), &h, layer, false, None).unwrap();
             let (h_out, _) =
                 crate::forward::run_ffn(weights, &h_post_attn, layer, &walk_ffn, false);
             h = h_out;

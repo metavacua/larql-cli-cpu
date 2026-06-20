@@ -44,7 +44,7 @@ fn main() {
     let mut h = larql_inference::forward::embed_tokens_pub(weights, &token_ids);
     for layer in 0..14 {
         let (h_pa, _, _) =
-            larql_inference::attention::run_attention_block_gpu(weights, &h, layer, false, None)
+            larql_inference::attention::run_attention_block_gpu(larql_inference::WeightsView::dense(weights), &h, layer, false, None)
                 .unwrap();
         let dense_ffn = larql_inference::WeightFfn { weights };
         let (h_out, _) =
@@ -54,7 +54,7 @@ fn main() {
 
     // Get the post-attention state at L14
     let (h_post_attn, _, _) =
-        larql_inference::attention::run_attention_block_gpu(weights, &h, 14, false, None).unwrap();
+        larql_inference::attention::run_attention_block_gpu(larql_inference::WeightsView::dense(weights), &h, 14, false, None).unwrap();
 
     // Dense FFN output (ground truth)
     let dense_ffn = larql_inference::WeightFfn { weights };

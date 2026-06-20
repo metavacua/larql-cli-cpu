@@ -57,7 +57,7 @@ mod tests {
         let weights = make_test_weights();
         let ffn = WeightFfn { weights: &weights };
         let input = h(3, weights.hidden_size);
-        let (h_out, _act, _kv) = run_layer_with_ffn(&weights, &input, 0, &ffn, false, None, None)
+        let (h_out, _act, _kv) = run_layer_with_ffn(larql_models::WeightsView::dense(&weights), &input, 0, &ffn, false, None, None)
             .expect("run_layer_with_ffn failed");
         assert_eq!(h_out.shape(), &[3, weights.hidden_size]);
     }
@@ -69,7 +69,7 @@ mod tests {
         let input = h(2, weights.hidden_size);
         for layer in 0..weights.num_layers {
             assert!(
-                run_layer_with_ffn(&weights, &input, layer, &ffn, false, None, None).is_some(),
+                run_layer_with_ffn(larql_models::WeightsView::dense(&weights), &input, layer, &ffn, false, None, None).is_some(),
                 "layer {layer} failed"
             );
         }
@@ -79,8 +79,8 @@ mod tests {
     fn run_attention_public_matches_inner() {
         let weights = make_test_weights();
         let input = h(3, weights.hidden_size);
-        let pub_out = run_attention_public(&weights, &input, 0).unwrap();
-        let inner_out = run_attention(&weights, &input, 0).unwrap();
+        let pub_out = run_attention_public(larql_models::WeightsView::dense(&weights), &input, 0).unwrap();
+        let inner_out = run_attention(larql_models::WeightsView::dense(&weights), &input, 0).unwrap();
         assert_eq!(pub_out.shape(), inner_out.shape());
         for (a, b) in pub_out.iter().zip(inner_out.iter()) {
             assert!(
@@ -95,7 +95,7 @@ mod tests {
         let weights = make_test_weights();
         let input = h(3, weights.hidden_size);
         let (out, weights_opt) =
-            run_attention_inner(&weights, &input, 0, /*capture=*/ true, None).unwrap();
+            run_attention_inner(larql_models::WeightsView::dense(&weights), &input, 0, /*capture=*/ true, None).unwrap();
         assert_eq!(out.shape(), &[3, weights.hidden_size]);
         let aw = weights_opt.expect("attention weights should be captured");
         // One distribution per Q-head, each with seq_len=3 entries (last position).
@@ -110,7 +110,7 @@ mod tests {
         let weights = make_test_weights();
         let input = h(2, weights.hidden_size);
         let (h_post_attn, (k, v)) =
-            run_attention_with_kv_cache(&weights, &input, 0).expect("attn-with-kv must succeed");
+            run_attention_with_kv_cache(larql_models::WeightsView::dense(&weights), &input, 0).expect("attn-with-kv must succeed");
         assert_eq!(h_post_attn.shape(), &[2, weights.hidden_size]);
         // K/V have shape (seq, num_kv_heads * head_dim).
         let kv_dim = weights.num_kv_heads * weights.head_dim;
@@ -134,8 +134,7 @@ mod tests {
         let weights = make_test_weights();
         let ffn = WeightFfn { weights: &weights };
         let input = h(2, weights.hidden_size);
-        let (h_out, _act, _attn, _kv) = run_layer_with_capture(
-            &weights, &input, 0, &ffn, false, /*capture_attention=*/ true, None, None,
+        let (h_out, _act, _attn, _kv) = run_layer_with_capture(larql_models::WeightsView::dense(&weights), &input, 0, &ffn, false, /*capture_attention=*/ true, None, None,
         )
         .expect("run_layer_with_capture must succeed");
         assert_eq!(h_out.shape(), &[2, weights.hidden_size]);
@@ -149,9 +148,9 @@ mod tests {
         let ffn = WeightFfn { weights: &weights };
         let input = h(2, weights.hidden_size);
         // Capture KV from layer 0 first, then re-feed at layer 1 as shared.
-        let (_, shared) = run_attention_with_kv_cache(&weights, &input, 0).unwrap();
+        let (_, shared) = run_attention_with_kv_cache(larql_models::WeightsView::dense(&weights), &input, 0).unwrap();
         let (h_out, _, kv_out) =
-            run_layer_with_ffn(&weights, &input, 1, &ffn, false, None, Some(&shared))
+            run_layer_with_ffn(larql_models::WeightsView::dense(&weights), &input, 1, &ffn, false, None, Some(&shared))
                 .expect("layer with shared KV must succeed");
         assert_eq!(h_out.shape(), &[2, weights.hidden_size]);
         assert!(kv_out.is_none(), "shared-KV path must not return new KV");
@@ -179,7 +178,7 @@ mod tests {
         let ffn = WeightFfn { weights: &weights };
         let input = h(2, weights.hidden_size);
         let (h_out, _, kv) =
-            run_layer_with_ffn(&weights, &input, 0, &ffn, false, None, None).unwrap();
+            run_layer_with_ffn(larql_models::WeightsView::dense(&weights), &input, 0, &ffn, false, None, None).unwrap();
         assert_eq!(h_out.shape(), &[2, weights.hidden_size]);
         assert!(h_out.iter().all(|v| v.is_finite()));
         assert!(kv.is_some());
@@ -193,7 +192,7 @@ mod tests {
         let ffn = WeightFfn { weights: &weights };
         let input = h(2, weights.hidden_size);
         let (h_out, _, _) =
-            run_layer_with_ffn(&weights, &input, 0, &ffn, false, None, None).unwrap();
+            run_layer_with_ffn(larql_models::WeightsView::dense(&weights), &input, 0, &ffn, false, None, None).unwrap();
         assert_eq!(h_out.shape(), &[2, weights.hidden_size]);
         assert!(h_out.iter().all(|v| v.is_finite()));
     }
@@ -205,10 +204,9 @@ mod tests {
         let weights = make_test_weights();
         let ffn = WeightFfn { weights: &weights };
         let input = h(2, weights.hidden_size);
-        let (_, shared) = run_attention_with_kv_cache(&weights, &input, 0).unwrap();
+        let (_, shared) = run_attention_with_kv_cache(larql_models::WeightsView::dense(&weights), &input, 0).unwrap();
         let mut hook = crate::forward::hooks::NoopHook;
-        let (h_out, _, _, kv_out) = run_layer_with_capture_hooked(
-            &weights,
+        let (h_out, _, _, kv_out) = run_layer_with_capture_hooked(larql_models::WeightsView::dense(&weights),
             &input,
             1,
             &ffn,

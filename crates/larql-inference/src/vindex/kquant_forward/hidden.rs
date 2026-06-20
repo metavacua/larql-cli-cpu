@@ -58,8 +58,7 @@ pub fn predict_kquant_hidden(
                     kv_cache.insert(layer, kv);
                 }
             }
-        } else if let Some((h_new, _, kv_out)) = run_layer_with_ffn(
-            weights,
+        } else if let Some((h_new, _, kv_out)) = run_layer_with_ffn(larql_models::WeightsView::dense(weights),
             &h,
             layer,
             &ffn_backend,
@@ -127,11 +126,11 @@ fn run_moe_layer_cpu(
 ) -> Option<(Array2<f32>, Option<SharedKV>)> {
     let (h_post_attn, kv_out) = if let Some(shared) = shared_kv {
         let (h_pa, _, _) =
-            crate::attention::run_attention_block_shared(weights, h, layer, false, Some(shared))?;
+            crate::attention::run_attention_block_shared(larql_models::WeightsView::dense(weights), h, layer, false, Some(shared))?;
         (h_pa, None)
     } else {
         let (h_pa, _, _, k_rope, v_final) =
-            crate::attention::run_attention_block_with_kv_out(weights, h, layer, false, None)?;
+            crate::attention::run_attention_block_with_kv_out(larql_models::WeightsView::dense(weights), h, layer, false, None)?;
         (h_pa, Some((k_rope, v_final)))
     };
 

@@ -12,7 +12,7 @@ use ndarray::{s, Array2};
 /// Run the full attention block. Returns (h_post_attn, attn_projected, optional_weights).
 #[allow(clippy::too_many_arguments)]
 pub fn run_attention_block(
-    weights: &larql_models::ModelWeights,
+    weights: larql_models::WeightsView,
     h: &Array2<f32>,
     layer: usize,
     capture_attention: bool,
@@ -24,7 +24,7 @@ pub fn run_attention_block(
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
 pub fn run_attention_block_with_kv_out(
-    weights: &larql_models::ModelWeights,
+    weights: larql_models::WeightsView,
     h: &Array2<f32>,
     layer: usize,
     capture_attention: bool,
@@ -55,7 +55,7 @@ pub fn run_attention_block_with_kv_out(
 /// Run attention with optional shared K/V (discards K/V output).
 #[allow(clippy::too_many_arguments)]
 pub fn run_attention_block_shared(
-    weights: &larql_models::ModelWeights,
+    weights: larql_models::WeightsView,
     h: &Array2<f32>,
     layer: usize,
     capture_attention: bool,
@@ -81,7 +81,7 @@ pub fn run_attention_block_shared(
 /// Returns `(h_post_attn, pre_o)` where `pre_o` has shape `[seq, num_q * head_dim]`.
 /// This is the equivalent of Python's `o_proj.register_forward_pre_hook`.
 pub fn run_attention_block_with_pre_o(
-    weights: &larql_models::ModelWeights,
+    weights: larql_models::WeightsView,
     h: &Array2<f32>,
     layer: usize,
 ) -> Option<(Array2<f32>, Array2<f32>)> {
@@ -97,7 +97,7 @@ pub fn run_attention_block_with_pre_o(
 /// This is the shared-KV-safe variant used by research/intervention adapters
 /// that need to inspect a pre-W_O head before deciding how to replace it.
 pub fn run_attention_block_shared_with_pre_o(
-    weights: &larql_models::ModelWeights,
+    weights: larql_models::WeightsView,
     h: &Array2<f32>,
     layer: usize,
     shared_kv: Option<&SharedKV>,
@@ -115,7 +115,7 @@ pub fn run_attention_block_shared_with_pre_o(
 /// from normal attention capture because all-position weights are
 /// O(heads * seq^2) memory.
 pub fn run_attention_block_with_pre_o_and_all_attention_weights(
-    weights: &larql_models::ModelWeights,
+    weights: larql_models::WeightsView,
     h: &Array2<f32>,
     layer: usize,
     shared_kv: Option<&SharedKV>,
@@ -133,7 +133,7 @@ pub fn run_attention_block_with_pre_o_and_all_attention_weights(
 /// weights use `qk_rank`, so this can test reduced address computation without
 /// changing the model forward path.
 pub fn run_attention_block_with_pre_o_and_reduced_qk_attention_weights(
-    weights: &larql_models::ModelWeights,
+    weights: larql_models::WeightsView,
     h: &Array2<f32>,
     layer: usize,
     shared_kv: Option<&SharedKV>,
@@ -160,7 +160,7 @@ pub fn run_attention_block_with_pre_o_and_reduced_qk_attention_weights(
 /// Returns the post-attention residual and, when K/V were computed by this call,
 /// the K/V pair for cross-layer sharing.
 pub fn run_attention_block_zero_pre_o_heads(
-    weights: &larql_models::ModelWeights,
+    weights: larql_models::WeightsView,
     h: &Array2<f32>,
     layer: usize,
     heads: &[usize],
@@ -191,7 +191,7 @@ pub fn run_attention_block_zero_pre_o_heads(
 ///
 /// `replacement` must have shape `[seq_len, head_dim]`.
 pub fn run_attention_block_replace_pre_o_head(
-    weights: &larql_models::ModelWeights,
+    weights: larql_models::WeightsView,
     h: &Array2<f32>,
     layer: usize,
     head: usize,
@@ -225,7 +225,7 @@ pub fn run_attention_block_replace_pre_o_head(
 /// This is numerically equivalent to zeroing those pre-W_O heads, but it checks
 /// the head-to-W_O block indexing independently.
 pub fn run_attention_block_subtract_pre_o_heads(
-    weights: &larql_models::ModelWeights,
+    weights: larql_models::WeightsView,
     h: &Array2<f32>,
     layer: usize,
     heads: &[usize],
@@ -260,7 +260,7 @@ pub fn run_attention_block_subtract_pre_o_heads(
 /// This is the Mode D validation surface: runtime lookup/add tables can bypass
 /// W_O entirely while the rest of the layer remains unchanged.
 pub fn run_attention_block_replace_head_residual_delta(
-    weights: &larql_models::ModelWeights,
+    weights: larql_models::WeightsView,
     h: &Array2<f32>,
     layer: usize,
     head: usize,
@@ -292,7 +292,7 @@ pub fn run_attention_block_replace_head_residual_delta(
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::type_complexity)]
 fn run_attention_block_core(
-    weights: &larql_models::ModelWeights,
+    weights: larql_models::WeightsView,
     h: &Array2<f32>,
     layer: usize,
     capture_attention: bool,
@@ -344,12 +344,12 @@ fn run_attention_block_core(
 
     // Input norm
     let h_norm =
-        crate::forward::apply_norm(weights, h, &arch.input_layernorm_key(layer), norm_offset);
+        crate::forward::apply_norm(&weights, h, &arch.input_layernorm_key(layer), norm_offset);
     dump_f32("norm_out", &h_norm);
 
     // Q projection (always from current hidden state)
-    let w_q = weights.tensors.get(&arch.attn_q_key(layer))?;
-    let w_o = weights.tensors.get(&arch.attn_o_key(layer)).unwrap();
+    let w_q = weights.tensor(&arch.attn_q_key(layer))?;
+    let w_o = weights.tensor(&arch.attn_o_key(layer)).unwrap();
     let mut q_full = dot_proj(&h_norm, w_q);
     if let Some(bias) = arch
         .attn_q_bias_key(layer)
@@ -396,7 +396,7 @@ fn run_attention_block_core(
     let (k_rope, v_final) = if let Some((cached_k, cached_v)) = shared_kv {
         (cached_k.clone(), cached_v.clone())
     } else {
-        let w_k = weights.tensors.get(&arch.attn_k_key(layer)).unwrap();
+        let w_k = weights.tensor(&arch.attn_k_key(layer)).unwrap();
 
         let mut k_full = dot_proj(&h_norm, w_k);
         if let Some(bias) = arch
@@ -428,7 +428,7 @@ fn run_attention_block_core(
         // Fallback: when W_v is genuinely absent from the vindex (older
         // extracts with no v_proj tensor for `attention_k_eq_v` layers),
         // reuse `k_full` — matches pre-Q6K-V behaviour.
-        let v_full = if let Some(w_v) = weights.tensors.get(&arch.attn_v_key(layer)) {
+        let v_full = if let Some(w_v) = weights.tensor(&arch.attn_v_key(layer)) {
             let mut v = dot_proj(&h_norm, w_v);
             if let Some(bias) = arch
                 .attn_v_bias_key(layer)
@@ -554,8 +554,7 @@ fn run_attention_block_core(
     // Residual connection
     let res_mult = arch.residual_multiplier();
     let h_post_attn = if arch.has_post_norms() {
-        let normed = crate::forward::apply_norm(
-            weights,
+        let normed = crate::forward::apply_norm(&weights,
             &attn_projected,
             &arch.post_attention_layernorm_key(layer),
             norm_offset,
@@ -606,7 +605,7 @@ mod tests {
         let weights = make_test_weights();
         let h = hidden(3, weights.hidden_size);
         let (h_out, attn_proj, _) =
-            run_attention_block(&weights, &h, 0, false).expect("run_attention_block failed");
+            run_attention_block(larql_models::WeightsView::dense(&weights), &h, 0, false).expect("run_attention_block failed");
         assert_eq!(h_out.shape(), &[3, weights.hidden_size]);
         assert_eq!(attn_proj.shape()[0], 3);
     }
@@ -615,7 +614,7 @@ mod tests {
     fn attention_block_output_finite() {
         let weights = make_test_weights();
         let h = hidden(2, weights.hidden_size);
-        let (h_out, _, _) = run_attention_block(&weights, &h, 0, false).unwrap();
+        let (h_out, _, _) = run_attention_block(larql_models::WeightsView::dense(&weights), &h, 0, false).unwrap();
         assert!(h_out.iter().all(|v| v.is_finite()));
     }
 
@@ -623,7 +622,7 @@ mod tests {
     fn attention_block_single_token() {
         let weights = make_test_weights();
         let h = hidden(1, weights.hidden_size);
-        let (h_out, attn_proj, _) = run_attention_block(&weights, &h, 0, false).unwrap();
+        let (h_out, attn_proj, _) = run_attention_block(larql_models::WeightsView::dense(&weights), &h, 0, false).unwrap();
         assert_eq!(h_out.shape(), &[1, weights.hidden_size]);
         assert_eq!(attn_proj.shape()[0], 1);
     }
@@ -634,7 +633,7 @@ mod tests {
         let h = hidden(2, weights.hidden_size);
         for layer in 0..weights.num_layers {
             assert!(
-                run_attention_block(&weights, &h, layer, false).is_some(),
+                run_attention_block(larql_models::WeightsView::dense(&weights), &h, layer, false).is_some(),
                 "layer {layer} failed"
             );
         }
@@ -644,7 +643,7 @@ mod tests {
     fn attention_block_with_kv_out_returns_kv() {
         let weights = make_test_weights();
         let h = hidden(3, weights.hidden_size);
-        let result = run_attention_block_with_kv_out(&weights, &h, 0, false, None);
+        let result = run_attention_block_with_kv_out(larql_models::WeightsView::dense(&weights), &h, 0, false, None);
         // Returns (h_post, attn_proj, attn_w, k_rope, v_final) — 5 elements
         let (h_out, _attn_proj, _attn_w, k_rope, v_final) = result.unwrap();
         assert_eq!(h_out.shape(), &[3, weights.hidden_size]);
@@ -656,7 +655,7 @@ mod tests {
     fn attention_block_capture_returns_per_head_weights() {
         let weights = make_test_weights();
         let h = hidden(3, weights.hidden_size);
-        let (_, _, attn_w) = run_attention_block(&weights, &h, 0, true).unwrap();
+        let (_, _, attn_w) = run_attention_block(larql_models::WeightsView::dense(&weights), &h, 0, true).unwrap();
         let aw = attn_w.expect("capture=true must yield weights");
         assert_eq!(aw.heads.len(), weights.num_q_heads);
     }
@@ -665,7 +664,7 @@ mod tests {
     fn attention_block_with_pre_o_returns_per_head_pre_projection() {
         let weights = make_test_weights();
         let h = hidden(2, weights.hidden_size);
-        let (h_post, pre_o) = run_attention_block_with_pre_o(&weights, &h, 0).unwrap();
+        let (h_post, pre_o) = run_attention_block_with_pre_o(larql_models::WeightsView::dense(&weights), &h, 0).unwrap();
         assert_eq!(h_post.shape(), &[2, weights.hidden_size]);
         // pre_o is `[seq, num_q * head_dim]`.
         assert_eq!(pre_o.shape(), &[2, weights.num_q_heads * weights.head_dim]);
@@ -676,11 +675,11 @@ mod tests {
         let weights = make_test_weights();
         let h = hidden(2, weights.hidden_size);
         let (_, shared) =
-            crate::attention::run_attention_block_with_kv_out(&weights, &h, 0, false, None)
+            crate::attention::run_attention_block_with_kv_out(larql_models::WeightsView::dense(&weights), &h, 0, false, None)
                 .map(|(p, _, _, k, v)| (p, (k, v)))
                 .unwrap();
         let (h_post, pre_o) =
-            run_attention_block_shared_with_pre_o(&weights, &h, 1, Some(&shared)).unwrap();
+            run_attention_block_shared_with_pre_o(larql_models::WeightsView::dense(&weights), &h, 1, Some(&shared)).unwrap();
         assert_eq!(h_post.shape(), &[2, weights.hidden_size]);
         assert_eq!(pre_o.shape()[1], weights.num_q_heads * weights.head_dim);
     }
@@ -690,7 +689,7 @@ mod tests {
         let weights = make_test_weights();
         let h = hidden(3, weights.hidden_size);
         let (_, _, all) =
-            run_attention_block_with_pre_o_and_all_attention_weights(&weights, &h, 0, None)
+            run_attention_block_with_pre_o_and_all_attention_weights(larql_models::WeightsView::dense(&weights), &h, 0, None)
                 .unwrap();
         assert_eq!(all.heads.len(), weights.num_q_heads);
         for head in &all.heads {
@@ -702,8 +701,7 @@ mod tests {
     fn attention_block_with_reduced_qk_attention_weights_clamps_rank() {
         let weights = make_test_weights();
         let h = hidden(2, weights.hidden_size);
-        let (_, _, all) = run_attention_block_with_pre_o_and_reduced_qk_attention_weights(
-            &weights, &h, 0, None, /*qk_rank=*/ 4, // half of head_dim=8
+        let (_, _, all) = run_attention_block_with_pre_o_and_reduced_qk_attention_weights(larql_models::WeightsView::dense(&weights), &h, 0, None, /*qk_rank=*/ 4, // half of head_dim=8
         )
         .unwrap();
         assert_eq!(all.heads.len(), weights.num_q_heads);
@@ -715,9 +713,9 @@ mod tests {
     fn zero_pre_o_heads_changes_output_when_head_active() {
         let weights = make_test_weights();
         let h = hidden(2, weights.hidden_size);
-        let baseline = run_attention_block(&weights, &h, 0, false).unwrap().0;
+        let baseline = run_attention_block(larql_models::WeightsView::dense(&weights), &h, 0, false).unwrap().0;
         let (zeroed, kv_out) =
-            run_attention_block_zero_pre_o_heads(&weights, &h, 0, &[0], None).unwrap();
+            run_attention_block_zero_pre_o_heads(larql_models::WeightsView::dense(&weights), &h, 0, &[0], None).unwrap();
         assert_eq!(zeroed.shape(), baseline.shape());
         // KV is computed when shared_kv is None.
         assert!(kv_out.is_some());
@@ -733,11 +731,11 @@ mod tests {
         let weights = make_test_weights();
         let h = hidden(2, weights.hidden_size);
         let (_, shared) =
-            crate::attention::run_attention_block_with_kv_out(&weights, &h, 0, false, None)
+            crate::attention::run_attention_block_with_kv_out(larql_models::WeightsView::dense(&weights), &h, 0, false, None)
                 .map(|(p, _, _, k, v)| (p, (k, v)))
                 .unwrap();
         let (_, kv_out) =
-            run_attention_block_zero_pre_o_heads(&weights, &h, 1, &[0], Some(&shared)).unwrap();
+            run_attention_block_zero_pre_o_heads(larql_models::WeightsView::dense(&weights), &h, 1, &[0], Some(&shared)).unwrap();
         assert!(kv_out.is_none(), "shared-KV path must not return KV");
     }
 
@@ -747,10 +745,10 @@ mod tests {
         let h = hidden(2, weights.hidden_size);
         // Replacement is `[seq, head_dim]` of all-zeros — equivalent to
         // zeroing that head, so output must differ from baseline.
-        let baseline = run_attention_block(&weights, &h, 0, false).unwrap().0;
+        let baseline = run_attention_block(larql_models::WeightsView::dense(&weights), &h, 0, false).unwrap().0;
         let zero_head = Array2::<f32>::zeros((2, weights.head_dim));
         let (replaced, _) =
-            run_attention_block_replace_pre_o_head(&weights, &h, 0, 0, &zero_head, None).unwrap();
+            run_attention_block_replace_pre_o_head(larql_models::WeightsView::dense(&weights), &h, 0, 0, &zero_head, None).unwrap();
         let mut max_diff = 0.0f32;
         for (a, b) in baseline.iter().zip(replaced.iter()) {
             max_diff = max_diff.max((a - b).abs());
@@ -764,9 +762,9 @@ mod tests {
         let weights = make_test_weights();
         let h = hidden(2, weights.hidden_size);
         let (zeroed, _) =
-            run_attention_block_zero_pre_o_heads(&weights, &h, 0, &[0], None).unwrap();
+            run_attention_block_zero_pre_o_heads(larql_models::WeightsView::dense(&weights), &h, 0, &[0], None).unwrap();
         let (subtracted, _) =
-            run_attention_block_subtract_pre_o_heads(&weights, &h, 0, &[0], None).unwrap();
+            run_attention_block_subtract_pre_o_heads(larql_models::WeightsView::dense(&weights), &h, 0, &[0], None).unwrap();
         for (a, b) in zeroed.iter().zip(subtracted.iter()) {
             assert!(
                 (a - b).abs() < 1e-4,
@@ -783,10 +781,10 @@ mod tests {
         let h = hidden(2, weights.hidden_size);
         let zero_delta = Array2::<f32>::zeros((2, weights.hidden_size));
         let (with_delta, _) =
-            run_attention_block_replace_head_residual_delta(&weights, &h, 0, 0, &zero_delta, None)
+            run_attention_block_replace_head_residual_delta(larql_models::WeightsView::dense(&weights), &h, 0, 0, &zero_delta, None)
                 .unwrap();
         let (zeroed, _) =
-            run_attention_block_zero_pre_o_heads(&weights, &h, 0, &[0], None).unwrap();
+            run_attention_block_zero_pre_o_heads(larql_models::WeightsView::dense(&weights), &h, 0, &[0], None).unwrap();
         for (a, b) in with_delta.iter().zip(zeroed.iter()) {
             assert!(
                 (a - b).abs() < 1e-4,
@@ -802,10 +800,10 @@ mod tests {
         let weights = make_test_weights();
         let h = hidden(2, weights.hidden_size);
         let bogus_layer = weights.num_layers + 5;
-        assert!(run_attention_block(&weights, &h, bogus_layer, false).is_none());
-        assert!(run_attention_block_with_pre_o(&weights, &h, bogus_layer).is_none());
+        assert!(run_attention_block(larql_models::WeightsView::dense(&weights), &h, bogus_layer, false).is_none());
+        assert!(run_attention_block_with_pre_o(larql_models::WeightsView::dense(&weights), &h, bogus_layer).is_none());
         assert!(
-            run_attention_block_zero_pre_o_heads(&weights, &h, bogus_layer, &[0], None).is_none()
+            run_attention_block_zero_pre_o_heads(larql_models::WeightsView::dense(&weights), &h, bogus_layer, &[0], None).is_none()
         );
     }
 
@@ -818,7 +816,7 @@ mod tests {
         // tinymodel never exercises.
         let weights = larql_models::test_fixtures::make_gemma3_test_weights();
         let h = hidden(2, weights.hidden_size);
-        let (h_post, _, _) = run_attention_block(&weights, &h, 0, false).unwrap();
+        let (h_post, _, _) = run_attention_block(larql_models::WeightsView::dense(&weights), &h, 0, false).unwrap();
         assert_eq!(h_post.shape(), &[2, weights.hidden_size]);
         assert!(h_post.iter().all(|v| v.is_finite()));
     }
@@ -829,7 +827,7 @@ mod tests {
         // takes a different branch in run_attention_block_core.
         let weights = larql_models::test_fixtures::make_gemma3_test_weights();
         let h = hidden(2, weights.hidden_size);
-        let (h_post, _, _) = run_attention_block(&weights, &h, 1, false).unwrap();
+        let (h_post, _, _) = run_attention_block(larql_models::WeightsView::dense(&weights), &h, 1, false).unwrap();
         assert_eq!(h_post.shape(), &[2, weights.hidden_size]);
         assert!(h_post.iter().all(|v| v.is_finite()));
     }
@@ -842,7 +840,7 @@ mod tests {
         // `add_bias` call site fires.
         let weights = larql_models::test_fixtures::make_starcoder2_test_weights();
         let h = hidden(2, weights.hidden_size);
-        let (h_post, _, _) = run_attention_block(&weights, &h, 0, false).unwrap();
+        let (h_post, _, _) = run_attention_block(larql_models::WeightsView::dense(&weights), &h, 0, false).unwrap();
         assert_eq!(h_post.shape(), &[2, weights.hidden_size]);
         assert!(h_post.iter().all(|v| v.is_finite()));
     }
@@ -852,7 +850,7 @@ mod tests {
         let weights = larql_models::test_fixtures::make_starcoder2_test_weights();
         let h = hidden(3, weights.hidden_size);
         let (_, _, _, k, v) =
-            run_attention_block_with_kv_out(&weights, &h, 0, false, None).unwrap();
+            run_attention_block_with_kv_out(larql_models::WeightsView::dense(&weights), &h, 0, false, None).unwrap();
         assert_eq!(k.shape()[0], 3);
         assert_eq!(v.shape()[0], 3);
         assert!(k.iter().all(|x| x.is_finite()));

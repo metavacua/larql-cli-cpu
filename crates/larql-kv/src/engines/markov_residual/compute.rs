@@ -287,8 +287,7 @@ fn rs_decode_step_inner(
                 None
             };
             let inplace = if markov_inplace_kv_enabled() {
-                larql_inference::attention::run_attention_block_decode_step_auto_inplace(
-                    weights,
+                larql_inference::attention::run_attention_block_decode_step_auto_inplace(weights,
                     &h_new,
                     layer,
                     k_buf,
@@ -314,8 +313,7 @@ fn rs_decode_step_inner(
                         v_buf.slice(s![..s_hot, ..]).to_owned(),
                     );
                     let (h, new_kv) =
-                        larql_inference::attention::run_attention_block_decode_step_auto(
-                            weights,
+                        larql_inference::attention::run_attention_block_decode_step_auto(weights,
                             &h_new,
                             layer,
                             Some(&prior),
@@ -397,8 +395,7 @@ fn rs_decode_step_inner(
                 None
             };
             let (h_post_attn, new_kv) =
-                larql_inference::attention::run_attention_block_decode_step_auto(
-                    weights,
+                larql_inference::attention::run_attention_block_decode_step_auto(weights,
                     &h_new,
                     layer,
                     Some(&kv_arg),

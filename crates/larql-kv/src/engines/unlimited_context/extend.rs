@@ -82,8 +82,7 @@ pub fn rs_extend_from_checkpoint_backend(
             };
 
             let (h_post_attn, new_kv) =
-                larql_inference::attention::run_attention_block_decode_step_auto(
-                    weights,
+                larql_inference::attention::run_attention_block_decode_step_auto(weights,
                     &h,
                     layer,
                     kv_entry,
@@ -160,8 +159,7 @@ pub fn rs_extend_inplace(
 
         for (layer, (k_buf, v_buf)) in kv_cache.iter_mut().enumerate() {
             let h_post_attn =
-                match larql_inference::attention::run_attention_block_decode_step_auto_inplace(
-                    weights,
+                match larql_inference::attention::run_attention_block_decode_step_auto_inplace(weights,
                     &h,
                     layer,
                     k_buf,
@@ -181,8 +179,7 @@ pub fn rs_extend_inplace(
                         );
                         let prior_ref = if len > 0 { Some(&prior) } else { None };
                         let (hp, new_kv) =
-                            larql_inference::attention::run_attention_block_decode_step_auto(
-                                weights,
+                            larql_inference::attention::run_attention_block_decode_step_auto(weights,
                                 &h,
                                 layer,
                                 prior_ref,

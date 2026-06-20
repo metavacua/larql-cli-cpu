@@ -69,8 +69,7 @@ where
                 shared_kv,
             )?
         } else {
-            run_layer_with_ffn(
-                weights,
+            run_layer_with_ffn(larql_models::WeightsView::dense(weights),
                 &h,
                 layer,
                 &ffn_backend,
