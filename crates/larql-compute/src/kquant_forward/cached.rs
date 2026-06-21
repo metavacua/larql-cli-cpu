@@ -7,9 +7,12 @@
 //! per-step decode (single-row attention against the cache + 1-row
 //! FFN). Speedup scales linearly with decode length.
 //!
-//! Per-step Q4_K → f32 dequant via `insert_q4k_layer_tensors` is
-//! still paid for now; eliminating it is a follow-up (route Q/K/V/O
-//! and gate/up/down through `backend.q4k_matvec` directly).
+//! Prefill projects Q/K/V/O and gate/up/down straight from the vindex's
+//! Q4_K/Q6_K bytes via the amortised q4k/q6k matmul — no per-layer f32
+//! dequant — when the projection dims are 256-aligned (see
+//! `predict_kquant_prefill_with_state`'s `use_q4k_attn` / `use_q4k_ffn`).
+//! Per-step decode still dequantises via `insert_q4k_layer_tensors`
+//! (a smaller follow-up).
 //!
 //! Scope: dense architectures only. Hybrid-MoE (Gemma 4 26B A4B)
 //! and cross-layer KV sharing (Gemma 4 E2B) fall back to the slow
