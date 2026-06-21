@@ -261,12 +261,10 @@ impl KvEngine for MarkovResidualCodecEngine {
                 what: "decode_step_quant called before prefill (store missing)".into(),
             })?;
         let prof = self.profiling.then_some(&mut self.profile);
-        let (hidden, new_rs) = rs_decode_step_codec_walk(
-            view, index, token_id, rs, backend, prof,
-        )
-        .ok_or_else(|| EngineError::BackendFailure {
-            details: "rs_decode_step_codec_walk returned None".into(),
-        })?;
+        let (hidden, new_rs) = rs_decode_step_codec_walk(view, index, token_id, rs, backend, prof)
+            .ok_or_else(|| EngineError::BackendFailure {
+                details: "rs_decode_step_codec_walk returned None".into(),
+            })?;
         self.store = Some(new_rs);
         self.abs_position += 1;
         Ok(hidden)

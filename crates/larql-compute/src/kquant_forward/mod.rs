@@ -605,8 +605,8 @@ mod tests {
         let backend = crate::CpuBackend;
         // Need to insert the layer 0 tensors so weights.tensors holds
         // the Q/K/V/O dense f32 matrices (the helper reads them).
-        let inserted =
-            insert_q4k_layer_tensors(&mut scratch, &weights, &idx, 0).expect("layer 0 q4k tensors insert");
+        let inserted = insert_q4k_layer_tensors(&mut scratch, &weights, &idx, 0)
+            .expect("layer 0 q4k tensors insert");
         let h_new = Array2::<f32>::from_shape_vec(
             (1, weights.hidden_size),
             vec![0.01; weights.hidden_size],
@@ -630,8 +630,8 @@ mod tests {
         let mut scratch = larql_models::DequantScratch::new();
         let idx = make_q4k_fixture_index(&weights);
         let backend = crate::CpuBackend;
-        let inserted =
-            insert_q4k_layer_tensors(&mut scratch, &weights, &idx, 0).expect("layer 0 q4k tensors insert");
+        let inserted = insert_q4k_layer_tensors(&mut scratch, &weights, &idx, 0)
+            .expect("layer 0 q4k tensors insert");
         let h_post_attn = Array2::<f32>::from_shape_vec(
             (1, weights.hidden_size),
             vec![0.01; weights.hidden_size],

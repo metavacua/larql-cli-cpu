@@ -340,7 +340,8 @@ impl TurboQuantEngine {
 
             // Decode step returns updated K/V (prior + new token).
             let (h_post_attn, updated_kv) =
-                larql_inference::attention::run_attention_block_decode_step_auto(larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch),
+                larql_inference::attention::run_attention_block_decode_step_auto(
+                    larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch),
                     &h,
                     layer,
                     Some(&prior_kv),
@@ -431,10 +432,15 @@ impl KvEngine for TurboQuantEngine {
         self.layers.clear();
 
         for layer in 0..num_layers {
-            let (h_post_attn, k, v) = run_attention_with_kv_backend(larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch), &h, layer, be)
-                .ok_or_else(|| EngineError::BackendFailure {
-                    details: "run_attention_with_kv_backend returned None".into(),
-                })?;
+            let (h_post_attn, k, v) = run_attention_with_kv_backend(
+                larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch),
+                &h,
+                layer,
+                be,
+            )
+            .ok_or_else(|| EngineError::BackendFailure {
+                details: "run_attention_with_kv_backend returned None".into(),
+            })?;
             self.layers
                 .push(CompressedLayer::compress(&(k, v), &self.tq));
 
@@ -567,7 +573,12 @@ impl KvEngine for TurboQuantEngine {
 
         for layer in 0..num_layers {
             let (h_out, kv) = executor
-                .run_prefill_layer(larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch), layer, &h, ffn)
+                .run_prefill_layer(
+                    larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch),
+                    layer,
+                    &h,
+                    ffn,
+                )
                 .ok_or_else(|| EngineError::BackendFailure {
                     details: "executor.run_prefill_layer returned None".into(),
                 })?;
@@ -599,7 +610,14 @@ impl KvEngine for TurboQuantEngine {
         for layer in 0..num_layers {
             let prior_kv = self.layers[layer].decompress(&self.tq);
             let (h_out, updated_kv) = executor
-                .run_decode_layer(larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch), layer, &h, &prior_kv, abs_position, ffn)
+                .run_decode_layer(
+                    larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch),
+                    layer,
+                    &h,
+                    &prior_kv,
+                    abs_position,
+                    ffn,
+                )
                 .ok_or_else(|| EngineError::BackendFailure {
                     details: "executor.run_decode_layer returned None".into(),
                 })?;
@@ -642,7 +660,12 @@ impl TurboQuantEngine {
             .with_backend(backend);
 
         for layer in 0..num_layers {
-            let (h_post_attn, k, v) = run_attention_with_kv_backend(larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch), &h, layer, be)?;
+            let (h_post_attn, k, v) = run_attention_with_kv_backend(
+                larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch),
+                &h,
+                layer,
+                be,
+            )?;
             self.layers
                 .push(CompressedLayer::compress(&(k, v), &self.tq));
 
@@ -719,7 +742,8 @@ impl TurboQuantEngine {
                 abs_position,
             )
             .or_else(|| {
-                run_attention_block_decode_step_backend(larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch),
+                run_attention_block_decode_step_backend(
+                    larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch),
                     &h,
                     layer,
                     Some(&prior_kv),

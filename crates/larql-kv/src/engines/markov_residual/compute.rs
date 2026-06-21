@@ -98,8 +98,17 @@ pub fn rs_prefill(
         stored.push(h.clone());
         let (h_post_attn, _k, _v) = run_attention_with_kv_backend(weights, &h, layer, be)
             .expect("attention failed during MarkovRS prefill");
-        let bffn = BackendFfn { weights: weights.canonical(), backend };
-        let h_out = crate::engines::layer_ffn_or_moe(weights.canonical(), &h_post_attn, layer, &bffn, moe_ffn);
+        let bffn = BackendFfn {
+            weights: weights.canonical(),
+            backend,
+        };
+        let h_out = crate::engines::layer_ffn_or_moe(
+            weights.canonical(),
+            &h_post_attn,
+            layer,
+            &bffn,
+            moe_ffn,
+        );
         h = h_out;
     }
 
@@ -286,7 +295,8 @@ fn rs_decode_step_inner(
                 None
             };
             let inplace = if markov_inplace_kv_enabled() {
-                larql_inference::attention::run_attention_block_decode_step_auto_inplace(weights,
+                larql_inference::attention::run_attention_block_decode_step_auto_inplace(
+                    weights,
                     &h_new,
                     layer,
                     k_buf,
@@ -312,7 +322,8 @@ fn rs_decode_step_inner(
                         v_buf.slice(s![..s_hot, ..]).to_owned(),
                     );
                     let (h, new_kv) =
-                        larql_inference::attention::run_attention_block_decode_step_auto(weights,
+                        larql_inference::attention::run_attention_block_decode_step_auto(
+                            weights,
                             &h_new,
                             layer,
                             Some(&prior),
@@ -394,7 +405,8 @@ fn rs_decode_step_inner(
                 None
             };
             let (h_post_attn, new_kv) =
-                larql_inference::attention::run_attention_block_decode_step_auto(weights,
+                larql_inference::attention::run_attention_block_decode_step_auto(
+                    weights,
                     &h_new,
                     layer,
                     Some(&kv_arg),
@@ -418,8 +430,17 @@ fn rs_decode_step_inner(
         } else {
             None
         };
-        let bffn = BackendFfn { weights: weights.canonical(), backend };
-        let h_out = crate::engines::layer_ffn_or_moe(weights.canonical(), &h_post_attn, layer, &bffn, moe_ffn);
+        let bffn = BackendFfn {
+            weights: weights.canonical(),
+            backend,
+        };
+        let h_out = crate::engines::layer_ffn_or_moe(
+            weights.canonical(),
+            &h_post_attn,
+            layer,
+            &bffn,
+            moe_ffn,
+        );
         if let Some(t) = t_ffn {
             ffn_us += t.elapsed().as_secs_f64() * 1e6;
         }
@@ -1018,7 +1039,13 @@ mod tests {
         let weights = make_test_weights();
         let h = Array2::from_elem((3, weights.hidden_size), 0.5f32);
         let result = recompute_kv(
-larql_inference::WeightsView::dense(&weights), &h, 0, 0, &CpuBackend, None);
+            larql_inference::WeightsView::dense(&weights),
+            &h,
+            0,
+            0,
+            &CpuBackend,
+            None,
+        );
         assert!(
             result.is_some(),
             "recompute_kv should return Some with valid weights"
@@ -1031,7 +1058,14 @@ larql_inference::WeightsView::dense(&weights), &h, 0, 0, &CpuBackend, None);
         let seq_len = 4;
         let h = Array2::from_elem((seq_len, weights.hidden_size), 1.0f32);
         let (k, v) = recompute_kv(
-larql_inference::WeightsView::dense(&weights), &h, 0, 0, &CpuBackend, None).unwrap();
+            larql_inference::WeightsView::dense(&weights),
+            &h,
+            0,
+            0,
+            &CpuBackend,
+            None,
+        )
+        .unwrap();
         let kv_dim = weights.num_kv_heads * weights.head_dim;
         assert_eq!(k.shape(), &[seq_len, kv_dim], "K shape mismatch");
         assert_eq!(v.shape(), &[seq_len, kv_dim], "V shape mismatch");
@@ -1042,7 +1076,14 @@ larql_inference::WeightsView::dense(&weights), &h, 0, 0, &CpuBackend, None).unwr
         let weights = make_test_weights();
         let h = Array2::from_elem((2, weights.hidden_size), 0.1f32);
         let (k, v) = recompute_kv(
-larql_inference::WeightsView::dense(&weights), &h, 0, 0, &CpuBackend, None).unwrap();
+            larql_inference::WeightsView::dense(&weights),
+            &h,
+            0,
+            0,
+            &CpuBackend,
+            None,
+        )
+        .unwrap();
         assert!(
             k.iter().all(|v| v.is_finite()),
             "K contains non-finite values"
@@ -1059,9 +1100,23 @@ larql_inference::WeightsView::dense(&weights), &h, 0, 0, &CpuBackend, None).unwr
         let h = Array2::from_elem((1, weights.hidden_size), 0.5f32);
         // Different abs_start should produce different RoPE-applied K
         let (k0, _) = recompute_kv(
-larql_inference::WeightsView::dense(&weights), &h, 0, 0, &CpuBackend, None).unwrap();
+            larql_inference::WeightsView::dense(&weights),
+            &h,
+            0,
+            0,
+            &CpuBackend,
+            None,
+        )
+        .unwrap();
         let (k5, _) = recompute_kv(
-larql_inference::WeightsView::dense(&weights), &h, 0, 5, &CpuBackend, None).unwrap();
+            larql_inference::WeightsView::dense(&weights),
+            &h,
+            0,
+            5,
+            &CpuBackend,
+            None,
+        )
+        .unwrap();
         let diff: f32 = k0.iter().zip(k5.iter()).map(|(a, b)| (a - b).abs()).sum();
         assert!(
             diff > 0.0,
@@ -1160,7 +1215,12 @@ larql_inference::WeightsView::dense(&weights), &h, 0, 5, &CpuBackend, None).unwr
     fn rs_prefill_returns_correct_shape() {
         let weights = make_test_weights();
         let result = rs_prefill(
-larql_inference::WeightsView::dense(&weights), &[0u32, 1, 2], None, &CpuBackend, None);
+            larql_inference::WeightsView::dense(&weights),
+            &[0u32, 1, 2],
+            None,
+            &CpuBackend,
+            None,
+        );
         assert_eq!(result.hidden.shape(), &[1, weights.hidden_size]);
         assert!(result.hidden.iter().all(|v| v.is_finite()));
     }
@@ -1169,7 +1229,12 @@ larql_inference::WeightsView::dense(&weights), &[0u32, 1, 2], None, &CpuBackend,
     fn rs_prefill_stores_all_layers() {
         let weights = make_test_weights();
         let result = rs_prefill(
-larql_inference::WeightsView::dense(&weights), &[0u32], None, &CpuBackend, None);
+            larql_inference::WeightsView::dense(&weights),
+            &[0u32],
+            None,
+            &CpuBackend,
+            None,
+        );
         assert_eq!(result.store.stored.len(), weights.num_layers);
         assert_eq!(result.store.next_position, 1);
     }
@@ -1178,7 +1243,12 @@ larql_inference::WeightsView::dense(&weights), &[0u32], None, &CpuBackend, None)
     fn rs_prefill_with_window_clips_hot_store() {
         let weights = make_test_weights();
         let result = rs_prefill(
-larql_inference::WeightsView::dense(&weights), &[0u32, 1, 2, 3, 4], Some(2), &CpuBackend, None);
+            larql_inference::WeightsView::dense(&weights),
+            &[0u32, 1, 2, 3, 4],
+            Some(2),
+            &CpuBackend,
+            None,
+        );
         assert!(
             result.window_tokens <= 2,
             "window_tokens={} > 2",
@@ -1192,10 +1262,21 @@ larql_inference::WeightsView::dense(&weights), &[0u32, 1, 2, 3, 4], Some(2), &Cp
     fn rs_decode_step_produces_finite_hidden() {
         let weights = make_test_weights();
         let prefill = rs_prefill(
-larql_inference::WeightsView::dense(&weights), &[0u32], None, &CpuBackend, None);
+            larql_inference::WeightsView::dense(&weights),
+            &[0u32],
+            None,
+            &CpuBackend,
+            None,
+        );
         let (h, _) = rs_decode_step(
-larql_inference::WeightsView::dense(&weights), 1, prefill.store, &CpuBackend, None, None)
-            .expect("decode step");
+            larql_inference::WeightsView::dense(&weights),
+            1,
+            prefill.store,
+            &CpuBackend,
+            None,
+            None,
+        )
+        .expect("decode step");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert!(h.iter().all(|v| v.is_finite()));
     }
@@ -1204,13 +1285,32 @@ larql_inference::WeightsView::dense(&weights), 1, prefill.store, &CpuBackend, No
     fn rs_decode_step_advances_position() {
         let weights = make_test_weights();
         let prefill = rs_prefill(
-larql_inference::WeightsView::dense(&weights), &[0u32, 1], None, &CpuBackend, None);
+            larql_inference::WeightsView::dense(&weights),
+            &[0u32, 1],
+            None,
+            &CpuBackend,
+            None,
+        );
         assert_eq!(prefill.store.next_position, 2);
         let (_, rs2) = rs_decode_step(
-larql_inference::WeightsView::dense(&weights), 2, prefill.store, &CpuBackend, None, None).unwrap();
+            larql_inference::WeightsView::dense(&weights),
+            2,
+            prefill.store,
+            &CpuBackend,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(rs2.next_position, 3);
         let (_, rs3) = rs_decode_step(
-larql_inference::WeightsView::dense(&weights), 3, rs2, &CpuBackend, None, None).unwrap();
+            larql_inference::WeightsView::dense(&weights),
+            3,
+            rs2,
+            &CpuBackend,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(rs3.next_position, 4);
     }
 
@@ -1222,22 +1322,39 @@ larql_inference::WeightsView::dense(&weights), 3, rs2, &CpuBackend, None, None).
         // cold-residual recomputation path.
         let weights = make_test_weights();
         let prefill = rs_prefill(
-larql_inference::WeightsView::dense(&weights), &[0u32, 1, 2, 3], Some(2), &CpuBackend, None);
+            larql_inference::WeightsView::dense(&weights),
+            &[0u32, 1, 2, 3],
+            Some(2),
+            &CpuBackend,
+            None,
+        );
         assert!(
             prefill.store.cold_kv.is_some(),
             "expected cold_kv to be set"
         );
         let (h, rs2) = rs_decode_step(
-larql_inference::WeightsView::dense(&weights), 4, prefill.store, &CpuBackend, None, None)
-            .expect("decode_step over cold_kv");
+            larql_inference::WeightsView::dense(&weights),
+            4,
+            prefill.store,
+            &CpuBackend,
+            None,
+            None,
+        )
+        .expect("decode_step over cold_kv");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert!(h.iter().all(|v| v.is_finite()));
         // After overflow merges into cold_residuals, cold_kv is cleared
         // (compute.rs line 260) so a second decode exercises the
         // cold_residuals-only branch (lines 149-160).
         let (h2, _) = rs_decode_step(
-larql_inference::WeightsView::dense(&weights), 5, rs2, &CpuBackend, None, None)
-            .expect("decode_step over cold_residuals");
+            larql_inference::WeightsView::dense(&weights),
+            5,
+            rs2,
+            &CpuBackend,
+            None,
+            None,
+        )
+        .expect("decode_step over cold_residuals");
         assert_eq!(h2.shape(), &[1, weights.hidden_size]);
         assert!(h2.iter().all(|v| v.is_finite()));
     }
@@ -1273,13 +1390,24 @@ larql_inference::WeightsView::dense(&weights), 5, rs2, &CpuBackend, None, None)
                 Some(if inplace { "1" } else { "0" }),
             );
             let prefill = rs_prefill(
-larql_inference::WeightsView::dense(&weights), &[0u32, 1, 2], None, &CpuBackend, None);
+                larql_inference::WeightsView::dense(&weights),
+                &[0u32, 1, 2],
+                None,
+                &CpuBackend,
+                None,
+            );
             let mut rs = prefill.store;
             let mut hiddens = Vec::new();
             for tok in 3u32..=12 {
                 let (h, rs2) = rs_decode_step(
-larql_inference::WeightsView::dense(&weights), tok, rs, &CpuBackend, None, Some(&index))
-                    .expect("decode");
+                    larql_inference::WeightsView::dense(&weights),
+                    tok,
+                    rs,
+                    &CpuBackend,
+                    None,
+                    Some(&index),
+                )
+                .expect("decode");
                 assert!(h.iter().all(|v| v.is_finite()));
                 hiddens.push(h.iter().map(|v| v.to_bits()).collect());
                 rs = rs2;
@@ -1351,13 +1479,18 @@ larql_inference::WeightsView::dense(&weights), tok, rs, &CpuBackend, None, Some(
         use crate::profiler::EngineProfiler;
         let weights = make_test_weights();
         let prefill = rs_prefill(
-larql_inference::WeightsView::dense(&weights), &[0u32, 1, 2, 3], Some(2), &CpuBackend, None);
+            larql_inference::WeightsView::dense(&weights),
+            &[0u32, 1, 2, 3],
+            Some(2),
+            &CpuBackend,
+            None,
+        );
         // Has cold_kv populated → exercises lines 130-147 (cold_kv branch
         // with profiler timing recompute_hot).
         assert!(prefill.store.cold_kv.is_some());
         let mut profiler = EngineProfiler::default();
         let result = rs_decode_step_profiled(
-larql_inference::WeightsView::dense(&weights),
+            larql_inference::WeightsView::dense(&weights),
             4,
             prefill.store,
             &CpuBackend,
@@ -1381,17 +1514,35 @@ larql_inference::WeightsView::dense(&weights),
         // cold_kv (compute.rs line 260); second hits the cold_residuals
         // branch (lines 149-160) under profiling.
         let prefill = rs_prefill(
-larql_inference::WeightsView::dense(&weights), &[0u32, 1, 2, 3], Some(2), &CpuBackend, None);
+            larql_inference::WeightsView::dense(&weights),
+            &[0u32, 1, 2, 3],
+            Some(2),
+            &CpuBackend,
+            None,
+        );
         let (_, rs2) = rs_decode_step(
-larql_inference::WeightsView::dense(&weights), 4, prefill.store, &CpuBackend, None, None).unwrap();
+            larql_inference::WeightsView::dense(&weights),
+            4,
+            prefill.store,
+            &CpuBackend,
+            None,
+            None,
+        )
+        .unwrap();
         assert!(
             rs2.cold_kv.is_none(),
             "cold_kv should be cleared after overflow"
         );
         let mut profiler = EngineProfiler::default();
-        let result =
-            rs_decode_step_profiled(
-larql_inference::WeightsView::dense(&weights), 5, rs2, &CpuBackend, &mut profiler, None, None);
+        let result = rs_decode_step_profiled(
+            larql_inference::WeightsView::dense(&weights),
+            5,
+            rs2,
+            &CpuBackend,
+            &mut profiler,
+            None,
+            None,
+        );
         assert!(result.is_some());
         // cold_residuals branch exercises recompute_cold counter (line 171).
         assert!(profiler.recompute_cold.count > 0);
@@ -1587,7 +1738,14 @@ larql_inference::WeightsView::dense(&weights), 5, rs2, &CpuBackend, &mut profile
         let weights = make_test_weights();
         let h = Array2::from_elem((2, weights.hidden_size), 0.5f32);
         let (k, v) = recompute_kv(
-larql_inference::WeightsView::dense(&weights), &h, 0, 0, &CpuBackend, None).unwrap();
+            larql_inference::WeightsView::dense(&weights),
+            &h,
+            0,
+            0,
+            &CpuBackend,
+            None,
+        )
+        .unwrap();
         let kv_dim = weights.num_kv_heads * weights.head_dim;
         assert_eq!(k.shape(), &[2, kv_dim]);
         assert_eq!(v.shape(), &[2, kv_dim]);
@@ -1601,7 +1759,13 @@ larql_inference::WeightsView::dense(&weights), &h, 0, 0, &CpuBackend, None).unwr
         let weights = make_test_weights();
         let h = Array2::from_elem((2, weights.hidden_size), 0.25f32);
         let result = recompute_kv(
-larql_inference::WeightsView::dense(&weights), &h, 0, 0, &CpuBackend, None);
+            larql_inference::WeightsView::dense(&weights),
+            &h,
+            0,
+            0,
+            &CpuBackend,
+            None,
+        );
         assert!(result.is_some());
         clear_markov_env_overrides();
     }
@@ -1616,10 +1780,22 @@ larql_inference::WeightsView::dense(&weights), &h, 0, 0, &CpuBackend, None);
         // Layer 0: should_cache_selection fires, populates
         // WALK_KV_SELECTION; layer 1: walk_project_cached_topk reads it.
         let _ = recompute_kv(
-larql_inference::WeightsView::dense(&weights), &h, 0, 0, &CpuBackend, None);
+            larql_inference::WeightsView::dense(&weights),
+            &h,
+            0,
+            0,
+            &CpuBackend,
+            None,
+        );
         if weights.num_layers >= 2 {
             let result = recompute_kv(
-larql_inference::WeightsView::dense(&weights), &h, 1, 0, &CpuBackend, None);
+                larql_inference::WeightsView::dense(&weights),
+                &h,
+                1,
+                0,
+                &CpuBackend,
+                None,
+            );
             assert!(result.is_some());
         }
         clear_markov_env_overrides();
@@ -1632,7 +1808,13 @@ larql_inference::WeightsView::dense(&weights), &h, 1, 0, &CpuBackend, None);
         let weights = make_test_weights();
         let h = Array2::from_elem((1, weights.hidden_size), 0.5f32);
         let result = recompute_kv(
-larql_inference::WeightsView::dense(&weights), &h, 0, 0, &CpuBackend, None);
+            larql_inference::WeightsView::dense(&weights),
+            &h,
+            0,
+            0,
+            &CpuBackend,
+            None,
+        );
         assert!(result.is_some());
         clear_markov_env_overrides();
     }
@@ -1670,7 +1852,13 @@ larql_inference::WeightsView::dense(&weights), &h, 0, 0, &CpuBackend, None);
             cold_len: 0,
         };
         let result = rs_decode_step(
-larql_inference::WeightsView::dense(&weights), 0, store, &CpuBackend, None, None);
+            larql_inference::WeightsView::dense(&weights),
+            0,
+            store,
+            &CpuBackend,
+            None,
+            None,
+        );
         assert!(result.is_some());
         let (h, _) = result.unwrap();
         assert_eq!(h.shape(), &[1, weights.hidden_size]);

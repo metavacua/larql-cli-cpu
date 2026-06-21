@@ -318,7 +318,12 @@ impl KvEngine for MarkovResidualEngine {
             // the layer's K/V — residual-stream contract recomputes K/V
             // per decode step from the stored residuals.
             let (h_out, _kv) = executor
-                .run_prefill_layer(larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch), layer, &h, ffn)
+                .run_prefill_layer(
+                    larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch),
+                    layer,
+                    &h,
+                    ffn,
+                )
                 .ok_or_else(|| EngineError::BackendFailure {
                     details: "executor.run_prefill_layer returned None".into(),
                 })?;
@@ -351,8 +356,15 @@ impl KvEngine for MarkovResidualEngine {
         if cold.first().map_or(0, |c| c.shape()[0]) > 0 {
             let cold_kv: Vec<SharedKV> = (0..num_layers)
                 .map(|layer| {
-                    recompute_kv(larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch), &cold[layer], layer, 0, backend, Some(index))
-                        .expect("cold K/V pre-computation failed")
+                    recompute_kv(
+                        larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch),
+                        &cold[layer],
+                        layer,
+                        0,
+                        backend,
+                        Some(index),
+                    )
+                    .expect("cold K/V pre-computation failed")
                 })
                 .collect();
             // 2026-05-19 audit fix: doubling-capacity append.
@@ -411,11 +423,17 @@ impl KvEngine for MarkovResidualEngine {
             // and runs the layer.
             let prior_kv: SharedKV = if let Some(cold_kv) = &rs.cold_kv {
                 let (k_cold, v_cold) = &cold_kv[layer];
-                let (k_hot, v_hot) =
-                    recompute_kv(larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch), h_hot, layer, hot_abs_start, backend, Some(index))
-                        .ok_or_else(|| EngineError::BackendFailure {
-                            details: "recompute_kv (hot) returned None".into(),
-                        })?;
+                let (k_hot, v_hot) = recompute_kv(
+                    larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch),
+                    h_hot,
+                    layer,
+                    hot_abs_start,
+                    backend,
+                    Some(index),
+                )
+                .ok_or_else(|| EngineError::BackendFailure {
+                    details: "recompute_kv (hot) returned None".into(),
+                })?;
                 let c = k_cold.shape()[0];
                 let kv_dim = k_cold.shape()[1];
                 let mut k_combined = Array2::<f32>::zeros((c + s_hot, kv_dim));
@@ -438,7 +456,8 @@ impl KvEngine for MarkovResidualEngine {
                     }
                     _ => (h_hot.clone(), hot_abs_start),
                 };
-                recompute_kv(larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch),
+                recompute_kv(
+                    larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch),
                     &h_full,
                     layer,
                     full_abs_start,
@@ -453,7 +472,14 @@ impl KvEngine for MarkovResidualEngine {
             new_stored.push(h_new.clone());
             // Run the layer through the executor.
             let (h_out, _new_kv) = executor
-                .run_decode_layer(larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch), layer, &h_new, &prior_kv, abs_position, ffn)
+                .run_decode_layer(
+                    larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch),
+                    layer,
+                    &h_new,
+                    &prior_kv,
+                    abs_position,
+                    ffn,
+                )
                 .ok_or_else(|| EngineError::BackendFailure {
                     details: "executor.run_decode_layer returned None".into(),
                 })?;

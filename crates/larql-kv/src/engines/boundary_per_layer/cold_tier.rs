@@ -229,8 +229,15 @@ mod tests {
         let first_overflow: Vec<Array2<f32>> = (0..weights.num_layers)
             .map(|_| Array2::<f32>::from_elem((2, weights.hidden_size), 0.5f32))
             .collect();
-        extend_cold_kv_with_overflow(larql_inference::WeightsView::dense(&weights), &CpuBackend, &policy, &mut rs, &first_overflow, 0)
-            .unwrap();
+        extend_cold_kv_with_overflow(
+            larql_inference::WeightsView::dense(&weights),
+            &CpuBackend,
+            &policy,
+            &mut rs,
+            &first_overflow,
+            0,
+        )
+        .unwrap();
 
         // Now extend with another 3 rows — exercises the Some arm.
         let second_overflow: Vec<Array2<f32>> = (0..weights.num_layers)

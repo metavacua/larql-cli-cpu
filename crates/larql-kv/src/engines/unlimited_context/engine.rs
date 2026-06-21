@@ -293,10 +293,9 @@ impl UnlimitedContextEngine {
 
         let abs_start = self.abs_offset + self.current_window_tokens.len();
         let prof = self.profiling.then_some(&mut self.profile);
-                let view = larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch);
-let out = rs_extend_from_checkpoint_quant(
-            view, index, chunk, prior, abs_start, backend, prof,
-        )?;
+        let view = larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch);
+        let out =
+            rs_extend_from_checkpoint_quant(view, index, chunk, prior, abs_start, backend, prof)?;
 
         self.last_hidden = Some(out.last_hidden);
         // CPU walk path returns narrow `[n, kv_dim]` arrays — counter
@@ -776,8 +775,14 @@ impl UnlimitedContextEngine {
             let mut h = embed_tokens_pub(weights, &[token_id]);
 
             for (layer, kv_slot) in kv_cache.iter_mut().enumerate() {
-                let (h_out, new_kv) =
-                    executor.run_decode_layer(larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch), layer, &h, kv_slot, abs_position, ffn)?;
+                let (h_out, new_kv) = executor.run_decode_layer(
+                    larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch),
+                    layer,
+                    &h,
+                    kv_slot,
+                    abs_position,
+                    ffn,
+                )?;
                 h = h_out;
                 *kv_slot = new_kv;
             }

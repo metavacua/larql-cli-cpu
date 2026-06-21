@@ -42,7 +42,13 @@ pub(super) fn run_prefill(
         stored.push(h.clone());
         let (h_post_attn, _k, _v) =
             run_attention_with_kv_backend(weights, &h, layer, be).expect("attention failed");
-        let h_out = crate::engines::layer_ffn_or_moe(weights.canonical(), &h_post_attn, layer, ffn, Some(ffn));
+        let h_out = crate::engines::layer_ffn_or_moe(
+            weights.canonical(),
+            &h_post_attn,
+            layer,
+            ffn,
+            Some(ffn),
+        );
         h = h_out;
     }
 
@@ -162,7 +168,8 @@ pub(super) fn run_decode(
             }
             let (k_buf, v_buf) = &mut bufs[layer];
             let inplace = if inplace_enabled {
-                larql_inference::attention::run_attention_block_decode_step_auto_inplace(weights,
+                larql_inference::attention::run_attention_block_decode_step_auto_inplace(
+                    weights,
                     &h_new,
                     layer,
                     k_buf,
@@ -185,7 +192,8 @@ pub(super) fn run_decode(
                         v_buf.slice(s![..s_hot, ..]).to_owned(),
                     );
                     let (h, new_kv) =
-                        larql_inference::attention::run_attention_block_decode_step_auto(weights,
+                        larql_inference::attention::run_attention_block_decode_step_auto(
+                            weights,
                             &h_new,
                             layer,
                             Some(&prior),
@@ -241,7 +249,8 @@ pub(super) fn run_decode(
             };
 
             let (h_post_attn, new_kv) =
-                larql_inference::attention::run_attention_block_decode_step_auto(weights,
+                larql_inference::attention::run_attention_block_decode_step_auto(
+                    weights,
                     &h_new,
                     layer,
                     Some(&(k_full, v_full)),
@@ -255,7 +264,13 @@ pub(super) fn run_decode(
             h_post_attn
         };
 
-        let h_out = crate::engines::layer_ffn_or_moe(weights.canonical(), &h_post_attn, layer, ffn, Some(ffn));
+        let h_out = crate::engines::layer_ffn_or_moe(
+            weights.canonical(),
+            &h_post_attn,
+            layer,
+            ffn,
+            Some(ffn),
+        );
         h_new = h_out;
     }
 
@@ -333,8 +348,14 @@ mod tests {
         let ffn = NullFfn;
         let policy = BoundaryLayerPolicy::bf16_uniform("test", weights.num_layers);
         let (hidden, rs) = run_prefill(
-larql_inference::WeightsView::dense(&weights), &ffn, &backend, &policy, None, &[0, 1, 2])
-            .expect("prefill should succeed");
+            larql_inference::WeightsView::dense(&weights),
+            &ffn,
+            &backend,
+            &policy,
+            None,
+            &[0, 1, 2],
+        )
+        .expect("prefill should succeed");
         assert_eq!(hidden.shape(), &[1, weights.hidden_size]);
         assert_eq!(rs.next_position, 3);
         assert!(rs.cold_encoded.is_none());
@@ -351,7 +372,14 @@ larql_inference::WeightsView::dense(&weights), &ffn, &backend, &policy, None, &[
         let ffn = NullFfn;
         let policy = BoundaryLayerPolicy::bf16_uniform("test", weights.num_layers);
         let (_, rs) = run_prefill(
-larql_inference::WeightsView::dense(&weights), &ffn, &backend, &policy, Some(2), &[0, 1, 2]).unwrap();
+            larql_inference::WeightsView::dense(&weights),
+            &ffn,
+            &backend,
+            &policy,
+            Some(2),
+            &[0, 1, 2],
+        )
+        .unwrap();
         assert!(rs.cold_encoded.is_some(), "overflow → cold_encoded");
         assert!(rs.cold_kv.is_some(), "overflow → cold_kv pre-computed");
         let cold_kv = rs.cold_kv.as_ref().unwrap();
@@ -367,12 +395,26 @@ larql_inference::WeightsView::dense(&weights), &ffn, &backend, &policy, Some(2),
         let ffn = NullFfn;
         let policy = BoundaryLayerPolicy::bf16_uniform("test", weights.num_layers);
         let (_, rs) = run_prefill(
-larql_inference::WeightsView::dense(&weights), &ffn, &backend, &policy, Some(4), &[0]).unwrap();
+            larql_inference::WeightsView::dense(&weights),
+            &ffn,
+            &backend,
+            &policy,
+            Some(4),
+            &[0],
+        )
+        .unwrap();
         assert!(rs.cold_encoded.is_none());
 
-        let (hidden, rs_after) =
-            run_decode(
-larql_inference::WeightsView::dense(&weights), &ffn, &backend, &policy, rs, 1, None).unwrap();
+        let (hidden, rs_after) = run_decode(
+            larql_inference::WeightsView::dense(&weights),
+            &ffn,
+            &backend,
+            &policy,
+            rs,
+            1,
+            None,
+        )
+        .unwrap();
         assert_eq!(hidden.shape(), &[1, weights.hidden_size]);
         assert_eq!(rs_after.next_position, 2);
         for slab in &rs_after.stored {
@@ -396,9 +438,15 @@ larql_inference::WeightsView::dense(&weights), &ffn, &backend, &policy, rs, 1, N
         let policy = BoundaryLayerPolicy::bf16_uniform("test", weights.num_layers);
 
         // First build a normal state with overflow.
-        let (_, mut rs) =
-            run_prefill(
-larql_inference::WeightsView::dense(&weights), &ffn, &backend, &policy, Some(2), &[0, 1, 2]).unwrap();
+        let (_, mut rs) = run_prefill(
+            larql_inference::WeightsView::dense(&weights),
+            &ffn,
+            &backend,
+            &policy,
+            Some(2),
+            &[0, 1, 2],
+        )
+        .unwrap();
         // Now wipe the pre-computed cold_kv. cold_encoded stays
         // populated. Decode should recompute K/V from the decoded
         // cold residuals.
@@ -408,8 +456,15 @@ larql_inference::WeightsView::dense(&weights), &ffn, &backend, &policy, Some(2),
 
         let _ = ColdResidualCodec::Bf16; // keep import live
         let (hidden, _) = run_decode(
-larql_inference::WeightsView::dense(&weights), &ffn, &backend, &policy, rs, 3, None)
-            .expect("decode should succeed without cold_kv");
+            larql_inference::WeightsView::dense(&weights),
+            &ffn,
+            &backend,
+            &policy,
+            rs,
+            3,
+            None,
+        )
+        .expect("decode should succeed without cold_kv");
         assert_eq!(hidden.shape(), &[1, weights.hidden_size]);
     }
 
@@ -440,14 +495,27 @@ larql_inference::WeightsView::dense(&weights), &ffn, &backend, &policy, rs, 3, N
                 "LARQL_MARKOV_INPLACE_KV",
                 Some(if inplace { "1" } else { "0" }),
             );
-            let (_, mut rs) =
-                run_prefill(
-larql_inference::WeightsView::dense(&weights), &ffn, &backend, &policy, None, &[0u32, 1, 2]).unwrap();
+            let (_, mut rs) = run_prefill(
+                larql_inference::WeightsView::dense(&weights),
+                &ffn,
+                &backend,
+                &policy,
+                None,
+                &[0u32, 1, 2],
+            )
+            .unwrap();
             let mut hiddens = Vec::new();
             for tok in 3u32..=12 {
-                let (h, rs2) =
-                    run_decode(
-larql_inference::WeightsView::dense(&weights), &ffn, &backend, &policy, rs, tok, Some(&index)).unwrap();
+                let (h, rs2) = run_decode(
+                    larql_inference::WeightsView::dense(&weights),
+                    &ffn,
+                    &backend,
+                    &policy,
+                    rs,
+                    tok,
+                    Some(&index),
+                )
+                .unwrap();
                 assert!(h.iter().all(|v| v.is_finite()));
                 hiddens.push(h.iter().map(|v| v.to_bits()).collect());
                 rs = rs2;
@@ -474,7 +542,14 @@ larql_inference::WeightsView::dense(&weights), &ffn, &backend, &policy, rs, tok,
         let ffn = NullFfn;
         let policy = BoundaryLayerPolicy::bf16_uniform("test", weights.num_layers);
         let (_, rs) = run_prefill(
-larql_inference::WeightsView::dense(&weights), &ffn, &backend, &policy, Some(2), &[0, 1, 2]).unwrap();
+            larql_inference::WeightsView::dense(&weights),
+            &ffn,
+            &backend,
+            &policy,
+            Some(2),
+            &[0, 1, 2],
+        )
+        .unwrap();
         let initial = rs
             .cold_encoded
             .as_ref()
@@ -483,7 +558,15 @@ larql_inference::WeightsView::dense(&weights), &ffn, &backend, &policy, Some(2),
         assert_eq!(initial, 1);
 
         let (_, rs_after) = run_decode(
-larql_inference::WeightsView::dense(&weights), &ffn, &backend, &policy, rs, 3, None).unwrap();
+            larql_inference::WeightsView::dense(&weights),
+            &ffn,
+            &backend,
+            &policy,
+            rs,
+            3,
+            None,
+        )
+        .unwrap();
         let after = rs_after
             .cold_encoded
             .as_ref()
@@ -507,7 +590,14 @@ larql_inference::WeightsView::dense(&weights), &ffn, &backend, &policy, rs, 3, N
 
         // window=2, exactly 2 prompt tokens → fills the window, no overflow.
         let (_, rs) = run_prefill(
-larql_inference::WeightsView::dense(&weights), &ffn, &backend, &policy, Some(2), &[0, 1]).unwrap();
+            larql_inference::WeightsView::dense(&weights),
+            &ffn,
+            &backend,
+            &policy,
+            Some(2),
+            &[0, 1],
+        )
+        .unwrap();
         assert!(
             rs.cold_encoded.is_none(),
             "a window-filling prefill must not overflow yet"
@@ -515,7 +605,15 @@ larql_inference::WeightsView::dense(&weights), &ffn, &backend, &policy, Some(2),
 
         // First decode overflows by one row → initialises cold_encoded.
         let (_, rs_after) = run_decode(
-larql_inference::WeightsView::dense(&weights), &ffn, &backend, &policy, rs, 2, None).unwrap();
+            larql_inference::WeightsView::dense(&weights),
+            &ffn,
+            &backend,
+            &policy,
+            rs,
+            2,
+            None,
+        )
+        .unwrap();
         assert!(
             rs_after.cold_encoded.is_some(),
             "first decode overflow must initialise the cold tier"

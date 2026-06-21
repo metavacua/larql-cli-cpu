@@ -137,7 +137,14 @@ fn run_moe_layer_cpu(
         (h_pa, Some((k_rope, v_final)))
     };
 
-    let h_out = moe_ffn_block_cpu(weights.canonical(), &h_post_attn, layer, ffn, ple_input, moe_remote);
+    let h_out = moe_ffn_block_cpu(
+        weights.canonical(),
+        &h_post_attn,
+        layer,
+        ffn,
+        ple_input,
+        moe_remote,
+    );
     Some((h_out, kv_out))
 }
 

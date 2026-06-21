@@ -202,7 +202,8 @@ pub fn run_layer_with_capture(
     Option<AttentionWeights>,
     Option<SharedKV>,
 )> {
-    run_layer_with_capture_hooked(weights,
+    run_layer_with_capture_hooked(
+        weights,
         h,
         layer,
         ffn,
@@ -314,7 +315,8 @@ mod tests {
         let weights = make_test_weights();
         let ffn = StubFfn { weights: &weights };
         let h = Array2::from_elem((2, weights.hidden_size), 0.5f32);
-        let result = run_layer_with_ffn(WeightsView::dense(&weights), &h, 0, &ffn, false, None, None);
+        let result =
+            run_layer_with_ffn(WeightsView::dense(&weights), &h, 0, &ffn, false, None, None);
         assert!(result.is_some(), "run_layer_with_ffn returned None");
         let (h_out, _act, _kv) = result.unwrap();
         assert_eq!(h_out.shape(), h.shape());
@@ -335,7 +337,8 @@ mod tests {
     fn run_attention_returns_same_shape_as_input() {
         let weights = make_test_weights();
         let h = Array2::from_elem((3, weights.hidden_size), 0.1f32);
-        let h_post = run_attention(WeightsView::dense(&weights), &h, 0).expect("attention should succeed");
+        let h_post =
+            run_attention(WeightsView::dense(&weights), &h, 0).expect("attention should succeed");
         assert_eq!(h_post.shape(), h.shape());
     }
 
@@ -343,9 +346,14 @@ mod tests {
     fn run_attention_inner_with_capture_returns_attention_weights() {
         let weights = make_test_weights();
         let h = Array2::from_elem((2, weights.hidden_size), 0.1f32);
-        let (h_post, attn_w) =
-            run_attention_inner(WeightsView::dense(&weights), &h, 0, /*capture_attention=*/ true, None)
-                .expect("inner attention");
+        let (h_post, attn_w) = run_attention_inner(
+            WeightsView::dense(&weights),
+            &h,
+            0,
+            /*capture_attention=*/ true,
+            None,
+        )
+        .expect("inner attention");
         assert_eq!(h_post.shape(), h.shape());
         assert!(
             attn_w.is_some(),
@@ -357,9 +365,14 @@ mod tests {
     fn run_attention_inner_without_capture_drops_attention_weights() {
         let weights = make_test_weights();
         let h = Array2::from_elem((2, weights.hidden_size), 0.1f32);
-        let (h_post, attn_w) =
-            run_attention_inner(WeightsView::dense(&weights), &h, 0, /*capture_attention=*/ false, None)
-                .expect("inner attention");
+        let (h_post, attn_w) = run_attention_inner(
+            WeightsView::dense(&weights),
+            &h,
+            0,
+            /*capture_attention=*/ false,
+            None,
+        )
+        .expect("inner attention");
         assert_eq!(h_post.shape(), h.shape());
         assert!(
             attn_w.is_none(),
@@ -371,8 +384,8 @@ mod tests {
     fn run_attention_with_kv_cache_returns_kv_pair() {
         let weights = make_test_weights();
         let h = Array2::from_elem((3, weights.hidden_size), 0.1f32);
-        let (h_post, (k, v)) =
-            run_attention_with_kv_cache(WeightsView::dense(&weights), &h, 0).expect("kv cache attention");
+        let (h_post, (k, v)) = run_attention_with_kv_cache(WeightsView::dense(&weights), &h, 0)
+            .expect("kv cache attention");
         assert_eq!(h_post.shape(), h.shape());
         // K and V have the same shape (seq_len × kv_dim).
         assert_eq!(k.shape(), v.shape());
@@ -386,7 +399,8 @@ mod tests {
         let ffn = StubFfn { weights: &weights };
         let h = Array2::from_elem((2, weights.hidden_size), 0.1f32);
         let mut record = RecordHook::for_layers([0]);
-        let result = run_layer_with_capture_hooked(WeightsView::dense(&weights),
+        let result = run_layer_with_capture_hooked(
+            WeightsView::dense(&weights),
             &h,
             /*layer=*/ 0,
             &ffn,
@@ -421,9 +435,11 @@ mod tests {
         let ffn = StubFfn { weights: &weights };
         let h = Array2::from_elem((2, weights.hidden_size), 0.1f32);
         // Run once to build a SharedKV.
-        let (_, fresh_kv) = run_attention_with_kv_cache(WeightsView::dense(&weights), &h, 0).unwrap();
+        let (_, fresh_kv) =
+            run_attention_with_kv_cache(WeightsView::dense(&weights), &h, 0).unwrap();
         let mut hook = crate::forward::NoopHook;
-        let result = run_layer_with_capture_hooked(WeightsView::dense(&weights),
+        let result = run_layer_with_capture_hooked(
+            WeightsView::dense(&weights),
             &h,
             0,
             &ffn,
@@ -445,7 +461,16 @@ mod tests {
         let weights = make_test_weights();
         let ffn = StubFfn { weights: &weights };
         let h = Array2::from_elem((2, weights.hidden_size), 0.1f32);
-        let result = run_layer_with_capture(WeightsView::dense(&weights), &h, 0, &ffn, true, true, None, None);
+        let result = run_layer_with_capture(
+            WeightsView::dense(&weights),
+            &h,
+            0,
+            &ffn,
+            true,
+            true,
+            None,
+            None,
+        );
         let (h_out, act, attn_w, kv_out) = result.expect("non-hooked capture wrapper");
         assert_eq!(h_out.shape(), h.shape());
         assert!(act.is_some());
@@ -461,7 +486,9 @@ mod tests {
         let weights = make_test_weights();
         let ffn = StubFfn { weights: &weights };
         let h = Array2::from_elem((3, weights.hidden_size), 1.0f32);
-        let (h_out, _, _) = run_layer_with_ffn(WeightsView::dense(&weights), &h, 0, &ffn, false, None, None).unwrap();
+        let (h_out, _, _) =
+            run_layer_with_ffn(WeightsView::dense(&weights), &h, 0, &ffn, false, None, None)
+                .unwrap();
         let differ = h
             .iter()
             .zip(h_out.iter())

@@ -103,8 +103,15 @@ pub(super) fn try_prefill_via_dispatch(
             for (layer, overflow) in overflow_per_layer.iter().enumerate() {
                 let codec = policy.codec_for(layer);
                 let decoded_overflow = roundtrip(overflow, codec);
-                let (k, v) = recompute_kv(larql_inference::WeightsView::dense(weights), &decoded_overflow, layer, 0, backend, None)
-                    .expect("cold K/V pre-computation failed");
+                let (k, v) = recompute_kv(
+                    larql_inference::WeightsView::dense(weights),
+                    &decoded_overflow,
+                    layer,
+                    0,
+                    backend,
+                    None,
+                )
+                .expect("cold K/V pre-computation failed");
                 cold_kv.push((k, v));
                 let mut enc = PerLayerEncodedColdLayer::empty(codec, weights.hidden_size);
                 enc.append(overflow);

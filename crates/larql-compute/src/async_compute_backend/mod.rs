@@ -458,7 +458,13 @@ mod tests {
         });
         let query = Array2::zeros((1, weights.hidden_size));
         let _ = backend.attention_step_async(
-larql_models::WeightsView::dense(&weights), &query, &mut kv, 0, 0, None);
+            larql_models::WeightsView::dense(&weights),
+            &query,
+            &mut kv,
+            0,
+            0,
+            None,
+        );
     }
 
     #[test]
@@ -468,7 +474,12 @@ larql_models::WeightsView::dense(&weights), &query, &mut kv, 0, 0, None);
         let weights = larql_models::test_fixtures::make_test_weights();
         let tokens = Array2::zeros((2, weights.hidden_size));
         let _ = backend.attention_prefill_async(
-larql_models::WeightsView::dense(&weights), &tokens, 0, None, None);
+            larql_models::WeightsView::dense(&weights),
+            &tokens,
+            0,
+            None,
+            None,
+        );
     }
 
     #[test]
@@ -489,7 +500,12 @@ larql_models::WeightsView::dense(&weights), &tokens, 0, None, None);
         });
         let ffn = crate::ffn::NullFfn;
         let _ = backend.forward_from_layer_async(
-larql_models::WeightsView::dense(&weights), &ffn, 0, &residuals, &[0u32]);
+            larql_models::WeightsView::dense(&weights),
+            &ffn,
+            0,
+            &residuals,
+            &[0u32],
+        );
     }
 
     #[test]
@@ -505,7 +521,14 @@ larql_models::WeightsView::dense(&weights), &ffn, 0, &residuals, &[0u32]);
         let query = Array2::zeros((1, weights.hidden_size));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = backend.attention_step_windowed_async(
-larql_models::WeightsView::dense(&weights), &query, &mut kv, 0, 0, 4, None);
+                larql_models::WeightsView::dense(&weights),
+                &query,
+                &mut kv,
+                0,
+                0,
+                4,
+                None,
+            );
         }));
         let err = result.expect_err("should panic via attention_step_async");
         let msg = err

@@ -39,8 +39,8 @@
 //!   faster Metal lm_head KNN rather than a full vocab matmul.
 //!
 //! - **CPU fallback**: when Metal is unavailable, engines fall back to a CPU
-//!   path using dequantised attention tensors (lazily inserted into
-//!   `weights.tensors`) and `WalkFfn` for Q4K FFN.
+//!   path using dequantised attention tensors (lazily inserted into the
+//!   engine-owned `dequant_scratch`) and `WalkFfn` for Q4K FFN.
 //!
 //! - **Apollo compressed path**: when the store has boundary residuals captured
 //!   at `crystal_layer` (default 30), `forward_from_layer` runs only

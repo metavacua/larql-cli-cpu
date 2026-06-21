@@ -294,9 +294,19 @@ impl ApolloEngine {
         let perturb = Some((self.config.injection_layer, delta.view()));
         let raw = if let Some(ref bnd) = boundary {
             // Compressed: skip layers 0..crystal, run only crystal..34 (~4 layers)
-            forward_from_layer(larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch), query_ids, bnd, crystal, perturb)
+            forward_from_layer(
+                larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch),
+                query_ids,
+                bnd,
+                crystal,
+                perturb,
+            )
         } else {
-            forward_raw_logits(larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch), &context, perturb)
+            forward_raw_logits(
+                larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch),
+                &context,
+                perturb,
+            )
         };
         let (top1_id, top1_logit) = raw
             .logits
@@ -401,9 +411,19 @@ impl RetrievalEngine for ApolloEngine {
 
         let raw = if let Some(ref bnd) = boundary {
             // Compressed: boundary residual acts as position-0; skip layers 0..crystal.
-            forward_from_layer(larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch), token_ids, bnd, crystal, perturb)
+            forward_from_layer(
+                larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch),
+                token_ids,
+                bnd,
+                crystal,
+                perturb,
+            )
         } else {
-            forward_raw_logits(larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch), &context, perturb)
+            forward_raw_logits(
+                larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch),
+                &context,
+                perturb,
+            )
         };
 
         // Cache decode state.
@@ -446,7 +466,11 @@ impl RetrievalEngine for ApolloEngine {
                 perturb,
             )
         } else {
-            forward_raw_logits(larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch), &self.context_tokens, perturb)
+            forward_raw_logits(
+                larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch),
+                &self.context_tokens,
+                perturb,
+            )
         };
 
         let last = raw.h_pre_norm.shape()[0] - 1;
@@ -463,9 +487,18 @@ impl RetrievalEngine for ApolloEngine {
         index: &larql_inference::larql_vindex::VectorIndex,
         token_ids: &[u32],
     ) -> Result<Array2<f32>, EngineError> {
-        larql_inference::vindex::ensure_attn_tensors_dequantised(&mut self.dequant_scratch, weights, index);
+        larql_inference::vindex::ensure_attn_tensors_dequantised(
+            &mut self.dequant_scratch,
+            weights,
+            index,
+        );
         for layer in 0..weights.num_layers {
-            let _ = larql_inference::vindex::insert_q4k_layer_tensors(&mut self.dequant_scratch, weights, index, layer);
+            let _ = larql_inference::vindex::insert_q4k_layer_tensors(
+                &mut self.dequant_scratch,
+                weights,
+                index,
+                layer,
+            );
         }
         self.prefill(weights, token_ids)
     }
@@ -476,9 +509,18 @@ impl RetrievalEngine for ApolloEngine {
         index: &larql_inference::larql_vindex::VectorIndex,
         token_id: u32,
     ) -> Result<Array2<f32>, EngineError> {
-        larql_inference::vindex::ensure_attn_tensors_dequantised(&mut self.dequant_scratch, weights, index);
+        larql_inference::vindex::ensure_attn_tensors_dequantised(
+            &mut self.dequant_scratch,
+            weights,
+            index,
+        );
         for layer in 0..weights.num_layers {
-            let _ = larql_inference::vindex::insert_q4k_layer_tensors(&mut self.dequant_scratch, weights, index, layer);
+            let _ = larql_inference::vindex::insert_q4k_layer_tensors(
+                &mut self.dequant_scratch,
+                weights,
+                index,
+                layer,
+            );
         }
         self.decode_step(weights, token_id)
     }

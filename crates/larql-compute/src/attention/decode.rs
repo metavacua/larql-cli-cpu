@@ -141,7 +141,14 @@ pub fn run_attention_block_decode_step(
     kv_entry: Option<&SharedKV>,
     abs_position: usize,
 ) -> Option<(Array2<f32>, SharedKV)> {
-    run_attention_block_decode_step_backend(larql_models::WeightsView::dense(weights), h_new, layer, kv_entry, abs_position, None)
+    run_attention_block_decode_step_backend(
+        larql_models::WeightsView::dense(weights),
+        h_new,
+        layer,
+        kv_entry,
+        abs_position,
+        None,
+    )
 }
 
 /// Decode-step attention with optional GPU-accelerated projections
@@ -1245,11 +1252,21 @@ mod tests {
 
         // Dequant the index's layer-0 attn/ffn bytes into weights.tensors,
         // then run the f32 path against those same (dequantised) weights.
-        let inserted = crate::kquant_forward::insert_q4k_layer_tensors(&mut scratch, &weights, &idx, 0)
-            .expect("dequant layer 0 tensors");
-        let (h_dequant, _) =
-            run_attention_block_decode_step_backend(larql_models::WeightsView::dense(&weights), &h, 0, None, 0, Some(&backend))
-                .expect("f32 dequant step");
+        let inserted =
+            crate::kquant_forward::insert_q4k_layer_tensors(&mut scratch, &weights, &idx, 0)
+                .expect("dequant layer 0 tensors");
+        // The dequantised attn tensors live in `scratch` (not `weights.tensors`);
+        // resolve them via `with_scratch` so the f32 path reads the SAME bytes
+        // the Q4K-direct path read from the index.
+        let (h_dequant, _) = run_attention_block_decode_step_backend(
+            larql_models::WeightsView::with_scratch(&weights, &scratch),
+            &h,
+            0,
+            None,
+            0,
+            Some(&backend),
+        )
+        .expect("f32 dequant step");
         let _ = inserted;
 
         assert_eq!(h_direct.shape(), h_dequant.shape());
@@ -1279,7 +1296,8 @@ mod tests {
         let backend = crate::CpuBackend;
         let h = Array2::from_elem((1, weights.hidden_size), 0.1f32);
 
-        let (out, _kv) = run_attention_block_decode_step_auto(larql_models::WeightsView::dense(&weights),
+        let (out, _kv) = run_attention_block_decode_step_auto(
+            larql_models::WeightsView::dense(&weights),
             &h,
             0,
             None,
@@ -1298,15 +1316,17 @@ mod tests {
         let weights = make_test_q4k_weights();
         let mut scratch = larql_models::DequantScratch::new();
         let idx = make_q4k_fixture_index(&weights);
-        // The f32 backend path reads `weights.tensors`; dequant the fixture's
-        // Q4K layer-0 bytes into them so the fallback produces a real result.
+        // The f32 backend path reads its `WeightsView`; dequant the fixture's
+        // Q4K layer-0 bytes into `scratch` so the fallback produces a real
+        // result (resolved via `with_scratch` below).
         crate::kquant_forward::insert_q4k_layer_tensors(&mut scratch, &weights, &idx, 0)
             .expect("dequant layer 0");
         let backend = crate::CpuBackend;
         let h = Array2::from_elem((1, weights.hidden_size), 0.1f32);
 
         // Flag off → Q4K branch skipped → `run_attention_block_decode_step_backend`.
-        let (out, _kv) = run_attention_block_decode_step_auto(larql_models::WeightsView::dense(&weights),
+        let (out, _kv) = run_attention_block_decode_step_auto(
+            larql_models::WeightsView::with_scratch(&weights, &scratch),
             &h,
             0,
             None,
@@ -1333,7 +1353,8 @@ mod tests {
         let mut v_cache = Array2::<f32>::zeros((0, kv_dim));
         let h = Array2::from_elem((1, weights.hidden_size), 0.1f32);
 
-        let out = run_attention_block_decode_step_auto_inplace(larql_models::WeightsView::dense(&weights),
+        let out = run_attention_block_decode_step_auto_inplace(
+            larql_models::WeightsView::dense(&weights),
             &h,
             0,
             &mut k_cache,
@@ -1368,7 +1389,8 @@ mod tests {
         let h = Array2::from_elem((1, weights.hidden_size), 0.1f32);
 
         // Flag off → returns None so the caller uses the owned-concat path.
-        let out = run_attention_block_decode_step_auto_inplace(larql_models::WeightsView::dense(&weights),
+        let out = run_attention_block_decode_step_auto_inplace(
+            larql_models::WeightsView::dense(&weights),
             &h,
             0,
             &mut k_cache,

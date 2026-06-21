@@ -91,7 +91,8 @@ impl<'a> LayerExecutor for LocalWalkExecutor<'a> {
         // both the post-attention hidden + the extended K/V. The
         // engine integrates the K/V per policy (store it, discard it,
         // mix with cold tier, etc.).
-        let (h_post_attn, new_kv) = run_attention_block_decode_step_backend(weights,
+        let (h_post_attn, new_kv) = run_attention_block_decode_step_backend(
+            weights,
             hidden_in,
             layer,
             Some(prior_kv),
@@ -107,6 +108,7 @@ impl<'a> LayerExecutor for LocalWalkExecutor<'a> {
 mod tests {
     use super::*;
     use crate::ffn::WeightFfn;
+    use crate::model::ModelWeights;
     use crate::test_utils::make_test_weights;
     use larql_compute::CpuBackend;
 
@@ -141,7 +143,11 @@ mod tests {
         let hidden_in = Array2::from_elem((3, weights.hidden_size), 0.1f32);
         let (h_out, (k, v)) = exec
             .run_prefill_layer(
-larql_models::WeightsView::dense(&weights), 0, &hidden_in, &ffn)
+                larql_models::WeightsView::dense(&weights),
+                0,
+                &hidden_in,
+                &ffn,
+            )
             .expect("prefill_layer");
         assert_eq!(h_out.shape(), &[3, weights.hidden_size]);
         assert!(h_out.iter().all(|v| v.is_finite()));
@@ -164,8 +170,7 @@ larql_models::WeightsView::dense(&weights), 0, &hidden_in, &ffn)
         let mut h = crate::forward::embed_tokens_pub(&weights, &[0u32, 1, 2]);
         for layer in 0..weights.num_layers {
             let (h_next, _kv) = exec
-                .run_prefill_layer(
-larql_models::WeightsView::dense(&weights), layer, &h, &ffn)
+                .run_prefill_layer(larql_models::WeightsView::dense(&weights), layer, &h, &ffn)
                 .expect("layer prefill");
             assert_eq!(h_next.shape(), &[3, weights.hidden_size]);
             assert!(h_next.iter().all(|v| v.is_finite()));
@@ -185,14 +190,24 @@ larql_models::WeightsView::dense(&weights), layer, &h, &ffn)
         let prefill_hidden = Array2::from_elem((2, weights.hidden_size), 0.1f32);
         let (_, prior_kv) = exec
             .run_prefill_layer(
-larql_models::WeightsView::dense(&weights), 0, &prefill_hidden, &ffn)
+                larql_models::WeightsView::dense(&weights),
+                0,
+                &prefill_hidden,
+                &ffn,
+            )
             .unwrap();
         assert_eq!(prior_kv.0.shape()[0], 2);
 
         let new_token_hidden = Array2::from_elem((1, weights.hidden_size), 0.05f32);
         let (h_out, new_kv) = exec
             .run_decode_layer(
-larql_models::WeightsView::dense(&weights), 0, &new_token_hidden, &prior_kv, 2, &ffn)
+                larql_models::WeightsView::dense(&weights),
+                0,
+                &new_token_hidden,
+                &prior_kv,
+                2,
+                &ffn,
+            )
             .expect("decode_layer");
         assert_eq!(h_out.shape(), &[1, weights.hidden_size]);
         assert!(h_out.iter().all(|v| v.is_finite()));
@@ -212,7 +227,13 @@ larql_models::WeightsView::dense(&weights), 0, &new_token_hidden, &prior_kv, 2, 
         let h_in = Array2::from_elem((1, weights.hidden_size), 0.1f32);
         let (h_out, new_kv) = exec
             .run_decode_layer(
-larql_models::WeightsView::dense(&weights), 0, &h_in, &empty_kv, 0, &ffn)
+                larql_models::WeightsView::dense(&weights),
+                0,
+                &h_in,
+                &empty_kv,
+                0,
+                &ffn,
+            )
             .expect("decode_layer with empty prior");
         assert_eq!(h_out.shape(), &[1, weights.hidden_size]);
         assert_eq!(new_kv.0.shape()[0], 1);
@@ -233,13 +254,21 @@ larql_models::WeightsView::dense(&weights), 0, &h_in, &empty_kv, 0, &ffn)
         let ffn_real = WeightFfn { weights: &weights };
         let (h_real, _) = exec
             .run_prefill_layer(
-larql_models::WeightsView::dense(&weights), 0, &h_in, &ffn_real)
+                larql_models::WeightsView::dense(&weights),
+                0,
+                &h_in,
+                &ffn_real,
+            )
             .unwrap();
 
         let ffn_null = NullFfn;
         let (h_null, _) = exec
             .run_prefill_layer(
-larql_models::WeightsView::dense(&weights), 0, &h_in, &ffn_null)
+                larql_models::WeightsView::dense(&weights),
+                0,
+                &h_in,
+                &ffn_null,
+            )
             .unwrap();
 
         // The two FFN backends produce different outputs; the executor

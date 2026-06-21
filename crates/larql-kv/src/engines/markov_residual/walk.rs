@@ -40,8 +40,9 @@ pub(super) fn rs_prefill_walk(
     // this rebuilt the WalkFfn 34 times per prefill (once per layer);
     // now once total. WalkFfn carries no per-layer state — it's the
     // gate-index + backend pair, both stable across the loop.
-    let walk_ffn = WalkFfn::from_config(weights.canonical(), index, WalkFfnConfig::dense(num_layers))
-        .with_backend(backend);
+    let walk_ffn =
+        WalkFfn::from_config(weights.canonical(), index, WalkFfnConfig::dense(num_layers))
+            .with_backend(backend);
 
     // Capture per-layer K/V from each layer's attention block. These
     // are *already computed* by the forward pass; previously discarded
@@ -161,8 +162,9 @@ pub(super) fn rs_decode_step_walk(
 
     // Hoist WalkFfn out of the per-layer loop — see note in
     // `rs_prefill_walk`. Was 34× construction per decode step.
-    let walk_ffn = WalkFfn::from_config(weights.canonical(), index, WalkFfnConfig::dense(num_layers))
-        .with_backend(backend);
+    let walk_ffn =
+        WalkFfn::from_config(weights.canonical(), index, WalkFfnConfig::dense(num_layers))
+            .with_backend(backend);
 
     // Per-stage accumulators. With W2 caching landed, both
     // `recompute_*` timings should be near zero for cached-path decode
@@ -295,7 +297,8 @@ pub(super) fn rs_decode_step_walk(
             }
         }
         let (h_post_attn, new_kv_full) = native_result.or_else(|| {
-            larql_inference::attention::run_attention_block_decode_step_auto(weights,
+            larql_inference::attention::run_attention_block_decode_step_auto(
+                weights,
                 &h_new,
                 layer,
                 Some(&kv_pair),
@@ -450,7 +453,12 @@ mod tests {
         let weights = make_test_weights();
         let index = make_test_vindex(&weights);
         let result = rs_prefill_walk(
-larql_inference::WeightsView::dense(&weights), &index, &[0u32, 1, 2], None, &CpuBackend);
+            larql_inference::WeightsView::dense(&weights),
+            &index,
+            &[0u32, 1, 2],
+            None,
+            &CpuBackend,
+        );
         assert_eq!(result.hidden.shape(), &[1, weights.hidden_size]);
         assert!(result.hidden.iter().all(|v| v.is_finite()));
         assert!(result.store.cold_residuals.is_none());
@@ -465,7 +473,12 @@ larql_inference::WeightsView::dense(&weights), &index, &[0u32, 1, 2], None, &Cpu
         let weights = make_test_weights();
         let index = make_test_vindex(&weights);
         let result = rs_prefill_walk(
-larql_inference::WeightsView::dense(&weights), &index, &[0u32, 1, 2, 3], Some(2), &CpuBackend);
+            larql_inference::WeightsView::dense(&weights),
+            &index,
+            &[0u32, 1, 2, 3],
+            Some(2),
+            &CpuBackend,
+        );
         assert!(result.store.cold_residuals.is_some());
         assert!(result.store.cold_kv.is_some());
         // Window-clipped, but cold tier captured the two evicted rows.
@@ -480,11 +493,22 @@ larql_inference::WeightsView::dense(&weights), &index, &[0u32, 1, 2, 3], Some(2)
         let weights = make_test_weights();
         let index = make_test_vindex(&weights);
         let prefill = rs_prefill_walk(
-larql_inference::WeightsView::dense(&weights), &index, &[0u32, 1], None, &CpuBackend);
+            larql_inference::WeightsView::dense(&weights),
+            &index,
+            &[0u32, 1],
+            None,
+            &CpuBackend,
+        );
         assert_eq!(prefill.store.next_position, 2);
-        let (h, rs2) =
-            rs_decode_step_walk(
-larql_inference::WeightsView::dense(&weights), &index, 2, prefill.store, &CpuBackend, None).unwrap();
+        let (h, rs2) = rs_decode_step_walk(
+            larql_inference::WeightsView::dense(&weights),
+            &index,
+            2,
+            prefill.store,
+            &CpuBackend,
+            None,
+        )
+        .unwrap();
         assert_eq!(rs2.next_position, 3);
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert!(h.iter().all(|v| v.is_finite()));
@@ -498,10 +522,15 @@ larql_inference::WeightsView::dense(&weights), &index, 2, prefill.store, &CpuBac
         let weights = make_test_weights();
         let index = make_test_vindex(&weights);
         let prefill = rs_prefill_walk(
-larql_inference::WeightsView::dense(&weights), &index, &[0u32, 1, 2, 3], Some(2), &CpuBackend);
+            larql_inference::WeightsView::dense(&weights),
+            &index,
+            &[0u32, 1, 2, 3],
+            Some(2),
+            &CpuBackend,
+        );
         let mut prof = EngineProfiler::default();
         let (h, _) = rs_decode_step_walk(
-larql_inference::WeightsView::dense(&weights),
+            larql_inference::WeightsView::dense(&weights),
             &index,
             4,
             prefill.store,
@@ -526,13 +555,24 @@ larql_inference::WeightsView::dense(&weights),
         let weights = make_test_weights();
         let index = make_test_vindex(&weights);
         let prefill = rs_prefill_walk(
-larql_inference::WeightsView::dense(&weights), &index, &[0u32, 1, 2, 3], Some(2), &CpuBackend);
+            larql_inference::WeightsView::dense(&weights),
+            &index,
+            &[0u32, 1, 2, 3],
+            Some(2),
+            &CpuBackend,
+        );
         let mut store = prefill.store;
         store.hot_kv = None;
         let mut prof = EngineProfiler::default();
-        let (h, rs2) =
-            rs_decode_step_walk(
-larql_inference::WeightsView::dense(&weights), &index, 4, store, &CpuBackend, Some(&mut prof)).unwrap();
+        let (h, rs2) = rs_decode_step_walk(
+            larql_inference::WeightsView::dense(&weights),
+            &index,
+            4,
+            store,
+            &CpuBackend,
+            Some(&mut prof),
+        )
+        .unwrap();
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         // hot_kv is repopulated on every decode step.
         assert!(rs2.hot_kv.is_some());
@@ -547,12 +587,24 @@ larql_inference::WeightsView::dense(&weights), &index, 4, store, &CpuBackend, So
         let weights = make_test_weights();
         let index = make_test_vindex(&weights);
         let prefill = rs_prefill_walk(
-larql_inference::WeightsView::dense(&weights), &index, &[0u32, 1, 2, 3], Some(2), &CpuBackend);
+            larql_inference::WeightsView::dense(&weights),
+            &index,
+            &[0u32, 1, 2, 3],
+            Some(2),
+            &CpuBackend,
+        );
         let mut store = prefill.store;
         store.hot_kv = None;
         store.cold_kv = None;
         let (h, _) = rs_decode_step_walk(
-larql_inference::WeightsView::dense(&weights), &index, 4, store, &CpuBackend, None).unwrap();
+            larql_inference::WeightsView::dense(&weights),
+            &index,
+            4,
+            store,
+            &CpuBackend,
+            None,
+        )
+        .unwrap();
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert!(h.iter().all(|v| v.is_finite()));
     }
@@ -566,11 +618,22 @@ larql_inference::WeightsView::dense(&weights), &index, 4, store, &CpuBackend, No
         let weights = make_test_weights();
         let index = make_test_vindex(&weights);
         let prefill = rs_prefill_walk(
-larql_inference::WeightsView::dense(&weights), &index, &[0u32, 1], Some(2), &CpuBackend);
+            larql_inference::WeightsView::dense(&weights),
+            &index,
+            &[0u32, 1],
+            Some(2),
+            &CpuBackend,
+        );
         assert!(prefill.store.cold_residuals.is_none());
-        let (_, rs2) =
-            rs_decode_step_walk(
-larql_inference::WeightsView::dense(&weights), &index, 2, prefill.store, &CpuBackend, None).unwrap();
+        let (_, rs2) = rs_decode_step_walk(
+            larql_inference::WeightsView::dense(&weights),
+            &index,
+            2,
+            prefill.store,
+            &CpuBackend,
+            None,
+        )
+        .unwrap();
         assert!(rs2.cold_residuals.is_some());
         // 2026-05-19 audit fix: shape()[0] is doubling capacity. Use cold_len.
         assert_eq!(rs2.cold_len, 1);

@@ -171,15 +171,22 @@ mod tests {
         let weights = crate::test_utils::make_test_weights();
         let ffn = crate::ffn::WeightFfn { weights: &weights };
         let hidden = Array2::<f32>::zeros((1, weights.hidden_size));
-        assert!(exec.run_prefill_layer(
-larql_models::WeightsView::dense(&weights), 0, &hidden, &ffn).is_none());
+        assert!(exec
+            .run_prefill_layer(larql_models::WeightsView::dense(&weights), 0, &hidden, &ffn)
+            .is_none());
 
         // SharedKV = (K, V) as Array2<f32>: shape doesn't matter — the
         // default impl returns None before touching either tensor.
         let kv: SharedKV = (Array2::<f32>::zeros((1, 1)), Array2::<f32>::zeros((1, 1)));
         assert!(exec
             .run_decode_layer(
-larql_models::WeightsView::dense(&weights), 0, &hidden, &kv, 0, &ffn)
+                larql_models::WeightsView::dense(&weights),
+                0,
+                &hidden,
+                &kv,
+                0,
+                &ffn
+            )
             .is_none());
     }
 

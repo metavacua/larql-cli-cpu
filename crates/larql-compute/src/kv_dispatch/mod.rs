@@ -296,8 +296,7 @@ pub trait KvDispatch {
         window: usize,
         index: Option<&dyn crate::KvIndex>,
     ) -> Option<Array2<f32>> {
-        let h = self.attention_step(
-weights, query, kv, layer, abs_position, index)?;
+        let h = self.attention_step(weights, query, kv, layer, abs_position, index)?;
         self.clip_kv(kv, window);
         Some(h)
     }
@@ -457,8 +456,7 @@ weights, query, kv, layer, abs_position, index)?;
         state: Option<&mut PerLayerDecodeState>,
     ) -> Option<(Array2<f32>, KvHandle)> {
         let _ = state;
-        self.coarse_prefill(
-weights, token_ids, index)
+        self.coarse_prefill(weights, token_ids, index)
     }
 
     /// One coarse decode step **with per-layer state capture** — the
@@ -492,8 +490,7 @@ weights, token_ids, index)
         state: Option<&mut PerLayerDecodeState>,
     ) -> Option<Array2<f32>> {
         let _ = state;
-        self.coarse_decode_step(
-weights, token_id, index, handle, abs_position)
+        self.coarse_decode_step(weights, token_id, index, handle, abs_position)
     }
 
     /// Mask-aware variant of [`Self::coarse_decode_step_with_state`].
@@ -751,7 +748,13 @@ mod tests {
         let query = Array2::zeros((1, weights.hidden_size));
         assert!(backend
             .attention_step(
-larql_models::WeightsView::dense(&weights), &query, &mut handle, 0, 0, None)
+                larql_models::WeightsView::dense(&weights),
+                &query,
+                &mut handle,
+                0,
+                0,
+                None
+            )
             .is_none());
     }
 
@@ -766,7 +769,14 @@ larql_models::WeightsView::dense(&weights), &query, &mut handle, 0, 0, None)
         let query = Array2::zeros((1, weights.hidden_size));
         assert!(backend
             .attention_step_windowed(
-larql_models::WeightsView::dense(&weights), &query, &mut handle, 0, 0, 4, None)
+                larql_models::WeightsView::dense(&weights),
+                &query,
+                &mut handle,
+                0,
+                0,
+                4,
+                None
+            )
             .is_none());
     }
 
@@ -777,7 +787,12 @@ larql_models::WeightsView::dense(&weights), &query, &mut handle, 0, 0, 4, None)
         let tokens = Array2::zeros((2, weights.hidden_size));
         assert!(backend
             .attention_prefill(
-larql_models::WeightsView::dense(&weights), &tokens, 0, None, None)
+                larql_models::WeightsView::dense(&weights),
+                &tokens,
+                0,
+                None,
+                None
+            )
             .is_none());
     }
 
@@ -787,8 +802,7 @@ larql_models::WeightsView::dense(&weights), &tokens, 0, None, None)
         let weights = larql_models::test_fixtures::make_test_weights();
         let residuals = Array2::zeros((1, weights.hidden_size));
         assert!(backend
-            .recompute_kv_from_residuals(
-larql_models::WeightsView::dense(&weights), &residuals, 0)
+            .recompute_kv_from_residuals(larql_models::WeightsView::dense(&weights), &residuals, 0)
             .is_none());
     }
 
@@ -805,7 +819,12 @@ larql_models::WeightsView::dense(&weights), &residuals, 0)
         let weights = larql_models::test_fixtures::make_test_weights();
         let residuals = stub_residual_handle(1, weights.hidden_size);
         assert!(backend
-            .forward_from_layer(larql_models::WeightsView::dense(&weights), 0, &residuals, &[0u32])
+            .forward_from_layer(
+                larql_models::WeightsView::dense(&weights),
+                0,
+                &residuals,
+                &[0u32]
+            )
             .is_none());
     }
 

@@ -347,9 +347,10 @@ pub trait KvEngine: Send {
     /// through `backend.prefill_kquant` for full GPU speed. Falls back to the
     /// f32 path when `backend.supports_quant(::larql_compute::QuantFormat::Q4_K) == false` or `index` has no Q4K data.
     ///
-    /// `weights` is `&mut` so the engine can lazily insert dequantised f32
-    /// attention tensors into `weights.tensors` on the first call (one-time
-    /// cost; subsequent decode steps reuse the cached tensors).
+    /// `weights` is `&ModelWeights` (immutable): the engine dequantises f32
+    /// attention tensors into its own `dequant_scratch` on the first call and
+    /// resolves them via `WeightsView::with_scratch` (one-time cost; subsequent
+    /// decode steps reuse the engine-owned scratch).
     fn prefill_quant(
         &mut self,
         weights: &ModelWeights,
@@ -378,13 +379,12 @@ pub trait KvEngine: Send {
         self.decode_step(weights, ffn, token_id) // default: f32 fallback
     }
 
-    /// Resident-weights quant prefill. Unlike [`prefill_quant`] (which takes
-    /// `&mut weights` to lazily dequantise attn into `weights.tensors`), this
-    /// assumes the **caller has already made the client weights f32-resident**
-    /// — so it takes `&weights` and merely threads `index` to the backend. That
-    /// lets a Q4K-direct attention kernel (`LARQL_Q4K_DIRECT_ATTN`) read packed
-    /// bytes from the index while the FFN backend borrows the same `&weights`
-    /// immutably — no `&mut`/`&` borrow conflict (task #16). Default: f32
+    /// Resident-weights quant prefill. Unlike [`prefill_quant`] (which
+    /// dequantises attn into the engine's `dequant_scratch`), this assumes the
+    /// **caller has already made the client weights f32-resident** — so it
+    /// merely threads `index` to the backend. That lets a Q4K-direct attention
+    /// kernel (`LARQL_Q4K_DIRECT_ATTN`) read packed bytes from the index while
+    /// the FFN backend borrows the same `&weights` (task #16). Default: f32
     /// fallback (index ignored).
     fn prefill_resident(
         &mut self,
@@ -525,17 +525,12 @@ pub trait RetrievalEngine: Send {
         token_id: u32,
     ) -> Result<Array2<f32>, EngineError>;
 
-    /// Prefill against a Q4K-quantised vindex. Default impl dequantises
-    /// the attention tensors into `weights.tensors` and delegates to
-    /// [`prefill`](Self::prefill); engines that also need the FFN
-    /// tensors dequantised (e.g. Apollo, which runs its forward through
-    /// `forward_raw_logits` rather than an `FfnBackend` router) override
-    /// to insert those too.
-    ///
-    /// `weights` is `&mut` because the dequant step lazily populates
-    /// `weights.tensors`. Production callers reuse the populated
-    /// tensors across subsequent decode steps; the cost is one-time per
-    /// engine session.
+    /// Prefill against a Q4K-quantised vindex. **No default** — the trait
+    /// default returns an `InvariantViolation` because the `ffn`-less `prefill`
+    /// it would delegate to can't be handed an engine-owned dequant scratch
+    /// without mutating `weights`. Engines that serve Q4K (e.g. Apollo, which
+    /// runs its forward through `forward_raw_logits` and dequantises attn+FFN
+    /// into its own `dequant_scratch`) override this.
     fn prefill_quant(
         &mut self,
         weights: &ModelWeights,
@@ -561,8 +556,7 @@ pub trait RetrievalEngine: Send {
     ) -> Result<Array2<f32>, EngineError> {
         let _ = (weights, index, token_id);
         Err(EngineError::InvariantViolation {
-            what: "RetrievalEngine::decode_step_quant must be overridden for Q4K vindexes."
-                .into(),
+            what: "RetrievalEngine::decode_step_quant must be overridden for Q4K vindexes.".into(),
         })
     }
 

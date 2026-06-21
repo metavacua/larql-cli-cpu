@@ -283,7 +283,11 @@ impl KvEngine for BoundaryPerLayerEngine {
         }
         // Fall back to dense f32 walk (compact vindexes / CPU backend).
         self.kv_handle = None;
-        larql_inference::vindex::dequant::ensure_attn_tensors_dequantised(&mut self.dequant_scratch, weights, index);
+        larql_inference::vindex::dequant::ensure_attn_tensors_dequantised(
+            &mut self.dequant_scratch,
+            weights,
+            index,
+        );
         self.prefill(weights, ffn, token_ids)
     }
 
@@ -334,7 +338,11 @@ impl KvEngine for BoundaryPerLayerEngine {
                 }
             }
         }
-        larql_inference::vindex::dequant::ensure_attn_tensors_dequantised(&mut self.dequant_scratch, weights, index);
+        larql_inference::vindex::dequant::ensure_attn_tensors_dequantised(
+            &mut self.dequant_scratch,
+            weights,
+            index,
+        );
         self.decode_step(weights, ffn, token_id)
     }
 
@@ -391,12 +399,17 @@ impl KvEngine for BoundaryPerLayerEngine {
             .ok_or_else(|| EngineError::InvariantViolation {
                 what: "decode_step_via_executor called before prefill (store missing)".into(),
             })?;
-        let (hidden, new_rs) =
-            executor::run_decode(larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch), executor, ffn, &self.policy, rs, token_id).ok_or_else(
-                || EngineError::BackendFailure {
-                    details: "executor::run_decode returned None".into(),
-                },
-            )?;
+        let (hidden, new_rs) = executor::run_decode(
+            larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch),
+            executor,
+            ffn,
+            &self.policy,
+            rs,
+            token_id,
+        )
+        .ok_or_else(|| EngineError::BackendFailure {
+            details: "executor::run_decode returned None".into(),
+        })?;
         self.store = Some(new_rs);
         Ok(hidden)
     }

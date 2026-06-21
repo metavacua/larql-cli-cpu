@@ -128,17 +128,12 @@ impl StandardEngine {
     ) -> Result<Array2<f32>, EngineError> {
         let view = larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch);
         let (hidden, handles) = match &self.backend {
-            BackendSlot::Sync(b) => kv_prefill_via_dispatch(
-                b.as_ref(),
-                view,
-                ffn,
-                token_ids,
-                self.window_size,
-                index,
-            )
-            .ok_or_else(|| EngineError::BackendFailure {
-                details: "kv_prefill_via_dispatch returned None".into(),
-            })?,
+            BackendSlot::Sync(b) => {
+                kv_prefill_via_dispatch(b.as_ref(), view, ffn, token_ids, self.window_size, index)
+                    .ok_or_else(|| EngineError::BackendFailure {
+                    details: "kv_prefill_via_dispatch returned None".into(),
+                })?
+            }
             BackendSlot::Async(b) => kv_prefill_via_dispatch_async(
                 b.as_ref(),
                 view,

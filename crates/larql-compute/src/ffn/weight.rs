@@ -62,11 +62,22 @@ pub struct BackendFfn<'a, 'b> {
 
 impl<'a, 'b> FfnBackend for BackendFfn<'a, 'b> {
     fn forward(&self, layer: usize, x: &Array2<f32>) -> Array2<f32> {
-        dense_ffn_forward_backend(WeightsView::dense(self.weights), layer, x, Some(self.backend)).0
+        dense_ffn_forward_backend(
+            WeightsView::dense(self.weights),
+            layer,
+            x,
+            Some(self.backend),
+        )
+        .0
     }
 
     fn forward_with_activation(&self, layer: usize, x: &Array2<f32>) -> (Array2<f32>, Array2<f32>) {
-        dense_ffn_forward_backend(WeightsView::dense(self.weights), layer, x, Some(self.backend))
+        dense_ffn_forward_backend(
+            WeightsView::dense(self.weights),
+            layer,
+            x,
+            Some(self.backend),
+        )
     }
 
     fn name(&self) -> &str {
@@ -339,9 +350,14 @@ mod tests {
         // output (within float noise).
         let weights = make_test_weights();
         let input = x(2, weights.hidden_size);
-        let (out_none, act_none) = dense_ffn_forward_backend(WeightsView::dense(&weights), 0, &input, None);
-        let (out_some, act_some) =
-            dense_ffn_forward_backend(WeightsView::dense(&weights), 0, &input, Some(&crate::CpuBackend));
+        let (out_none, act_none) =
+            dense_ffn_forward_backend(WeightsView::dense(&weights), 0, &input, None);
+        let (out_some, act_some) = dense_ffn_forward_backend(
+            WeightsView::dense(&weights),
+            0,
+            &input,
+            Some(&crate::CpuBackend),
+        );
         for (a, b) in out_none.iter().zip(out_some.iter()) {
             assert!((a - b).abs() < 1e-4, "out diverged: {a} vs {b}");
         }

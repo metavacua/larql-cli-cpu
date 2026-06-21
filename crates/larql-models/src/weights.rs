@@ -392,7 +392,9 @@ mod weights_view_tests {
         let scratch_override = arr2(&[[9.0f32, 9.0]]).into_shared();
         let scratch_only = arr2(&[[3.0f32]]).into_shared();
         weights.tensors.insert("shared".into(), canonical.clone());
-        weights.tensors.insert("canon_only".into(), canonical.clone());
+        weights
+            .tensors
+            .insert("canon_only".into(), canonical.clone());
 
         let mut scratch = DequantScratch::new();
         scratch.insert("shared".into(), scratch_override.clone()); // shadows canonical

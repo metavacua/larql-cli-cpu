@@ -124,7 +124,8 @@ pub fn run_attention_block_gpu(
 
     let res_mult = arch.residual_multiplier();
     let h_post_attn = if arch.has_post_norms() {
-        let normed = crate::forward::apply_norm(&weights,
+        let normed = crate::forward::apply_norm(
+            &weights,
             &attn_projected,
             &arch.post_attention_layernorm_key(layer),
             norm_offset,
@@ -340,8 +341,14 @@ mod tests {
     fn run_attention_block_gpu_no_backend_falls_back_to_cpu() {
         let weights = make_test_weights();
         let input = h(2, weights.hidden_size);
-        let (h_post, attn_proj, attn_w) =
-            run_attention_block_gpu(larql_models::WeightsView::dense(&weights), &input, 0, false, None).unwrap();
+        let (h_post, attn_proj, attn_w) = run_attention_block_gpu(
+            larql_models::WeightsView::dense(&weights),
+            &input,
+            0,
+            false,
+            None,
+        )
+        .unwrap();
         assert_eq!(h_post.shape(), &[2, weights.hidden_size]);
         assert_eq!(attn_proj.shape()[0], 2);
         assert!(attn_w.is_none());
@@ -351,9 +358,22 @@ mod tests {
     fn run_attention_block_gpu_with_cpu_backend_matches_no_backend() {
         let weights = make_test_weights();
         let input = h(2, weights.hidden_size);
-        let (h_no, _, _) = run_attention_block_gpu(larql_models::WeightsView::dense(&weights), &input, 0, false, None).unwrap();
-        let (h_cpu, _, _) =
-            run_attention_block_gpu(larql_models::WeightsView::dense(&weights), &input, 0, false, Some(&crate::CpuBackend)).unwrap();
+        let (h_no, _, _) = run_attention_block_gpu(
+            larql_models::WeightsView::dense(&weights),
+            &input,
+            0,
+            false,
+            None,
+        )
+        .unwrap();
+        let (h_cpu, _, _) = run_attention_block_gpu(
+            larql_models::WeightsView::dense(&weights),
+            &input,
+            0,
+            false,
+            Some(&crate::CpuBackend),
+        )
+        .unwrap();
         for (a, b) in h_no.iter().zip(h_cpu.iter()) {
             assert!(
                 (a - b).abs() < 1e-4,
@@ -366,7 +386,14 @@ mod tests {
     fn run_attention_block_gpu_capture_attention_returns_weights() {
         let weights = make_test_weights();
         let input = h(3, weights.hidden_size);
-        let (_, _, attn_w) = run_attention_block_gpu(larql_models::WeightsView::dense(&weights), &input, 0, true, None).unwrap();
+        let (_, _, attn_w) = run_attention_block_gpu(
+            larql_models::WeightsView::dense(&weights),
+            &input,
+            0,
+            true,
+            None,
+        )
+        .unwrap();
         let aw = attn_w.expect("capture=true must yield weights");
         assert_eq!(aw.heads.len(), weights.num_q_heads);
     }
@@ -376,8 +403,14 @@ mod tests {
         let weights = make_test_weights();
         let input = h(2, weights.hidden_size);
         for layer in 0..weights.num_layers {
-            let (h_out, _, _) =
-                run_attention_block_gpu(larql_models::WeightsView::dense(&weights), &input, layer, false, None).unwrap();
+            let (h_out, _, _) = run_attention_block_gpu(
+                larql_models::WeightsView::dense(&weights),
+                &input,
+                layer,
+                false,
+                None,
+            )
+            .unwrap();
             assert!(
                 h_out.iter().all(|v| v.is_finite()),
                 "layer {layer} non-finite"
@@ -390,7 +423,14 @@ mod tests {
         let weights = make_test_weights();
         let input = h(2, weights.hidden_size);
         let bogus = weights.num_layers + 5;
-        assert!(run_attention_block_gpu(larql_models::WeightsView::dense(&weights), &input, bogus, false, None).is_none());
+        assert!(run_attention_block_gpu(
+            larql_models::WeightsView::dense(&weights),
+            &input,
+            bogus,
+            false,
+            None
+        )
+        .is_none());
     }
 
     #[test]
@@ -411,7 +451,14 @@ mod tests {
         // rms_norm_heads branches and post-norm residual path.
         let weights = larql_models::test_fixtures::make_gemma3_test_weights();
         let input = h(2, weights.hidden_size);
-        let (h_post, _, _) = run_attention_block_gpu(larql_models::WeightsView::dense(&weights), &input, 0, false, None).unwrap();
+        let (h_post, _, _) = run_attention_block_gpu(
+            larql_models::WeightsView::dense(&weights),
+            &input,
+            0,
+            false,
+            None,
+        )
+        .unwrap();
         assert_eq!(h_post.shape(), &[2, weights.hidden_size]);
         assert!(h_post.iter().all(|v| v.is_finite()));
     }
@@ -421,7 +468,14 @@ mod tests {
         // Starcoder2 has Q/K/V/O bias keys → all four `add_bias` arms fire.
         let weights = larql_models::test_fixtures::make_starcoder2_test_weights();
         let input = h(2, weights.hidden_size);
-        let (h_post, _, _) = run_attention_block_gpu(larql_models::WeightsView::dense(&weights), &input, 0, false, None).unwrap();
+        let (h_post, _, _) = run_attention_block_gpu(
+            larql_models::WeightsView::dense(&weights),
+            &input,
+            0,
+            false,
+            None,
+        )
+        .unwrap();
         assert_eq!(h_post.shape(), &[2, weights.hidden_size]);
         assert!(h_post.iter().all(|v| v.is_finite()));
     }
@@ -433,7 +487,13 @@ mod tests {
         // `run_attention_block_gpu`).
         let weights = larql_models::test_fixtures::make_gemma3_test_weights();
         let input = h(2, weights.hidden_size);
-        let (h_out, k, v) = run_attention_with_kv_backend(larql_models::WeightsView::dense(&weights), &input, 0, None).unwrap();
+        let (h_out, k, v) = run_attention_with_kv_backend(
+            larql_models::WeightsView::dense(&weights),
+            &input,
+            0,
+            None,
+        )
+        .unwrap();
         assert_eq!(h_out.shape(), &[2, weights.hidden_size]);
         let kv_dim = weights.num_kv_heads * weights.head_dim;
         assert_eq!(k.shape(), &[2, kv_dim]);
@@ -457,10 +517,19 @@ mod tests {
         let weights = larql_models::test_fixtures::make_gemma3_rope_scaled_test_weights();
         let input = h(5, weights.hidden_size);
         for layer in 0..weights.num_layers {
-            let engine =
-                run_attention_with_kv_backend(larql_models::WeightsView::dense(&weights), &input, layer, Some(&crate::CpuBackend))
-                    .expect("engine attention");
-            let recompute = crate::attention::block::run_attention_block_with_kv_out(larql_models::WeightsView::dense(&weights), &input, layer, false, None,
+            let engine = run_attention_with_kv_backend(
+                larql_models::WeightsView::dense(&weights),
+                &input,
+                layer,
+                Some(&crate::CpuBackend),
+            )
+            .expect("engine attention");
+            let recompute = crate::attention::block::run_attention_block_with_kv_out(
+                larql_models::WeightsView::dense(&weights),
+                &input,
+                layer,
+                false,
+                None,
             )
             .expect("full-recompute attention");
             for (a, b) in engine.0.iter().zip(recompute.0.iter()) {
@@ -478,7 +547,13 @@ mod tests {
         // `run_attention_with_kv_backend`.
         let weights = larql_models::test_fixtures::make_starcoder2_test_weights();
         let input = h(2, weights.hidden_size);
-        let (h_out, _, _) = run_attention_with_kv_backend(larql_models::WeightsView::dense(&weights), &input, 0, None).unwrap();
+        let (h_out, _, _) = run_attention_with_kv_backend(
+            larql_models::WeightsView::dense(&weights),
+            &input,
+            0,
+            None,
+        )
+        .unwrap();
         assert_eq!(h_out.shape(), &[2, weights.hidden_size]);
         assert!(h_out.iter().all(|x| x.is_finite()));
     }
@@ -490,9 +565,20 @@ mod tests {
         // post-norm + QK-norm branches.
         let weights = larql_models::test_fixtures::make_gemma3_test_weights();
         let input = h(2, weights.hidden_size);
-        let (h_no, _, _) = run_attention_with_kv_backend(larql_models::WeightsView::dense(&weights), &input, 0, None).unwrap();
-        let (h_cpu, _, _) =
-            run_attention_with_kv_backend(larql_models::WeightsView::dense(&weights), &input, 0, Some(&crate::CpuBackend)).unwrap();
+        let (h_no, _, _) = run_attention_with_kv_backend(
+            larql_models::WeightsView::dense(&weights),
+            &input,
+            0,
+            None,
+        )
+        .unwrap();
+        let (h_cpu, _, _) = run_attention_with_kv_backend(
+            larql_models::WeightsView::dense(&weights),
+            &input,
+            0,
+            Some(&crate::CpuBackend),
+        )
+        .unwrap();
         for (a, b) in h_no.iter().zip(h_cpu.iter()) {
             assert!((a - b).abs() < 1e-4, "diverged: {a} vs {b}");
         }
@@ -523,9 +609,20 @@ mod tests {
     fn run_attention_with_kv_backend_matches_no_backend() {
         let weights = make_test_weights();
         let input = h(2, weights.hidden_size);
-        let (h_no, k_no, v_no) = run_attention_with_kv_backend(larql_models::WeightsView::dense(&weights), &input, 0, None).unwrap();
-        let (h_cpu, k_cpu, v_cpu) =
-            run_attention_with_kv_backend(larql_models::WeightsView::dense(&weights), &input, 0, Some(&crate::CpuBackend)).unwrap();
+        let (h_no, k_no, v_no) = run_attention_with_kv_backend(
+            larql_models::WeightsView::dense(&weights),
+            &input,
+            0,
+            None,
+        )
+        .unwrap();
+        let (h_cpu, k_cpu, v_cpu) = run_attention_with_kv_backend(
+            larql_models::WeightsView::dense(&weights),
+            &input,
+            0,
+            Some(&crate::CpuBackend),
+        )
+        .unwrap();
         for (a, b) in h_no.iter().zip(h_cpu.iter()) {
             assert!((a - b).abs() < 1e-4);
         }

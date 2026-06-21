@@ -379,7 +379,10 @@ fn test_detect_bitnet_is_explicit_not_generic() {
         let arch = detect_from_json(&config);
         assert_eq!(arch.family(), "bitnet", "model_type={model_type}");
         // Epsilon is honoured from config, not hardcoded.
-        assert!((arch.norm_eps() - 1e-5).abs() < 1e-9, "model_type={model_type}");
+        assert!(
+            (arch.norm_eps() - 1e-5).abs() < 1e-9,
+            "model_type={model_type}"
+        );
     }
 }
 

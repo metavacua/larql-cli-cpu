@@ -65,14 +65,9 @@ fn main() {
     );
 
     let abs_position = prompt_ids.len();
-    let (h_staged, _) = predict_kquant_decode_step(
-        &weights,
-        first_id,
-        &index,
-        &mut cache_staged,
-        abs_position,
-    )
-    .expect("staged step");
+    let (h_staged, _) =
+        predict_kquant_decode_step(&weights, first_id, &index, &mut cache_staged, abs_position)
+            .expect("staged step");
     let backend = larql_compute::default_backend();
     let h_direct = predict_kquant_decode_step_direct(
         &mut weights,

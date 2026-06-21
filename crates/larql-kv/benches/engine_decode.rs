@@ -182,31 +182,68 @@ fn bench_helpers_sync_vs_async(c: &mut Criterion) {
 
     group.bench_function("prefill_sync", |b| {
         b.iter(|| {
-            let _ = kv_prefill_via_dispatch(&cpu, larql_inference::WeightsView::dense(&weights), &ffn, &prompt, None, None).unwrap();
+            let _ = kv_prefill_via_dispatch(
+                &cpu,
+                larql_inference::WeightsView::dense(&weights),
+                &ffn,
+                &prompt,
+                None,
+                None,
+            )
+            .unwrap();
         });
     });
 
     group.bench_function("prefill_async", |b| {
         b.iter(|| {
-            let _ =
-                kv_prefill_via_dispatch_async(&cpu, larql_inference::WeightsView::dense(&weights), &ffn, &prompt, None, None).unwrap();
+            let _ = kv_prefill_via_dispatch_async(
+                &cpu,
+                larql_inference::WeightsView::dense(&weights),
+                &ffn,
+                &prompt,
+                None,
+                None,
+            )
+            .unwrap();
         });
     });
 
     group.bench_function("decode_step_sync", |b| {
-        let (_, mut handles) =
-            kv_prefill_via_dispatch(&cpu, larql_inference::WeightsView::dense(&weights), &ffn, &prompt, None, None).unwrap();
+        let (_, mut handles) = kv_prefill_via_dispatch(
+            &cpu,
+            larql_inference::WeightsView::dense(&weights),
+            &ffn,
+            &prompt,
+            None,
+            None,
+        )
+        .unwrap();
         let mut pos = prompt.len();
         b.iter(|| {
-            let _ =
-                kv_decode_step_via_dispatch(&cpu, larql_inference::WeightsView::dense(&weights), &ffn, &mut handles, 1, pos, None, None);
+            let _ = kv_decode_step_via_dispatch(
+                &cpu,
+                larql_inference::WeightsView::dense(&weights),
+                &ffn,
+                &mut handles,
+                1,
+                pos,
+                None,
+                None,
+            );
             pos += 1;
         });
     });
 
     group.bench_function("decode_step_async", |b| {
-        let (_, mut handles) =
-            kv_prefill_via_dispatch_async(&cpu, larql_inference::WeightsView::dense(&weights), &ffn, &prompt, None, None).unwrap();
+        let (_, mut handles) = kv_prefill_via_dispatch_async(
+            &cpu,
+            larql_inference::WeightsView::dense(&weights),
+            &ffn,
+            &prompt,
+            None,
+            None,
+        )
+        .unwrap();
         let mut pos = prompt.len();
         b.iter(|| {
             let _ = kv_decode_step_via_dispatch_async(

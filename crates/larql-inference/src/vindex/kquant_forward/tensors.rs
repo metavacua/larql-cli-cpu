@@ -4,7 +4,10 @@ use larql_vindex::VectorIndex;
 use super::dequant::dequantize_matrix;
 
 /// Insert one Q4_K/Q6_K vindex layer's attention and dense FFN tensors into
-/// `weights.tensors` as dense f32 matrices.
+/// the engine-owned `scratch` as dense f32 matrices (`weights` stays
+/// immutable; readers resolve them via [`WeightsView::with_scratch`]).
+///
+/// [`WeightsView::with_scratch`]: larql_models::WeightsView::with_scratch
 ///
 /// This is the shared research/intervention primitive behind Q4K CPU forward
 /// and OV/RD-style experiments. Call [`remove_layer_tensors`] with the returned

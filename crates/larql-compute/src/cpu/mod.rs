@@ -231,7 +231,9 @@ mod cpu_backend_tests {
         let x: Vec<f32> = (0..cols).map(|i| (i as f32 * 0.013).sin()).collect();
 
         // Backend dispatch must match calling the kernel directly.
-        let via_backend = CpuBackend.ternary_matvec(&w, &x).expect("ternary_matvec Some");
+        let via_backend = CpuBackend
+            .ternary_matvec(&w, &x)
+            .expect("ternary_matvec Some");
         let mut direct = vec![0.0f32; rows];
         matvec_i2s_a8_f32_into(&w, &x, &mut direct).unwrap();
         assert_eq!(via_backend.len(), rows);

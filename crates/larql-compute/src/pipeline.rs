@@ -872,7 +872,10 @@ mod tests {
 
     #[test]
     fn i2s_tag_and_family_predicates() {
-        assert_eq!(QuantFormat::from_registry_tag("I2_S"), Some(QuantFormat::I2S));
+        assert_eq!(
+            QuantFormat::from_registry_tag("I2_S"),
+            Some(QuantFormat::I2S)
+        );
         assert_eq!(QuantFormat::I2S.registry_tag(), "I2_S");
         assert!(QuantFormat::I2S.is_ternary());
         assert!(!QuantFormat::Q4_K.is_ternary());

@@ -1313,7 +1313,12 @@ where
                 let capture = if with_attention_relation {
                     if let Some(qk_rank) = reduced_qk_rank {
                         let (_, pre_o, all_weights) =
-                            run_attention_block_with_pre_o_and_reduced_qk_attention_weights(larql_models::WeightsView::dense(weights), &h, layer, None, qk_rank,
+                            run_attention_block_with_pre_o_and_reduced_qk_attention_weights(
+                                larql_models::WeightsView::dense(weights),
+                                &h,
+                                layer,
+                                None,
+                                qk_rank,
                             )
                             .ok_or_else(|| {
                                 format!(
@@ -1323,7 +1328,11 @@ where
                         (pre_o, Some(all_weights))
                     } else {
                         let (_, pre_o, all_weights) =
-                            run_attention_block_with_pre_o_and_all_attention_weights(larql_models::WeightsView::dense(weights), &h, layer, None,
+                            run_attention_block_with_pre_o_and_all_attention_weights(
+                                larql_models::WeightsView::dense(weights),
+                                &h,
+                                layer,
+                                None,
                             )
                             .ok_or_else(|| {
                                 format!("pre-W_O/all-attention capture failed at layer {layer}")
@@ -1331,8 +1340,12 @@ where
                         (pre_o, Some(all_weights))
                     }
                 } else {
-                    let (_, pre_o) = run_attention_block_with_pre_o(larql_models::WeightsView::dense(weights), &h, layer)
-                        .ok_or_else(|| format!("pre-W_O capture failed at layer {layer}"))?;
+                    let (_, pre_o) = run_attention_block_with_pre_o(
+                        larql_models::WeightsView::dense(weights),
+                        &h,
+                        layer,
+                    )
+                    .ok_or_else(|| format!("pre-W_O capture failed at layer {layer}"))?;
                     (pre_o, None)
                 };
                 let (pre_o, all_weights) = capture;
@@ -1402,7 +1415,8 @@ where
 
             {
                 let ffn = WeightFfn { weights };
-                if let Some((h_new, activation, _)) = run_layer_with_ffn(larql_inference::WeightsView::dense(weights),
+                if let Some((h_new, activation, _)) = run_layer_with_ffn(
+                    larql_inference::WeightsView::dense(weights),
                     &h,
                     layer,
                     &ffn,

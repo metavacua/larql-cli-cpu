@@ -62,7 +62,8 @@ where
         let ffn_backend = crate::ffn::ViewFfn { view };
 
         let step = if layer == target_layer {
-            run_target_layer(view.canonical(),
+            run_target_layer(
+                view.canonical(),
                 &h,
                 layer,
                 &ffn_backend,

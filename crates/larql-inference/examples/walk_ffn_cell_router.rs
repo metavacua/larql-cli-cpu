@@ -22,7 +22,9 @@
 //! Usage: `cargo run --release --example walk_ffn_cell_router -- [VINDEX_DIR]`
 
 use larql_inference::ffn::FfnBackend;
-use larql_inference::vindex::{insert_q4k_layer_tensors_resident, CellRouter, WalkFfn, WalkFfnConfig};
+use larql_inference::vindex::{
+    insert_q4k_layer_tensors_resident, CellRouter, WalkFfn, WalkFfnConfig,
+};
 use larql_inference::{load_tokenizer, predict_with_ffn};
 use larql_models::ModelWeights;
 use ndarray::Array2;

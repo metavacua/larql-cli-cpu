@@ -203,8 +203,14 @@ mod tests {
         let policy = BoundaryLayerPolicy::bf16_uniform("test", weights.num_layers);
         let token_ids: Vec<u32> = vec![0, 1, 2];
         let (hidden, rs) = run_prefill(
-larql_inference::WeightsView::dense(&weights), &executor, &ffn, &policy, None, &token_ids)
-            .expect("prefill should succeed with synthetic weights");
+            larql_inference::WeightsView::dense(&weights),
+            &executor,
+            &ffn,
+            &policy,
+            None,
+            &token_ids,
+        )
+        .expect("prefill should succeed with synthetic weights");
         assert_eq!(hidden.shape(), &[1, weights.hidden_size]);
         assert_eq!(rs.next_position, 3);
         assert!(rs.cold_encoded.is_none(), "no overflow → no cold_encoded");
@@ -227,8 +233,14 @@ larql_inference::WeightsView::dense(&weights), &executor, &ffn, &policy, None, &
         let policy = BoundaryLayerPolicy::bf16_uniform("test", weights.num_layers);
         let token_ids: Vec<u32> = vec![0, 1, 2];
         let (_hidden, rs) = run_prefill(
-larql_inference::WeightsView::dense(&weights), &executor, &ffn, &policy, Some(2), &token_ids)
-            .expect("prefill should succeed");
+            larql_inference::WeightsView::dense(&weights),
+            &executor,
+            &ffn,
+            &policy,
+            Some(2),
+            &token_ids,
+        )
+        .expect("prefill should succeed");
         assert!(
             rs.cold_encoded.is_some(),
             "overflow path must populate cold_encoded"
@@ -253,15 +265,28 @@ larql_inference::WeightsView::dense(&weights), &executor, &ffn, &policy, Some(2)
         let ffn = NullFfn;
         let policy = BoundaryLayerPolicy::bf16_uniform("test", weights.num_layers);
         let (_, rs) = run_prefill(
-larql_inference::WeightsView::dense(&weights), &executor, &ffn, &policy, Some(4), &[0]).unwrap();
+            larql_inference::WeightsView::dense(&weights),
+            &executor,
+            &ffn,
+            &policy,
+            Some(4),
+            &[0],
+        )
+        .unwrap();
         assert!(
             rs.cold_encoded.is_none(),
             "no overflow expected after prefill"
         );
 
-        let (hidden, rs_after) =
-            run_decode(
-larql_inference::WeightsView::dense(&weights), &executor, &ffn, &policy, rs, 1).expect("decode should succeed");
+        let (hidden, rs_after) = run_decode(
+            larql_inference::WeightsView::dense(&weights),
+            &executor,
+            &ffn,
+            &policy,
+            rs,
+            1,
+        )
+        .expect("decode should succeed");
         assert_eq!(hidden.shape(), &[1, weights.hidden_size]);
         assert_eq!(rs_after.next_position, 2);
         for slab in &rs_after.stored {
@@ -282,7 +307,14 @@ larql_inference::WeightsView::dense(&weights), &executor, &ffn, &policy, rs, 1).
         let ffn = NullFfn;
         let policy = BoundaryLayerPolicy::bf16_uniform("test", weights.num_layers);
         let (_, rs) = run_prefill(
-larql_inference::WeightsView::dense(&weights), &executor, &ffn, &policy, Some(2), &[0, 1, 2]).unwrap();
+            larql_inference::WeightsView::dense(&weights),
+            &executor,
+            &ffn,
+            &policy,
+            Some(2),
+            &[0, 1, 2],
+        )
+        .unwrap();
         assert!(
             rs.cold_encoded.is_some(),
             "prefill should have populated cold_encoded"
@@ -295,7 +327,14 @@ larql_inference::WeightsView::dense(&weights), &executor, &ffn, &policy, Some(2)
         assert_eq!(initial_cold_rows, 1, "1 row in cold after prefill");
 
         let (_, rs_after) = run_decode(
-larql_inference::WeightsView::dense(&weights), &executor, &ffn, &policy, rs, 3).unwrap();
+            larql_inference::WeightsView::dense(&weights),
+            &executor,
+            &ffn,
+            &policy,
+            rs,
+            3,
+        )
+        .unwrap();
         let after_cold_rows = rs_after
             .cold_encoded
             .as_ref()

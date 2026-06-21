@@ -217,8 +217,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // walk the two paths side by side. Cheap relative to the Metal
     // prefill we already paid for.
     let w_cpu2 = larql_vindex::load_model_weights_kquant(&vindex_path, &mut cb)?;
-    let _ =
-        larql_inference::vindex::predict_kquant_hidden(&w_cpu2, &appended_ids, &index, None);
+    let _ = larql_inference::vindex::predict_kquant_hidden(&w_cpu2, &appended_ids, &index, None);
 
     println!(
         "  B) Metal prefill({} tok) + decode(1 tok) took {:>5.1} + {:>5.1} ms",

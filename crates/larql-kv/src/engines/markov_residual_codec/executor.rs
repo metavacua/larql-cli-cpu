@@ -150,13 +150,7 @@ impl MarkovResidualCodecEngine {
                     }
                     _ => (h_hot.clone(), hot_abs_start),
                 };
-                recompute_kv(view,
-                    &h_full,
-                    layer,
-                    full_abs_start,
-                    backend,
-                    Some(index),
-                )?
+                recompute_kv(view, &h_full, layer, full_abs_start, backend, Some(index))?
             };
 
             new_stored.push(h_new.clone());

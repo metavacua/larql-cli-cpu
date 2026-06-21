@@ -76,7 +76,8 @@ fn main() {
 
         // Staged tensor for (c).
         let k_bytes_owned = k_bytes.to_vec();
-        let inserted = insert_q4k_layer_tensors_resident(&mut weights, &index, layer).expect("insert");
+        let inserted =
+            insert_q4k_layer_tensors_resident(&mut weights, &index, layer).expect("insert");
         let k_key = weights.arch.attn_k_key(layer);
         let w_staged = weights.tensors.get(&k_key).expect("staged K").clone();
         println!("  staged tensor shape: {:?}", w_staged.shape());

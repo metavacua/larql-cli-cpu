@@ -119,8 +119,8 @@ impl KvEngine for NoCacheEngine {
         token_ids: &[u32],
         backend: &dyn larql_inference::ComputeBackend,
     ) -> Result<Array2<f32>, EngineError> {
-        // Phase-1 pattern: dequant Q4K attn tensors into `weights.tensors`,
-        // then run the f32 prefill path. Q4K FFN dispatches through a
+        // Phase-1 pattern: dequant Q4K attn tensors into the engine-owned
+        // scratch, then run the f32 prefill path. Q4K FFN dispatches through a
         // `WalkFfn` constructed from the vindex (the bench passes
         // `NullFfn` because Q4K FFN is engine-side; using `_ffn` would
         // silently skip the FFN). See `kv-dispatch-quantization.md`.

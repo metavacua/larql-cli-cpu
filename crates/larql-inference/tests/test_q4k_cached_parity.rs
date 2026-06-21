@@ -245,14 +245,9 @@ fn direct_matvec_decode_matches_dequant_path() {
         prompt_ids.len(),
     )
     .expect("direct step");
-    let (h_dequant, _) = predict_kquant_decode_step(
-        &weights_b,
-        first,
-        &index,
-        &mut cache_b,
-        prompt_ids.len(),
-    )
-    .expect("dequant step");
+    let (h_dequant, _) =
+        predict_kquant_decode_step(&weights_b, first, &index, &mut cache_b, prompt_ids.len())
+            .expect("dequant step");
     let a = h_direct.row(0);
     let b = h_dequant.row(0);
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();

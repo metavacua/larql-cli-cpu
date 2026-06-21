@@ -412,7 +412,8 @@ pub fn predict_with_temperature(
             .arch
             .kv_shared_source_layer(layer)
             .and_then(|src| kv_cache.get(&src));
-        match run_layer_with_ffn(larql_models::WeightsView::dense(weights),
+        match run_layer_with_ffn(
+            larql_models::WeightsView::dense(weights),
             &h,
             layer,
             &ffn,
@@ -480,7 +481,15 @@ pub fn predict_from_hidden_with_ffn(
     };
 
     for layer in start_layer..num_layers {
-        h = match run_layer_with_ffn(larql_models::WeightsView::dense(weights), &h, layer, ffn, false, ple_inputs.get(layer), None) {
+        h = match run_layer_with_ffn(
+            larql_models::WeightsView::dense(weights),
+            &h,
+            layer,
+            ffn,
+            false,
+            ple_inputs.get(layer),
+            None,
+        ) {
             Some((h_new, _, _)) => h_new,
             None => continue,
         };
@@ -506,7 +515,15 @@ pub fn predict_with_ffn_trace(
         let last_pos = h.shape()[0] - 1;
         residuals.push(h.row(last_pos).to_vec());
 
-        h = match run_layer_with_ffn(larql_models::WeightsView::dense(weights), &h, layer, ffn, false, ple_inputs.get(layer), None) {
+        h = match run_layer_with_ffn(
+            larql_models::WeightsView::dense(weights),
+            &h,
+            layer,
+            ffn,
+            false,
+            ple_inputs.get(layer),
+            None,
+        ) {
             Some((h_new, _, _)) => h_new,
             None => continue,
         };

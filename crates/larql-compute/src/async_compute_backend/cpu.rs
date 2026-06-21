@@ -175,11 +175,21 @@ mod tests {
         // initial state for both sync and async decode-step paths.
         let (_, mut handle_sync) = backend
             .attention_prefill(
-larql_models::WeightsView::dense(&weights), &h_in, 0, None, None)
+                larql_models::WeightsView::dense(&weights),
+                &h_in,
+                0,
+                None,
+                None,
+            )
             .expect("attention_prefill");
         let (_, mut handle_async) = backend
             .attention_prefill(
-larql_models::WeightsView::dense(&weights), &h_in, 0, None, None)
+                larql_models::WeightsView::dense(&weights),
+                &h_in,
+                0,
+                None,
+                None,
+            )
             .expect("attention_prefill");
 
         let h_new = crate::forward::embed_tokens_pub(&weights, &[3u32]);
@@ -198,7 +208,13 @@ larql_models::WeightsView::dense(&weights), &h_in, 0, None, None)
 
         let h_async = backend
             .attention_step_async(
-larql_models::WeightsView::dense(&weights), &h_new, &mut handle_async, 0, abs_position, None)
+                larql_models::WeightsView::dense(&weights),
+                &h_new,
+                &mut handle_async,
+                0,
+                abs_position,
+                None,
+            )
             .read();
 
         assert_array_close(
@@ -223,11 +239,20 @@ larql_models::WeightsView::dense(&weights), &h_new, &mut handle_async, 0, abs_po
 
         let (h_sync, handle_sync) = backend
             .attention_prefill(
-larql_models::WeightsView::dense(&weights), &h_in, 0, None, None)
+                larql_models::WeightsView::dense(&weights),
+                &h_in,
+                0,
+                None,
+                None,
+            )
             .expect("sync prefill");
-        let (h_async_handle, handle_async) =
-            backend.attention_prefill_async(
-larql_models::WeightsView::dense(&weights), &h_in, 0, None, None);
+        let (h_async_handle, handle_async) = backend.attention_prefill_async(
+            larql_models::WeightsView::dense(&weights),
+            &h_in,
+            0,
+            None,
+            None,
+        );
         let h_async = h_async_handle.read();
 
         // BLAS on Windows runs successive matmuls with different
@@ -279,13 +304,23 @@ larql_models::WeightsView::dense(&weights), &h_in, 0, None, None);
         let handle_async = backend.upload_boundary_residual(&residual).unwrap();
 
         let h_sync = backend
-            .forward_from_layer(larql_models::WeightsView::dense(&weights), 1, &handle_sync, &tokens)
+            .forward_from_layer(
+                larql_models::WeightsView::dense(&weights),
+                1,
+                &handle_sync,
+                &tokens,
+            )
             .expect("sync forward_from_layer");
 
         let ffn = crate::ffn::NullFfn;
         let h_async = backend
             .forward_from_layer_async(
-larql_models::WeightsView::dense(&weights), &ffn, 1, &handle_async, &tokens)
+                larql_models::WeightsView::dense(&weights),
+                &ffn,
+                1,
+                &handle_async,
+                &tokens,
+            )
             .read();
 
         assert_eq!(
@@ -306,11 +341,21 @@ larql_models::WeightsView::dense(&weights), &ffn, 1, &handle_async, &tokens)
 
         let (_, mut handle_step) = backend
             .attention_prefill(
-larql_models::WeightsView::dense(&weights), &h_in, 0, None, None)
+                larql_models::WeightsView::dense(&weights),
+                &h_in,
+                0,
+                None,
+                None,
+            )
             .expect("prefill");
         let (_, mut handle_windowed) = backend
             .attention_prefill(
-larql_models::WeightsView::dense(&weights), &h_in, 0, None, None)
+                larql_models::WeightsView::dense(&weights),
+                &h_in,
+                0,
+                None,
+                None,
+            )
             .expect("prefill");
 
         let h_new = crate::forward::embed_tokens_pub(&weights, &[5u32]);
@@ -318,14 +363,20 @@ larql_models::WeightsView::dense(&weights), &h_in, 0, None, None)
 
         let h_step = backend
             .attention_step_async(
-larql_models::WeightsView::dense(&weights), &h_new, &mut handle_step, 0, abs_position, None)
+                larql_models::WeightsView::dense(&weights),
+                &h_new,
+                &mut handle_step,
+                0,
+                abs_position,
+                None,
+            )
             .read();
         // After step, manually clip to window=3.
         backend.clip_kv(&mut handle_step, 3);
 
         let h_windowed = backend
             .attention_step_windowed_async(
-larql_models::WeightsView::dense(&weights),
+                larql_models::WeightsView::dense(&weights),
                 &h_new,
                 &mut handle_windowed,
                 0,
@@ -359,7 +410,10 @@ larql_models::WeightsView::dense(&weights),
         )
         .unwrap();
         let _ = backend.recompute_kv_from_residuals_async(
-larql_models::WeightsView::dense(&weights), &residuals, 0);
+            larql_models::WeightsView::dense(&weights),
+            &residuals,
+            0,
+        );
         // (recompute_kv_from_residuals_async signature unchanged at A3.)
     }
 

@@ -29,7 +29,8 @@ pub fn predict_with_ffn(
             .kv_shared_source_layer(layer)
             .and_then(|src| kv_cache.get(&src));
 
-        match run_layer_with_ffn(larql_models::WeightsView::dense(weights),
+        match run_layer_with_ffn(
+            larql_models::WeightsView::dense(weights),
             &h,
             layer,
             ffn,
@@ -82,7 +83,8 @@ pub fn predict_with_ffn_early_exit(
             .kv_shared_source_layer(layer)
             .and_then(|src| kv_cache.get(&src));
 
-        match run_layer_with_ffn(larql_models::WeightsView::dense(weights),
+        match run_layer_with_ffn(
+            larql_models::WeightsView::dense(weights),
             &h,
             layer,
             ffn,
@@ -129,7 +131,8 @@ pub fn predict_with_ffn_attention(
     let mut residuals = Vec::with_capacity(num_layers);
 
     for layer in 0..num_layers {
-        match run_layer_with_capture(larql_models::WeightsView::dense(weights),
+        match run_layer_with_capture(
+            larql_models::WeightsView::dense(weights),
             &h,
             layer,
             ffn,
@@ -171,7 +174,15 @@ pub fn predict_with_router(
 
     for layer in 0..num_layers {
         let ffn = router.get(layer);
-        h = match run_layer_with_ffn(larql_models::WeightsView::dense(weights), &h, layer, ffn, false, ple_inputs.get(layer), None) {
+        h = match run_layer_with_ffn(
+            larql_models::WeightsView::dense(weights),
+            &h,
+            layer,
+            ffn,
+            false,
+            ple_inputs.get(layer),
+            None,
+        ) {
             Some((h_new, _, _)) => h_new,
             None => continue,
         };
@@ -195,7 +206,8 @@ pub fn predict_with_strategy(
     for (layer, mode) in strategy.iter().enumerate().take(num_layers) {
         match mode {
             LayerMode::Compute(ffn) => {
-                h = match run_layer_with_ffn(larql_models::WeightsView::dense(weights),
+                h = match run_layer_with_ffn(
+                    larql_models::WeightsView::dense(weights),
                     &h,
                     layer,
                     *ffn,
@@ -211,7 +223,9 @@ pub fn predict_with_strategy(
                 h *= *gain;
             }
             LayerMode::AttentionOnly => {
-                if let Some(h_post_attn) = run_attention(larql_models::WeightsView::dense(weights), &h, layer) {
+                if let Some(h_post_attn) =
+                    run_attention(larql_models::WeightsView::dense(weights), &h, layer)
+                {
                     h = h_post_attn;
                 }
             }

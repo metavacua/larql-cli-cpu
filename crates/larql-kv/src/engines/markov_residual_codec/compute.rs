@@ -40,8 +40,17 @@ pub fn rs_prefill_codec(
         stored.push(h.clone());
         let (h_post_attn, _k, _v) = run_attention_with_kv_backend(weights, &h, layer, be)
             .expect("attention failed during MarkovResidualCodec prefill");
-        let bffn = BackendFfn { weights: weights.canonical(), backend };
-        let h_out = crate::engines::layer_ffn_or_moe(weights.canonical(), &h_post_attn, layer, &bffn, moe_ffn);
+        let bffn = BackendFfn {
+            weights: weights.canonical(),
+            backend,
+        };
+        let h_out = crate::engines::layer_ffn_or_moe(
+            weights.canonical(),
+            &h_post_attn,
+            layer,
+            &bffn,
+            moe_ffn,
+        );
         h = h_out;
     }
 
@@ -167,7 +176,8 @@ pub fn rs_decode_step_codec(
             }
             let (k_buf, v_buf) = &mut bufs[layer];
             let inplace = if inplace_enabled {
-                larql_inference::attention::run_attention_block_decode_step_auto_inplace(weights,
+                larql_inference::attention::run_attention_block_decode_step_auto_inplace(
+                    weights,
                     &h_new,
                     layer,
                     k_buf,
@@ -191,7 +201,8 @@ pub fn rs_decode_step_codec(
                         v_buf.slice(s![..s_hot, ..]).to_owned(),
                     );
                     let (h, new_kv) =
-                        larql_inference::attention::run_attention_block_decode_step_auto(weights,
+                        larql_inference::attention::run_attention_block_decode_step_auto(
+                            weights,
                             &h_new,
                             layer,
                             Some(&prior),
@@ -246,7 +257,8 @@ pub fn rs_decode_step_codec(
             };
 
             let (h_post_attn, new_kv) =
-                larql_inference::attention::run_attention_block_decode_step_auto(weights,
+                larql_inference::attention::run_attention_block_decode_step_auto(
+                    weights,
                     &h_new,
                     layer,
                     Some(&kv_arg),
@@ -260,8 +272,17 @@ pub fn rs_decode_step_codec(
             h_post_attn
         };
 
-        let bffn = BackendFfn { weights: weights.canonical(), backend };
-        let h_out = crate::engines::layer_ffn_or_moe(weights.canonical(), &h_post_attn, layer, &bffn, moe_ffn);
+        let bffn = BackendFfn {
+            weights: weights.canonical(),
+            backend,
+        };
+        let h_out = crate::engines::layer_ffn_or_moe(
+            weights.canonical(),
+            &h_post_attn,
+            layer,
+            &bffn,
+            moe_ffn,
+        );
         h_new = h_out;
     }
 
@@ -370,7 +391,7 @@ mod tests {
     fn prefill_returns_finite_hidden() {
         let weights = make_test_weights();
         let result = rs_prefill_codec(
-larql_inference::WeightsView::dense(&weights),
+            larql_inference::WeightsView::dense(&weights),
             &[0u32, 1, 2],
             None,
             ColdResidualCodec::Bf16,
@@ -385,7 +406,7 @@ larql_inference::WeightsView::dense(&weights),
     fn prefill_no_window_does_not_create_cold_tier() {
         let weights = make_test_weights();
         let result = rs_prefill_codec(
-larql_inference::WeightsView::dense(&weights),
+            larql_inference::WeightsView::dense(&weights),
             &[0u32, 1],
             None,
             ColdResidualCodec::Bf16,
@@ -400,7 +421,7 @@ larql_inference::WeightsView::dense(&weights),
     fn prefill_with_overflow_creates_encoded_cold_tier() {
         let weights = make_test_weights();
         let result = rs_prefill_codec(
-larql_inference::WeightsView::dense(&weights),
+            larql_inference::WeightsView::dense(&weights),
             &[0u32, 1, 2, 3],
             Some(2),
             ColdResidualCodec::Bf16,
@@ -422,7 +443,7 @@ larql_inference::WeightsView::dense(&weights),
     fn decode_step_extends_position() {
         let weights = make_test_weights();
         let prefill = rs_prefill_codec(
-larql_inference::WeightsView::dense(&weights),
+            larql_inference::WeightsView::dense(&weights),
             &[0u32, 1],
             None,
             ColdResidualCodec::Bf16,
@@ -430,9 +451,15 @@ larql_inference::WeightsView::dense(&weights),
             None,
         );
         assert_eq!(prefill.store.next_position, 2);
-        let (_, rs2) =
-            rs_decode_step_codec(
-larql_inference::WeightsView::dense(&weights), 2, prefill.store, &CpuBackend, None, None).unwrap();
+        let (_, rs2) = rs_decode_step_codec(
+            larql_inference::WeightsView::dense(&weights),
+            2,
+            prefill.store,
+            &CpuBackend,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(rs2.next_position, 3);
     }
 
@@ -440,7 +467,7 @@ larql_inference::WeightsView::dense(&weights), 2, prefill.store, &CpuBackend, No
     fn decode_with_cold_kv_path_produces_finite_output() {
         let weights = make_test_weights();
         let prefill = rs_prefill_codec(
-larql_inference::WeightsView::dense(&weights),
+            larql_inference::WeightsView::dense(&weights),
             &[0u32, 1, 2, 3],
             Some(2),
             ColdResidualCodec::Bf16,
@@ -448,9 +475,15 @@ larql_inference::WeightsView::dense(&weights),
             None,
         );
         assert!(prefill.store.cold_kv.is_some());
-        let (h, _) =
-            rs_decode_step_codec(
-larql_inference::WeightsView::dense(&weights), 4, prefill.store, &CpuBackend, None, None).unwrap();
+        let (h, _) = rs_decode_step_codec(
+            larql_inference::WeightsView::dense(&weights),
+            4,
+            prefill.store,
+            &CpuBackend,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert!(h.iter().all(|v| v.is_finite()));
     }
@@ -461,20 +494,33 @@ larql_inference::WeightsView::dense(&weights), 4, prefill.store, &CpuBackend, No
         // exercised (we read from cold_encoded directly via decode).
         let weights = make_test_weights();
         let prefill = rs_prefill_codec(
-larql_inference::WeightsView::dense(&weights),
+            larql_inference::WeightsView::dense(&weights),
             &[0u32, 1, 2, 3],
             Some(2),
             ColdResidualCodec::Bf16,
             &CpuBackend,
             None,
         );
-        let (_, rs2) =
-            rs_decode_step_codec(
-larql_inference::WeightsView::dense(&weights), 4, prefill.store, &CpuBackend, None, None).unwrap();
+        let (_, rs2) = rs_decode_step_codec(
+            larql_inference::WeightsView::dense(&weights),
+            4,
+            prefill.store,
+            &CpuBackend,
+            None,
+            None,
+        )
+        .unwrap();
         // Second decode: cold_kv was cleared by overflow at the first decode,
         // so this step exercises the cold_encoded recompute branch.
         let (h, _) = rs_decode_step_codec(
-larql_inference::WeightsView::dense(&weights), 5, rs2, &CpuBackend, None, None).unwrap();
+            larql_inference::WeightsView::dense(&weights),
+            5,
+            rs2,
+            &CpuBackend,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert!(h.iter().all(|v| v.is_finite()));
     }
@@ -522,7 +568,7 @@ larql_inference::WeightsView::dense(&weights), 5, rs2, &CpuBackend, None, None).
                 Some(if inplace { "1" } else { "0" }),
             );
             let prefill = rs_prefill_codec(
-larql_inference::WeightsView::dense(&weights),
+                larql_inference::WeightsView::dense(&weights),
                 &[0u32, 1, 2],
                 None,
                 ColdResidualCodec::Bf16,
@@ -532,10 +578,15 @@ larql_inference::WeightsView::dense(&weights),
             let mut rs = prefill.store;
             let mut hiddens = Vec::new();
             for tok in 3u32..=12 {
-                let (h, rs2) =
-                    rs_decode_step_codec(
-larql_inference::WeightsView::dense(&weights), tok, rs, &CpuBackend, None, Some(&index))
-                        .expect("decode");
+                let (h, rs2) = rs_decode_step_codec(
+                    larql_inference::WeightsView::dense(&weights),
+                    tok,
+                    rs,
+                    &CpuBackend,
+                    None,
+                    Some(&index),
+                )
+                .expect("decode");
                 assert!(h.iter().all(|v| v.is_finite()));
                 hiddens.push(h.iter().map(|v| v.to_bits()).collect());
                 rs = rs2;
