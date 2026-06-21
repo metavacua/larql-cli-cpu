@@ -13,7 +13,7 @@
 //! `KvDispatch`'s CPU impl needs to call.
 
 mod cached;
-mod dequant;
+pub(crate) mod dequant;
 mod hooks;
 mod tensors;
 mod walk_ffn;

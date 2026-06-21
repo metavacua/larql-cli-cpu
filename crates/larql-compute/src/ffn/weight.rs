@@ -85,17 +85,19 @@ impl<'a, 'b> FfnBackend for BackendFfn<'a, 'b> {
     }
 }
 
-/// FFN backend that runs gate/up/down **directly on Q4_K weight bytes**
-/// via the amortised [`q4k_matmul_into`](crate::cpu::ops::q4_common::q4k_matmul_into)
-/// kernel — no per-layer dequantisation. The quant prefill loop uses this
-/// to skip materialising the (4×-larger) f32 FFN weights, which dominate
-/// short-prompt prefill. Reads the raw Q4_K slices from the vindex through
-/// [`KvIndex::interleaved_kquant_layer_data`](crate::KvIndex).
+/// FFN backend that runs gate/up/down on the vindex's quantised weight bytes
+/// **without a per-layer full dequant**. Each component is dispatched on its
+/// stored format tag (from [`KvIndex::interleaved_kquant_layer_data`]):
+/// `Q4_K` goes through the amortised
+/// [`q4k_matmul_into`](crate::cpu::ops::q4_common::q4k_matmul_into) kernel
+/// (reads the Q4_K bytes once, no f32 materialisation — the prefill win),
+/// while any other format (`Q6_K` — the default `down_proj`) dequantises that
+/// one matrix and matmuls. The FFN weights are ~4× the attention weights, so
+/// skipping the Q4_K gate/up f32 staging is the bulk of the prefill saving.
 ///
-/// The math is identical to [`dense_ffn_forward`]; only the weight source
-/// differs. Callers must confirm the layer's interleaved Q4_K FFN bytes
-/// are present (and the input dims are 256-multiples) before constructing
-/// this — otherwise fall back to the dequant + dense path.
+/// The surrounding gating/activation/bias math mirrors [`dense_ffn_forward`];
+/// only the projection source differs. Callers confirm the interleaved FFN
+/// bytes are present and `hidden` is a 256-multiple before constructing this.
 pub struct Q4kMatmulFfn<'a> {
     pub weights: &'a ModelWeights,
     pub index: &'a dyn crate::KvIndex,
@@ -107,6 +109,79 @@ impl Q4kMatmulFfn<'_> {
         let mut out = vec![0.0f32; seq * rows];
         crate::cpu::ops::q4_common::q4k_matmul_into(&mut out, x, bytes, rows, cols, seq);
         Array2::from_shape_vec((seq, rows), out).expect("q4k_matmul output shape [seq, rows]")
+    }
+
+    /// Bytes per 256-element super-block for a quant format.
+    #[inline]
+    fn block_bytes(fmt: &str) -> usize {
+        match fmt {
+            "Q4_K" => 144,
+            "Q6_K" => 210,
+            other => panic!("Q4kMatmulFfn: unsupported FFN quant format {other}"),
+        }
+    }
+
+    /// gate/up projection: `x[seq, in_dim] -> [seq, out_rows]`, where `in_dim`
+    /// (= `hidden`) is a 256-multiple. Q4_K reads the bytes once via
+    /// `q4k_matmul`; other formats dequantise then matmul.
+    fn project(
+        bytes: &[u8],
+        fmt: &str,
+        x: &Array2<f32>,
+        out_rows: usize,
+        in_dim: usize,
+        seq: usize,
+    ) -> Array2<f32> {
+        if fmt == "Q4_K" {
+            Self::matmul(
+                bytes,
+                x.as_slice().expect("contiguous x"),
+                out_rows,
+                in_dim,
+                seq,
+            )
+        } else {
+            let w = crate::kquant_forward::dequant::dequantize_matrix(bytes, fmt, out_rows, in_dim);
+            dot_proj_gpu(x, &w, None)
+        }
+    }
+
+    /// down projection: `act[seq, intermediate] -> [seq, hidden]`. The stored
+    /// down weight pads `intermediate` up to a 256-multiple. Q4_K zero-pads the
+    /// activation to the stored width and uses `q4k_matmul`; other formats
+    /// (Q6_K, the default) dequantise the padded weight and slice to
+    /// `intermediate` before the f32 matmul.
+    fn project_down(
+        bytes: &[u8],
+        fmt: &str,
+        act: &Array2<f32>,
+        hidden: usize,
+        intermediate: usize,
+        seq: usize,
+    ) -> Array2<f32> {
+        let inter_padded = bytes.len() / hidden / Self::block_bytes(fmt) * 256;
+        if fmt == "Q4_K" {
+            let act_slice = act.as_slice().expect("contiguous activation");
+            if inter_padded == intermediate {
+                Self::matmul(bytes, act_slice, hidden, inter_padded, seq)
+            } else {
+                let mut padded = vec![0.0f32; seq * inter_padded];
+                for s in 0..seq {
+                    padded[s * inter_padded..s * inter_padded + intermediate]
+                        .copy_from_slice(&act_slice[s * intermediate..(s + 1) * intermediate]);
+                }
+                Self::matmul(bytes, &padded, hidden, inter_padded, seq)
+            }
+        } else {
+            let w_full =
+                crate::kquant_forward::dequant::dequantize_matrix(bytes, fmt, hidden, inter_padded);
+            let w_down = if inter_padded == intermediate {
+                w_full
+            } else {
+                w_full.slice(ndarray::s![.., ..intermediate]).to_owned()
+            };
+            dot_proj_gpu(act, &w_down, None)
+        }
     }
 }
 
@@ -123,19 +198,20 @@ impl FfnBackend for Q4kMatmulFfn<'_> {
         let ffn = self
             .index
             .interleaved_kquant_layer_data(layer)
-            .expect("Q4kMatmulFfn requires interleaved Q4_K FFN bytes for this layer");
-        let (gate_bytes, up_bytes, down_bytes) = (ffn[0].0, ffn[1].0, ffn[2].0);
-        let x_slice = x.as_slice().expect("contiguous row-major x");
+            .expect("Q4kMatmulFfn requires interleaved FFN bytes for this layer");
+        let (gate_bytes, gate_fmt) = ffn[0];
+        let (up_bytes, up_fmt) = ffn[1];
+        let (down_bytes, down_fmt) = ffn[2];
 
         let activation = if arch.ffn_type() == larql_models::FfnType::Gated {
-            let gate = Self::matmul(gate_bytes, x_slice, intermediate, hidden, seq);
-            let up = Self::matmul(up_bytes, x_slice, intermediate, hidden, seq);
+            let gate = Self::project(gate_bytes, gate_fmt, x, intermediate, hidden, seq);
+            let up = Self::project(up_bytes, up_fmt, x, intermediate, hidden, seq);
             match arch.activation() {
                 larql_models::Activation::GeluTanh => gelu_tanh_gate_up(&gate, &up),
                 _ => silu_gate_up(&gate, &up),
             }
         } else {
-            let mut projected = Self::matmul(up_bytes, x_slice, intermediate, hidden, seq);
+            let mut projected = Self::project(up_bytes, up_fmt, x, intermediate, hidden, seq);
             if let Some(bias) = arch
                 .ffn_up_bias_key(layer)
                 .and_then(|k| self.weights.vectors.get(&k))
@@ -150,21 +226,8 @@ impl FfnBackend for Q4kMatmulFfn<'_> {
             }
         };
 
-        // The down weight's input dim is `intermediate` padded up to a
-        // 256-multiple (ggml pads Q4_K rows); derive it from the byte
-        // length and zero-pad the activation columns to match.
-        let down_cols = down_bytes.len() / hidden / 144 * 256;
-        let act_slice = activation.as_slice().expect("contiguous activation");
-        let mut out = if down_cols == intermediate {
-            Self::matmul(down_bytes, act_slice, hidden, down_cols, seq)
-        } else {
-            let mut padded = vec![0.0f32; seq * down_cols];
-            for s in 0..seq {
-                padded[s * down_cols..s * down_cols + intermediate]
-                    .copy_from_slice(&act_slice[s * intermediate..(s + 1) * intermediate]);
-            }
-            Self::matmul(down_bytes, &padded, hidden, down_cols, seq)
-        };
+        let mut out =
+            Self::project_down(down_bytes, down_fmt, &activation, hidden, intermediate, seq);
         if let Some(bias) = arch
             .ffn_down_bias_key(layer)
             .and_then(|k| self.weights.vectors.get(&k))
@@ -550,5 +613,48 @@ mod tests {
             "q4k FFN activation diverged: max_diff={max_act}"
         );
         assert_eq!(got_out.shape(), &[3, weights.hidden_size]);
+    }
+
+    /// Regression for the Q6_K `down_proj` mis-decode: the *default* q4k vindex
+    /// stores FFN down at Q6_K (210 B/block), not Q4_K (144 B/block). The down
+    /// projection must dispatch on the format tag — decoding Q6_K bytes through
+    /// `q4k_matmul` produces garbage and a wrong derived column count. Compare
+    /// the Q6_K `project_down` against dequantise+matmul on the same bytes.
+    #[test]
+    fn project_down_dispatches_on_q6k_format() {
+        use super::Q4kMatmulFfn;
+        use crate::cpu::ops::q4_common::quantize_q6_k;
+
+        let hidden = 256;
+        let intermediate = 512; // 2 super-blocks; 256-multiple (matches real gemma)
+        let seq = 3;
+
+        let down: Vec<f32> = (0..hidden * intermediate)
+            .map(|i| (i as f32 * 0.0007).sin() * 0.6)
+            .collect();
+        let down_q6 = quantize_q6_k(&down);
+        let act = x(seq, intermediate);
+
+        // Reference: dequantise the Q6_K weight to f32, then act @ down.T.
+        let w = crate::kquant_forward::dequant::dequantize_matrix(
+            &down_q6,
+            "Q6_K",
+            hidden,
+            intermediate,
+        );
+        let reference = crate::dot_proj_gpu(&act, &w, None);
+
+        let got = Q4kMatmulFfn::project_down(&down_q6, "Q6_K", &act, hidden, intermediate, seq);
+        assert_eq!(got.shape(), &[seq, hidden]);
+
+        let max: f32 = reference
+            .iter()
+            .zip(&got)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f32::max);
+        assert!(
+            max < 1e-4,
+            "Q6_K project_down diverged from dequant+matmul: {max}"
+        );
     }
 }
