@@ -117,18 +117,28 @@ pub fn predict_kquant_prefill_with_state(
     let ple_inputs = precompute_per_layer_inputs(weights, &h, token_ids);
 
     for layer in 0..num_layers {
-        // q4k-direct FFN: when the vindex exposes interleaved Q4_K FFN bytes
-        // and `hidden` is a 256-multiple, run gate/up/down straight on the
-        // Q4_K bytes via `Q4kMatmulFfn` and dequantise only Q/K/V/O. The FFN
-        // weights are ~4× the attention weights, so skipping their f32
-        // materialisation removes the bulk of prefill's per-layer dequant.
-        let use_q4k_ffn = weights.hidden_size % larql_models::quant::ggml::K_QUANT_BLOCK_ELEMS == 0
-            && index.interleaved_kquant_layer_data(layer).is_some();
+        // q4k-direct prefill: project straight from the vindex's Q4_K/Q6_K bytes
+        // (no per-layer f32 dequant). The FFN gate/up/down (`use_q4k_ffn`) and
+        // attention Q/K/V/O (`use_q4k_attn`) are gated independently — each needs
+        // its interleaved bytes present and the relevant dims 256-aligned (the
+        // matmul contraction is `hidden` for Q/K/V/gate/up and `q_dim` for O).
+        // The FFN weights are ~4× the attention weights, so the FFN path is the
+        // bulk of the saving; the attn path closes the rest.
+        const BLK: usize = larql_models::quant::ggml::K_QUANT_BLOCK_ELEMS;
+        let q_dim =
+            weights.arch.num_q_heads_for_layer(layer) * weights.arch.head_dim_for_layer(layer);
+        let use_q4k_ffn =
+            weights.hidden_size % BLK == 0 && index.interleaved_kquant_layer_data(layer).is_some();
+        let use_q4k_attn = weights.hidden_size % BLK == 0
+            && q_dim % BLK == 0
+            && index.attn_kquant_layer_data(layer).is_some();
+
         let t0 = std::time::Instant::now();
-        let inserted = if use_q4k_ffn {
-            insert_q4k_attn_tensors(&mut scratch, weights, index, layer)
-        } else {
-            insert_q4k_layer_tensors(&mut scratch, weights, index, layer)
+        // Dequant only what the q4k-direct paths won't read straight from bytes.
+        let inserted = match (use_q4k_attn, use_q4k_ffn) {
+            (true, true) => Ok(Vec::new()),
+            (false, true) => insert_q4k_attn_tensors(&mut scratch, weights, index, layer),
+            _ => insert_q4k_layer_tensors(&mut scratch, weights, index, layer),
         }
         .unwrap_or_else(|err| panic!("{err}"));
         timings.dequant_ms += t0.elapsed().as_secs_f64() * 1000.0;
@@ -139,14 +149,16 @@ pub fn predict_kquant_prefill_with_state(
                 .push(crate::state_handle::CpuStateHandle::boxed(h.clone()));
         }
 
-        // Attention with K/V capture. Backend stays None — we want the
-        // CPU BLAS path for the dequantised f32 tensors that
-        // `insert_q4k_layer_tensors` just placed in `weights.tensors`.
+        // Attention with K/V capture. When `use_q4k_attn`, Q/K/V/O project
+        // straight from the Q4_K/Q6_K bytes (empty scratch — norms still come
+        // from canonical weights); else the dequantised f32 view path.
+        let attn_index = if use_q4k_attn { Some(index) } else { None };
         let (h_post_attn, k_rope, v_final) = match run_attention_with_kv_backend(
             larql_models::WeightsView::with_scratch(weights, &scratch),
             &h,
             layer,
             None,
+            attn_index,
         ) {
             Some(t) => t,
             None => {

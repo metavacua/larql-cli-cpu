@@ -165,6 +165,7 @@ pub fn predict_honest(
                                 &h_cpu,
                                 abs_layer,
                                 Some(backend),
+                                None,
                             )
                             .unwrap();
 

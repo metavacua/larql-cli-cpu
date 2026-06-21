@@ -8,6 +8,55 @@ use super::{gelu_tanh, gelu_tanh_gate_up, sigmoid, silu_gate_up, FfnBackend};
 use crate::forward::add_bias;
 use larql_models::{ModelWeights, WeightsView};
 
+/// Amortised quant matmul for formats with a direct CPU kernel (Q4_K / Q6_K):
+/// `x[seq, cols] -> [seq, rows]`, reading the quantised bytes once and never
+/// materialising the full f32 weight. Returns `None` for a format without a
+/// kernel so the caller can dequantise + matmul. Shared by the q4k-direct FFN
+/// and the attention Q/K/V/O projections.
+pub(crate) fn quant_matmul(
+    bytes: &[u8],
+    fmt: &str,
+    x: &[f32],
+    rows: usize,
+    cols: usize,
+    seq: usize,
+) -> Option<Array2<f32>> {
+    let mut out = vec![0.0f32; seq * rows];
+    match fmt {
+        "Q4_K" => crate::cpu::ops::q4_common::q4k_matmul_into(&mut out, x, bytes, rows, cols, seq),
+        "Q6_K" => crate::cpu::ops::q4_common::q6k_matmul_into(&mut out, x, bytes, rows, cols, seq),
+        _ => return None,
+    }
+    Some(Array2::from_shape_vec((seq, rows), out).expect("quant_matmul output shape [seq, rows]"))
+}
+
+/// Project `x[seq, in_dim] -> [seq, out_rows]` from quantised weight bytes;
+/// `in_dim` must be a 256-multiple. Q4_K/Q6_K read the bytes once via the
+/// amortised kernel; any other format dequantises then matmuls. Used for the
+/// FFN gate/up and the attention Q/K/V/O projections.
+pub(crate) fn quant_proj(
+    bytes: &[u8],
+    fmt: &str,
+    x: &Array2<f32>,
+    out_rows: usize,
+    in_dim: usize,
+    seq: usize,
+) -> Array2<f32> {
+    if let Some(r) = quant_matmul(
+        bytes,
+        fmt,
+        x.as_slice().expect("contiguous x"),
+        out_rows,
+        in_dim,
+        seq,
+    ) {
+        r
+    } else {
+        let w = crate::kquant_forward::dequant::dequantize_matrix(bytes, fmt, out_rows, in_dim);
+        dot_proj_gpu(x, &w, None)
+    }
+}
+
 /// Dense FFN: follows the model architecture exactly (CPU BLAS).
 /// Gated: activation(x @ gate.T) * (x @ up.T) @ down.T + bias
 /// Non-gated: activation(x @ up.T + bias) @ down.T + bias
@@ -105,31 +154,6 @@ pub struct Q4kMatmulFfn<'a> {
 }
 
 impl Q4kMatmulFfn<'_> {
-    /// Amortised quant matmul for formats with a direct kernel (Q4_K / Q6_K):
-    /// `x[seq, cols] -> [seq, rows]`, reading the quantised bytes once and never
-    /// materialising the full f32 weight. Returns `None` for formats without a
-    /// kernel, so the caller can fall back to dequantise + dense matmul.
-    fn matmul(
-        bytes: &[u8],
-        fmt: &str,
-        x: &[f32],
-        rows: usize,
-        cols: usize,
-        seq: usize,
-    ) -> Option<Array2<f32>> {
-        let mut out = vec![0.0f32; seq * rows];
-        match fmt {
-            "Q4_K" => {
-                crate::cpu::ops::q4_common::q4k_matmul_into(&mut out, x, bytes, rows, cols, seq)
-            }
-            "Q6_K" => {
-                crate::cpu::ops::q4_common::q6k_matmul_into(&mut out, x, bytes, rows, cols, seq)
-            }
-            _ => return None,
-        }
-        Some(Array2::from_shape_vec((seq, rows), out).expect("matmul output shape [seq, rows]"))
-    }
-
     /// Bytes per 256-element super-block for a quant format.
     #[inline]
     fn block_bytes(fmt: &str) -> usize {
@@ -151,19 +175,7 @@ impl Q4kMatmulFfn<'_> {
         in_dim: usize,
         seq: usize,
     ) -> Array2<f32> {
-        if let Some(r) = Self::matmul(
-            bytes,
-            fmt,
-            x.as_slice().expect("contiguous x"),
-            out_rows,
-            in_dim,
-            seq,
-        ) {
-            r
-        } else {
-            let w = crate::kquant_forward::dequant::dequantize_matrix(bytes, fmt, out_rows, in_dim);
-            dot_proj_gpu(x, &w, None)
-        }
+        quant_proj(bytes, fmt, x, out_rows, in_dim, seq)
     }
 
     /// down projection: `act[seq, intermediate] -> [seq, hidden]`. The stored
@@ -183,7 +195,7 @@ impl Q4kMatmulFfn<'_> {
         let act_slice = act.as_slice().expect("contiguous activation");
 
         if inter_padded == intermediate {
-            if let Some(r) = Self::matmul(bytes, fmt, act_slice, hidden, inter_padded, seq) {
+            if let Some(r) = quant_matmul(bytes, fmt, act_slice, hidden, inter_padded, seq) {
                 return r;
             }
             let w =
@@ -198,7 +210,7 @@ impl Q4kMatmulFfn<'_> {
             padded[s * inter_padded..s * inter_padded + intermediate]
                 .copy_from_slice(&act_slice[s * intermediate..(s + 1) * intermediate]);
         }
-        if let Some(r) = Self::matmul(bytes, fmt, &padded, hidden, inter_padded, seq) {
+        if let Some(r) = quant_matmul(bytes, fmt, &padded, hidden, inter_padded, seq) {
             return r;
         }
         let w_full =

@@ -475,7 +475,7 @@ pub fn kv_prefill_run(
         hook.on_pre_layer(layer, &h);
 
         let (mut h_post_attn, k_rope, v) =
-            run_attention_with_kv_backend(weights, &h, layer, backend)?;
+            run_attention_with_kv_backend(weights, &h, layer, backend, None)?;
         cache.layers[layer] = Some((k_rope, v));
         cache.clip_layer(layer);
 
@@ -732,6 +732,7 @@ where
             larql_inference::WeightsView::dense(weights),
             &h,
             layer,
+            None,
             None,
         ) {
             Some(t) => t,

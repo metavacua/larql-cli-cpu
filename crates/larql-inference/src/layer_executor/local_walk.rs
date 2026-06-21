@@ -69,7 +69,7 @@ impl<'a> LayerExecutor for LocalWalkExecutor<'a> {
         // projection matmuls; `run_attention_with_kv_backend` returns
         // `(h_post_attn, k_rope, v_final)`.
         let (h_post_attn, k, v) =
-            run_attention_with_kv_backend(weights, hidden_in, layer, Some(self.backend))?;
+            run_attention_with_kv_backend(weights, hidden_in, layer, Some(self.backend), None)?;
         // FFN through the caller-supplied dispatcher. This is the
         // critical decoupling: local FFN uses `WeightFfn` / `BackendFfn`,
         // remote FFN uses `RemoteWalkBackend`, MoE shards use

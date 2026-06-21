@@ -437,6 +437,7 @@ impl KvEngine for TurboQuantEngine {
                 &h,
                 layer,
                 be,
+                None,
             )
             .ok_or_else(|| EngineError::BackendFailure {
                 details: "run_attention_with_kv_backend returned None".into(),
@@ -665,6 +666,7 @@ impl TurboQuantEngine {
                 &h,
                 layer,
                 be,
+                None,
             )?;
             self.layers
                 .push(CompressedLayer::compress(&(k, v), &self.tq));

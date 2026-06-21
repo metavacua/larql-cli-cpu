@@ -151,7 +151,13 @@ pub fn run_attention_with_kv(
     h: &Array2<f32>,
     layer: usize,
 ) -> Option<(Array2<f32>, Array2<f32>, Array2<f32>)> {
-    run_attention_with_kv_backend(larql_models::WeightsView::dense(weights), h, layer, None)
+    run_attention_with_kv_backend(
+        larql_models::WeightsView::dense(weights),
+        h,
+        layer,
+        None,
+        None,
+    )
 }
 
 /// Run attention with optional compute backend for accelerated projections.
@@ -160,6 +166,10 @@ pub fn run_attention_with_kv_backend(
     h: &Array2<f32>,
     layer: usize,
     backend: Option<&dyn crate::ComputeBackend>,
+    // When `Some`, project Q/K/V/O straight from the vindex's Q4_K/Q6_K bytes
+    // (q4k-direct prefill — skips the f32 dequant). When `None`, read the
+    // dequantised projection weights from `weights` (the f32 view path).
+    index: Option<&dyn crate::KvIndex>,
 ) -> Option<(Array2<f32>, Array2<f32>, Array2<f32>)> {
     use crate::forward::{add_bias, apply_norm};
     use crate::residual::{rms_norm_heads, rms_norm_heads_no_weight};
@@ -178,21 +188,40 @@ pub fn run_attention_with_kv_backend(
     let norm_off = arch.norm_weight_offset();
 
     let h_norm = apply_norm(&weights, h, &arch.input_layernorm_key(layer), norm_off);
-    let wq = weights.tensor(&arch.attn_q_key(layer))?;
-    let wk = weights.tensor(&arch.attn_k_key(layer))?;
-    let v_from_k = !weights.has_tensor(&arch.attn_v_key(layer));
-    let wv = if v_from_k {
-        wk
-    } else {
-        weights.tensor(&arch.attn_v_key(layer))?
-    };
-    let wo = weights.tensor(&arch.attn_o_key(layer))?;
 
-    let (mut q, mut k, mut v) = (
-        crate::dot_proj_gpu(&h_norm, wq, backend),
-        crate::dot_proj_gpu(&h_norm, wk, backend),
-        crate::dot_proj_gpu(&h_norm, wv, backend),
-    );
+    // q4k-direct: project from the raw Q4_K/Q6_K attn bytes (Q/K/O are Q4_K,
+    // V is Q6_K in a default vindex) when an index is supplied; else read the
+    // dequantised projection weights from the view. The O projection (below)
+    // dispatches the same way.
+    let attn_q4k: Option<[(&[u8], &str); 4]> = match index {
+        Some(idx) => Some(idx.attn_kquant_layer_data(layer)?),
+        None => None,
+    };
+    let q_dim = nq * hd;
+    let kv_dim = nkv * hd;
+    let in_dim = h_norm.ncols();
+
+    let (mut q, mut k, mut v) = if let Some(attn) = attn_q4k {
+        (
+            crate::ffn::weight::quant_proj(attn[0].0, attn[0].1, &h_norm, q_dim, in_dim, seq_len),
+            crate::ffn::weight::quant_proj(attn[1].0, attn[1].1, &h_norm, kv_dim, in_dim, seq_len),
+            crate::ffn::weight::quant_proj(attn[2].0, attn[2].1, &h_norm, kv_dim, in_dim, seq_len),
+        )
+    } else {
+        let wq = weights.tensor(&arch.attn_q_key(layer))?;
+        let wk = weights.tensor(&arch.attn_k_key(layer))?;
+        let v_from_k = !weights.has_tensor(&arch.attn_v_key(layer));
+        let wv = if v_from_k {
+            wk
+        } else {
+            weights.tensor(&arch.attn_v_key(layer))?
+        };
+        (
+            crate::dot_proj_gpu(&h_norm, wq, backend),
+            crate::dot_proj_gpu(&h_norm, wk, backend),
+            crate::dot_proj_gpu(&h_norm, wv, backend),
+        )
+    };
     for (proj, bias_fn) in [
         (&mut q, arch.attn_q_bias_key(layer) as Option<String>),
         (&mut k, arch.attn_k_bias_key(layer)),
@@ -265,7 +294,12 @@ pub fn run_attention_with_kv_backend(
         false,
         arch.attn_logit_softcapping(),
     );
-    let mut o = crate::dot_proj_gpu(&attn_out, wo, backend);
+    let mut o = if let Some(attn) = attn_q4k {
+        crate::ffn::weight::quant_proj(attn[3].0, attn[3].1, &attn_out, in_dim, q_dim, seq_len)
+    } else {
+        let wo = weights.tensor(&arch.attn_o_key(layer))?;
+        crate::dot_proj_gpu(&attn_out, wo, backend)
+    };
     if let Some(b) = arch
         .attn_o_bias_key(layer)
         .and_then(|k| weights.vectors.get(&k))
@@ -492,6 +526,7 @@ mod tests {
             &input,
             0,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(h_out.shape(), &[2, weights.hidden_size]);
@@ -522,6 +557,7 @@ mod tests {
                 &input,
                 layer,
                 Some(&crate::CpuBackend),
+                None,
             )
             .expect("engine attention");
             let recompute = crate::attention::block::run_attention_block_with_kv_out(
@@ -552,6 +588,7 @@ mod tests {
             &input,
             0,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(h_out.shape(), &[2, weights.hidden_size]);
@@ -570,6 +607,7 @@ mod tests {
             &input,
             0,
             None,
+            None,
         )
         .unwrap();
         let (h_cpu, _, _) = run_attention_with_kv_backend(
@@ -577,6 +615,7 @@ mod tests {
             &input,
             0,
             Some(&crate::CpuBackend),
+            None,
         )
         .unwrap();
         for (a, b) in h_no.iter().zip(h_cpu.iter()) {
@@ -614,6 +653,7 @@ mod tests {
             &input,
             0,
             None,
+            None,
         )
         .unwrap();
         let (h_cpu, k_cpu, v_cpu) = run_attention_with_kv_backend(
@@ -621,6 +661,7 @@ mod tests {
             &input,
             0,
             Some(&crate::CpuBackend),
+            None,
         )
         .unwrap();
         for (a, b) in h_no.iter().zip(h_cpu.iter()) {

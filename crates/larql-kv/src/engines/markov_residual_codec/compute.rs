@@ -38,7 +38,7 @@ pub fn rs_prefill_codec(
 
     for layer in 0..num_layers {
         stored.push(h.clone());
-        let (h_post_attn, _k, _v) = run_attention_with_kv_backend(weights, &h, layer, be)
+        let (h_post_attn, _k, _v) = run_attention_with_kv_backend(weights, &h, layer, be, None)
             .expect("attention failed during MarkovResidualCodec prefill");
         let bffn = BackendFfn {
             weights: weights.canonical(),
