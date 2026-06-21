@@ -933,37 +933,37 @@ mod tests {
 
     #[test]
     fn default_coarse_prefill_returns_none() {
-        let mut weights = make_test_weights();
+        let weights = make_test_weights();
         let backend = StubKvBackend;
-        let result = backend.coarse_prefill(&mut weights, &[0u32, 1], None);
+        let result = backend.coarse_prefill(&weights, &[0u32, 1], None);
         assert!(result.is_none());
     }
 
     #[test]
     fn default_coarse_decode_step_returns_none() {
-        let mut weights = make_test_weights();
+        let weights = make_test_weights();
         let backend = StubKvBackend;
         let mut handle = KvHandle::new(StubKvInner {
             len: 0,
             dim: weights.hidden_size,
         });
-        let result = backend.coarse_decode_step(&mut weights, 0, None, &mut handle, 0);
+        let result = backend.coarse_decode_step(&weights, 0, None, &mut handle, 0);
         assert!(result.is_none());
     }
 
     #[test]
     fn default_coarse_prefill_with_state_delegates_to_coarse_prefill() {
-        let mut weights = make_test_weights();
+        let weights = make_test_weights();
         let backend = StubKvBackend;
         let mut state = PerLayerDecodeState::with_capacity(weights.num_layers);
         let result =
-            backend.coarse_prefill_with_state(&mut weights, &[0u32, 1], None, Some(&mut state));
+            backend.coarse_prefill_with_state(&weights, &[0u32, 1], None, Some(&mut state));
         assert!(result.is_none());
     }
 
     #[test]
     fn default_coarse_decode_step_with_state_delegates() {
-        let mut weights = make_test_weights();
+        let weights = make_test_weights();
         let backend = StubKvBackend;
         let mut handle = KvHandle::new(StubKvInner {
             len: 0,
@@ -971,7 +971,7 @@ mod tests {
         });
         let mut state = PerLayerDecodeState::with_capacity(weights.num_layers);
         let result = backend.coarse_decode_step_with_state(
-            &mut weights,
+            &weights,
             0,
             None,
             &mut handle,
@@ -983,7 +983,7 @@ mod tests {
 
     #[test]
     fn default_coarse_decode_step_with_state_masked_delegates() {
-        let mut weights = make_test_weights();
+        let weights = make_test_weights();
         let backend = StubKvBackend;
         let mut handle = KvHandle::new(StubKvInner {
             len: 0,
@@ -996,7 +996,7 @@ mod tests {
         ] {
             let mut state = PerLayerDecodeState::with_capacity(weights.num_layers);
             let result = backend.coarse_decode_step_with_state_masked(
-                &mut weights,
+                &weights,
                 0,
                 None,
                 &mut handle,

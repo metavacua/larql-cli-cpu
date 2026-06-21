@@ -831,18 +831,18 @@ mod tests {
     fn prefill_and_decode_quant_forward_and_emit() {
         use larql_inference::ffn::NullFfn;
         use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
         let index = make_test_q4k_vindex(&weights);
         let backend = larql_compute::cpu_backend();
         let ffn = NullFfn;
         let mut eng = BoundaryKvEngine::new(config("seq", 2));
         let h = eng
-            .prefill_quant(&mut weights, &ffn, &index, &[0u32, 1], &*backend)
+            .prefill_quant(&weights, &ffn, &index, &[0u32, 1], &*backend)
             .expect("prefill_quant");
         assert!(h.iter().all(|v| v.is_finite()));
         assert_eq!(eng.archive().total_frames(), Some(1));
         let h2 = eng
-            .decode_step_quant(&mut weights, &ffn, &index, 2, &*backend)
+            .decode_step_quant(&weights, &ffn, &index, 2, &*backend)
             .expect("decode_step_quant");
         assert!(h2.iter().all(|v| v.is_finite()));
         assert_eq!(eng.abs_position(), 3);
@@ -852,7 +852,7 @@ mod tests {
     fn resident_and_quant_reject_empty_prompt() {
         use larql_inference::ffn::NullFfn;
         use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
         let index = make_test_q4k_vindex(&weights);
         let backend = larql_compute::cpu_backend();
         let ffn = NullFfn;
@@ -862,7 +862,7 @@ mod tests {
             Err(EngineError::EmptyPrompt)
         ));
         assert!(matches!(
-            eng.prefill_quant(&mut weights, &ffn, &index, &[], &*backend),
+            eng.prefill_quant(&weights, &ffn, &index, &[], &*backend),
             Err(EngineError::EmptyPrompt)
         ));
     }

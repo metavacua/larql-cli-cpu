@@ -993,13 +993,13 @@ mod tests {
     fn prefill_quant_cpu_runs_via_dequant_path() {
         use larql_inference::ffn::NullFfn;
         use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
         let index = make_test_q4k_vindex(&weights);
         let backend = larql_compute::cpu_backend();
         let ffn = NullFfn;
         let mut engine = UnlimitedContextEngine::new(512);
         let h = engine
-            .prefill_quant(&mut weights, &ffn, &index, &[0u32, 1, 2], &*backend)
+            .prefill_quant(&weights, &ffn, &index, &[0u32, 1, 2], &*backend)
             .expect("prefill_quant Q4K cpu fallback");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
     }
@@ -1008,16 +1008,16 @@ mod tests {
     fn decode_step_quant_cpu_extends_state() {
         use larql_inference::ffn::NullFfn;
         use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
         let index = make_test_q4k_vindex(&weights);
         let backend = larql_compute::cpu_backend();
         let ffn = NullFfn;
         let mut engine = UnlimitedContextEngine::new(512);
         engine
-            .prefill_quant(&mut weights, &ffn, &index, &[0u32, 1], &*backend)
+            .prefill_quant(&weights, &ffn, &index, &[0u32, 1], &*backend)
             .expect("prefill_quant");
         let h = engine
-            .decode_step_quant(&mut weights, &ffn, &index, 2, &*backend)
+            .decode_step_quant(&weights, &ffn, &index, 2, &*backend)
             .expect("decode_step_quant Q4K cpu fallback");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
     }
@@ -1077,14 +1077,14 @@ mod tests {
     fn decode_step_quant_without_prefill_returns_none() {
         use larql_inference::ffn::NullFfn;
         use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
         let index = make_test_q4k_vindex(&weights);
         let backend = larql_compute::cpu_backend();
         let ffn = NullFfn;
         let mut engine = UnlimitedContextEngine::new(512);
         // No prefill → decode falls through fast-path checks and returns None
         // (or some empty hidden) without panicking.
-        let _ = engine.decode_step_quant(&mut weights, &ffn, &index, 0, &*backend);
+        let _ = engine.decode_step_quant(&weights, &ffn, &index, 0, &*backend);
     }
 
     // ── Public utility methods (stats, replay_window, summary) ────────────
@@ -1171,14 +1171,14 @@ mod tests {
         use larql_inference::ffn::NullFfn;
         use larql_inference::layer_executor::LocalWalkExecutor;
         use larql_inference::test_utils::make_test_weights;
-        let mut weights = make_test_weights();
+        let weights = make_test_weights();
         let index = larql_inference::test_utils::make_test_vindex(&weights);
         let backend = larql_compute::cpu_backend();
         let executor = LocalWalkExecutor::new(&*backend);
         let ffn = NullFfn;
         let mut engine = UnlimitedContextEngine::new(512);
         let h = engine
-            .prefill_quant_via_executor(&mut weights, &executor, &ffn, &index, &[0u32, 1, 2])
+            .prefill_quant_via_executor(&weights, &executor, &ffn, &index, &[0u32, 1, 2])
             .expect("executor prefill");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert!(engine.memory_bytes() > 0);
@@ -1189,17 +1189,17 @@ mod tests {
         use larql_inference::ffn::NullFfn;
         use larql_inference::layer_executor::LocalWalkExecutor;
         use larql_inference::test_utils::make_test_weights;
-        let mut weights = make_test_weights();
+        let weights = make_test_weights();
         let index = larql_inference::test_utils::make_test_vindex(&weights);
         let backend = larql_compute::cpu_backend();
         let executor = LocalWalkExecutor::new(&*backend);
         let ffn = NullFfn;
         let mut engine = UnlimitedContextEngine::new(512);
         engine
-            .prefill_quant_via_executor(&mut weights, &executor, &ffn, &index, &[0u32, 1])
+            .prefill_quant_via_executor(&weights, &executor, &ffn, &index, &[0u32, 1])
             .expect("prefill");
         let h = engine
-            .decode_step_quant_via_executor(&mut weights, &executor, &ffn, &index, 2)
+            .decode_step_quant_via_executor(&weights, &executor, &ffn, &index, 2)
             .expect("decode");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
     }
@@ -1211,16 +1211,16 @@ mod tests {
     fn process_quant_with_profiling_populates_summary() {
         use larql_inference::ffn::NullFfn;
         use larql_inference::test_utils::make_test_weights;
-        let mut weights = make_test_weights();
+        let weights = make_test_weights();
         let index = larql_inference::test_utils::make_test_vindex(&weights);
         let backend = larql_compute::cpu_backend();
         let ffn = NullFfn;
         let mut engine = UnlimitedContextEngine::new(512).with_profiling(true);
         engine
-            .prefill_quant(&mut weights, &ffn, &index, &[0u32, 1], &*backend)
+            .prefill_quant(&weights, &ffn, &index, &[0u32, 1], &*backend)
             .expect("prefill");
         engine
-            .decode_step_quant(&mut weights, &ffn, &index, 2, &*backend)
+            .decode_step_quant(&weights, &ffn, &index, 2, &*backend)
             .expect("decode");
         let summary = engine
             .stage_summary()
@@ -1262,7 +1262,7 @@ mod tests {
     fn executor_path_honors_ffn_parameter() {
         use larql_inference::layer_executor::LocalWalkExecutor;
         use larql_inference::test_utils::make_test_weights;
-        let mut weights = make_test_weights();
+        let weights = make_test_weights();
         let index = larql_inference::test_utils::make_test_vindex(&weights);
         let backend = larql_compute::cpu_backend();
         let executor = LocalWalkExecutor::new(&*backend);
@@ -1273,7 +1273,7 @@ mod tests {
         };
         let mut engine = UnlimitedContextEngine::new(512);
         engine
-            .prefill_quant_via_executor(&mut weights, &executor, &ffn, &index, &[0u32, 1, 2])
+            .prefill_quant_via_executor(&weights, &executor, &ffn, &index, &[0u32, 1, 2])
             .expect("prefill via executor");
 
         let call_count = ffn.calls.load(std::sync::atomic::Ordering::SeqCst);
@@ -1294,7 +1294,7 @@ mod tests {
         use larql_inference::ffn::NullFfn;
         use larql_inference::layer_executor::LocalWalkExecutor;
         use larql_inference::test_utils::make_test_weights;
-        let mut weights = make_test_weights();
+        let weights = make_test_weights();
         let index = larql_inference::test_utils::make_test_vindex(&weights);
         let backend = larql_compute::cpu_backend();
         let executor = LocalWalkExecutor::new(&*backend);
@@ -1304,7 +1304,7 @@ mod tests {
         // branch in `extend_current_via_executor`.
         let mut engine = UnlimitedContextEngine::new(2);
         engine
-            .prefill_quant_via_executor(&mut weights, &executor, &ffn, &index, &[0u32, 1, 2, 3])
+            .prefill_quant_via_executor(&weights, &executor, &ffn, &index, &[0u32, 1, 2, 3])
             .expect("prefill 4 tokens through executor");
         let stats = engine.stats(&weights);
         assert!(

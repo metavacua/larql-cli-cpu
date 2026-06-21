@@ -1007,13 +1007,13 @@ mod tests {
         assert_eq!(engine.decode_calls, 1);
 
         // prefill_quant_via_executor → prefill_quant → prefill (default fallback)
-        let mut weights_q = crate::test_utils::make_test_weights();
-        let out = engine.prefill_quant_via_executor(&mut weights_q, &exec, &ffn, &index, &[0, 1]);
+        let weights_q = crate::test_utils::make_test_weights();
+        let out = engine.prefill_quant_via_executor(&weights_q, &exec, &ffn, &index, &[0, 1]);
         assert!(out.is_ok());
         assert_eq!(engine.prefill_calls, 2);
 
         // decode_step_quant_via_executor → decode_step_quant → decode_step
-        let out = engine.decode_step_quant_via_executor(&mut weights_q, &exec, &ffn, &index, 3);
+        let out = engine.decode_step_quant_via_executor(&weights_q, &exec, &ffn, &index, 3);
         assert!(out.is_ok());
         assert_eq!(engine.decode_calls, 2);
     }
@@ -1029,15 +1029,15 @@ mod tests {
             decode_calls: 0,
         };
 
-        let mut weights_q4k = crate::test_utils::make_test_weights();
-        let out = engine.prefill_quant(&mut weights_q4k, &ffn, &index, &[1, 2, 3], &*backend);
+        let weights_q4k = crate::test_utils::make_test_weights();
+        let out = engine.prefill_quant(&weights_q4k, &ffn, &index, &[1, 2, 3], &*backend);
         assert!(out.is_ok());
         assert_eq!(
             engine.prefill_calls, 1,
             "default prefill_quant must dispatch to prefill"
         );
 
-        let out = engine.decode_step_quant(&mut weights_q4k, &ffn, &index, 4, &*backend);
+        let out = engine.decode_step_quant(&weights_q4k, &ffn, &index, 4, &*backend);
         assert!(out.is_ok());
         assert_eq!(
             engine.decode_calls, 1,

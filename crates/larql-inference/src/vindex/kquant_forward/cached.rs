@@ -342,9 +342,9 @@ mod tests {
             "hidden state must be finite"
         );
         assert_eq!(cache.len(), fx.weights.num_layers);
-        for layer in 0..fx.weights.num_layers {
+        for entry in &cache {
             assert!(
-                cache[layer].is_some(),
+                entry.is_some(),
                 "every layer should have K/V populated after prefill"
             );
         }

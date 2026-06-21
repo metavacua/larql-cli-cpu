@@ -404,10 +404,10 @@ mod tests {
 
     #[test]
     fn predict_kquant_prefill_runs_end_to_end_on_cpu() {
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
         let _scratch = larql_models::DequantScratch::new();
         let idx = make_q4k_fixture_index(&weights);
-        let (h, cache, _timings) = predict_kquant_prefill(&mut weights, &[0u32, 1, 2], &idx);
+        let (h, cache, _timings) = predict_kquant_prefill(&weights, &[0u32, 1, 2], &idx);
         assert_eq!(h.shape(), &[3, weights.hidden_size]);
         // One cache entry per layer, all populated by the prefill loop.
         assert_eq!(cache.len(), weights.num_layers);
@@ -418,12 +418,12 @@ mod tests {
 
     #[test]
     fn predict_kquant_prefill_with_state_captures_per_layer_residuals() {
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
         let _scratch = larql_models::DequantScratch::new();
         let idx = make_q4k_fixture_index(&weights);
         let mut state = crate::PerLayerDecodeState::with_capacity(weights.num_layers);
         let (h, _cache, _timings) =
-            predict_kquant_prefill_with_state(&mut weights, &[0u32, 1, 2], &idx, Some(&mut state));
+            predict_kquant_prefill_with_state(&weights, &[0u32, 1, 2], &idx, Some(&mut state));
         assert_eq!(h.shape(), &[3, weights.hidden_size]);
         // State captured for every layer.
         assert!(state.is_complete_for(weights.num_layers));
@@ -431,37 +431,37 @@ mod tests {
 
     #[test]
     fn predict_kquant_decode_step_uses_prefill_cache() {
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
         let _scratch = larql_models::DequantScratch::new();
         let idx = make_q4k_fixture_index(&weights);
         // First do prefill to populate the cache.
-        let (_h, mut cache, _) = predict_kquant_prefill(&mut weights, &[0u32, 1, 2], &idx);
+        let (_h, mut cache, _) = predict_kquant_prefill(&weights, &[0u32, 1, 2], &idx);
         // Then decode one new token at abs_position = 3.
-        let result = predict_kquant_decode_step(&mut weights, 4u32, &idx, &mut cache, 3);
+        let result = predict_kquant_decode_step(&weights, 4u32, &idx, &mut cache, 3);
         let (h, _t) = result.expect("decode step succeeds with populated cache");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
     }
 
     #[test]
     fn predict_kquant_decode_step_rejects_mismatched_cache() {
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
         let _scratch = larql_models::DequantScratch::new();
         let idx = make_q4k_fixture_index(&weights);
         // Wrong-sized cache → early return None.
         let mut wrong = vec![None; weights.num_layers + 1];
-        let result = predict_kquant_decode_step(&mut weights, 0u32, &idx, &mut wrong, 0);
+        let result = predict_kquant_decode_step(&weights, 0u32, &idx, &mut wrong, 0);
         assert!(result.is_none());
     }
 
     #[test]
     fn predict_kquant_decode_step_direct_runs_with_q4k_fixture() {
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
         let _scratch = larql_models::DequantScratch::new();
         let idx = make_q4k_fixture_index(&weights);
-        let (_h, mut cache, _) = predict_kquant_prefill(&mut weights, &[0u32, 1, 2], &idx);
+        let (_h, mut cache, _) = predict_kquant_prefill(&weights, &[0u32, 1, 2], &idx);
         let backend = crate::CpuBackend;
         let result =
-            predict_kquant_decode_step_direct(&mut weights, 4u32, &idx, &backend, &mut cache, 3);
+            predict_kquant_decode_step_direct(&weights, 4u32, &idx, &backend, &mut cache, 3);
         match result {
             Some(h) => assert_eq!(h.shape(), &[1, weights.hidden_size]),
             None => {
@@ -473,14 +473,14 @@ mod tests {
 
     #[test]
     fn predict_kquant_decode_step_direct_with_state_captures_per_layer() {
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
         let _scratch = larql_models::DequantScratch::new();
         let idx = make_q4k_fixture_index(&weights);
-        let (_h, mut cache, _) = predict_kquant_prefill(&mut weights, &[0u32, 1, 2], &idx);
+        let (_h, mut cache, _) = predict_kquant_prefill(&weights, &[0u32, 1, 2], &idx);
         let backend = crate::CpuBackend;
         let mut state = crate::PerLayerDecodeState::with_capacity(weights.num_layers);
         let _ = predict_kquant_decode_step_direct_with_state(
-            &mut weights,
+            &weights,
             4u32,
             &idx,
             &backend,
@@ -519,7 +519,7 @@ mod tests {
     /// hooks.rs.
     #[test]
     fn hooks_predict_kquant_hidden_hooked_errors_on_hybrid_moe_arch() {
-        let mut weights = larql_models::test_fixtures::make_test_gemma4_moe_weights();
+        let weights = larql_models::test_fixtures::make_test_gemma4_moe_weights();
         assert!(weights.arch.is_hybrid_moe());
         // We don't need a real Q4K vindex — the function checks
         // is_hybrid_moe() before reading any tensor.
@@ -527,7 +527,7 @@ mod tests {
         impl crate::KvIndex for EmptyIdx {}
         let mut hook = crate::forward::NoopHook;
         let result =
-            predict_kquant_hidden_hooked(&mut weights, &[0u32], &EmptyIdx, false, false, &mut hook);
+            predict_kquant_hidden_hooked(&weights, &[0u32], &EmptyIdx, false, false, &mut hook);
         let err = result.expect_err("MoE arch must early-return Err");
         assert!(err.contains("dense FFN"));
     }
@@ -764,19 +764,13 @@ mod tests {
         // string starting with "predict_kquant_hidden_hooked currently
         // supports dense FFN" when the guard fires. Skip if the fixture
         // is dense — we cover the happy-path branch in the next test.
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
         let _scratch = larql_models::DequantScratch::new();
         assert!(!weights.arch.is_hybrid_moe());
         let idx = make_q4k_fixture_index(&weights);
         let mut hook = crate::forward::NoopHook;
-        let result = predict_kquant_hidden_hooked(
-            &mut weights,
-            &[0u32, 1, 2],
-            &idx,
-            false,
-            false,
-            &mut hook,
-        );
+        let result =
+            predict_kquant_hidden_hooked(&weights, &[0u32, 1, 2], &idx, false, false, &mut hook);
         // The dense path completes — exact assertion on shape.
         let h = result.expect("dense Q4K hooked forward must succeed");
         assert_eq!(h.shape()[1], weights.hidden_size);

@@ -939,13 +939,13 @@ mod tests {
     fn prefill_quant_cpu_fallback_runs_via_dequant() {
         use larql_inference::ffn::NullFfn;
         use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
         let index = make_test_q4k_vindex(&weights);
         let backend = larql_compute::cpu_backend();
         let ffn = NullFfn;
         let mut engine = StandardEngine::new(None);
         let h = engine
-            .prefill_quant(&mut weights, &ffn, &index, &[0u32, 1, 2], &*backend)
+            .prefill_quant(&weights, &ffn, &index, &[0u32, 1, 2], &*backend)
             .expect("prefill_quant Q4K cpu fallback");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert!(engine.memory_bytes() > 0);
@@ -955,17 +955,17 @@ mod tests {
     fn decode_step_quant_cpu_fallback_extends_cache() {
         use larql_inference::ffn::NullFfn;
         use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
         let index = make_test_q4k_vindex(&weights);
         let backend = larql_compute::cpu_backend();
         let ffn = NullFfn;
         let mut engine = StandardEngine::new(None);
         engine
-            .prefill_quant(&mut weights, &ffn, &index, &[0u32, 1], &*backend)
+            .prefill_quant(&weights, &ffn, &index, &[0u32, 1], &*backend)
             .expect("prefill_quant");
         let mem_before = engine.memory_bytes();
         let h = engine
-            .decode_step_quant(&mut weights, &ffn, &index, 2, &*backend)
+            .decode_step_quant(&weights, &ffn, &index, 2, &*backend)
             .expect("decode_step_quant Q4K cpu fallback");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert!(
@@ -978,7 +978,7 @@ mod tests {
     fn decode_step_quant_without_prefill_returns_none() {
         use larql_inference::ffn::NullFfn;
         use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
         let index = make_test_q4k_vindex(&weights);
         let backend = larql_compute::cpu_backend();
         let ffn = NullFfn;
@@ -986,7 +986,7 @@ mod tests {
         // self.handles is None → decode_step_quant returns an
         // InvariantViolation error at the `self.handles.as_mut()` guard.
         assert!(engine
-            .decode_step_quant(&mut weights, &ffn, &index, 0, &*backend)
+            .decode_step_quant(&weights, &ffn, &index, 0, &*backend)
             .is_err());
     }
 
@@ -1014,13 +1014,13 @@ mod tests {
     fn prefill_quant_empty_prompt_returns_empty_prompt_error() {
         use larql_inference::ffn::NullFfn;
         use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
         let index = make_test_q4k_vindex(&weights);
         let backend = larql_compute::cpu_backend();
         let ffn = NullFfn;
         let mut engine = StandardEngine::new(None);
         let err = engine
-            .prefill_quant(&mut weights, &ffn, &index, &[], &*backend)
+            .prefill_quant(&weights, &ffn, &index, &[], &*backend)
             .unwrap_err();
         assert!(
             matches!(err, EngineError::EmptyPrompt),
@@ -1122,14 +1122,14 @@ mod tests {
         use larql_inference::ffn::NullFfn;
         use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
         use larql_inference::AsyncComputeBackend;
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
         let index = make_test_q4k_vindex(&weights);
         let backend = larql_compute::cpu_backend();
         let async_backend: Box<dyn AsyncComputeBackend> = Box::new(CpuBackend);
         let ffn = NullFfn;
         let mut engine = StandardEngine::with_async_backend(None, async_backend);
         let h = engine
-            .prefill_quant(&mut weights, &ffn, &index, &[0u32, 1, 2], &*backend)
+            .prefill_quant(&weights, &ffn, &index, &[0u32, 1, 2], &*backend)
             .expect("prefill_quant async-slot fallback");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert!(engine.memory_bytes() > 0);
@@ -1140,18 +1140,18 @@ mod tests {
         use larql_inference::ffn::NullFfn;
         use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
         use larql_inference::AsyncComputeBackend;
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
         let index = make_test_q4k_vindex(&weights);
         let backend = larql_compute::cpu_backend();
         let async_backend: Box<dyn AsyncComputeBackend> = Box::new(CpuBackend);
         let ffn = NullFfn;
         let mut engine = StandardEngine::with_async_backend(None, async_backend);
         engine
-            .prefill_quant(&mut weights, &ffn, &index, &[0u32, 1], &*backend)
+            .prefill_quant(&weights, &ffn, &index, &[0u32, 1], &*backend)
             .expect("prefill_quant async-slot");
         let mem_before = engine.memory_bytes();
         let h = engine
-            .decode_step_quant(&mut weights, &ffn, &index, 2, &*backend)
+            .decode_step_quant(&weights, &ffn, &index, 2, &*backend)
             .expect("decode_step_quant async-slot fallback");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert!(

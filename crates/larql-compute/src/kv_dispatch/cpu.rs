@@ -793,8 +793,8 @@ mod tests {
     #[test]
     fn coarse_prefill_with_state_returns_none_on_empty_tokens() {
         let b = backend();
-        let mut weights = make_test_weights();
-        let result = b.coarse_prefill_with_state(&mut weights, &[], None, None);
+        let weights = make_test_weights();
+        let result = b.coarse_prefill_with_state(&weights, &[], None, None);
         assert!(result.is_none());
     }
 
@@ -802,8 +802,8 @@ mod tests {
     #[test]
     fn coarse_prefill_with_state_returns_none_without_index() {
         let b = backend();
-        let mut weights = make_test_weights();
-        let result = b.coarse_prefill_with_state(&mut weights, &[0u32, 1], None, None);
+        let weights = make_test_weights();
+        let result = b.coarse_prefill_with_state(&weights, &[0u32, 1], None, None);
         assert!(result.is_none());
     }
 
@@ -812,8 +812,8 @@ mod tests {
     #[test]
     fn coarse_prefill_delegates_to_with_state_variant() {
         let b = backend();
-        let mut weights = make_test_weights();
-        let result = b.coarse_prefill(&mut weights, &[], None);
+        let weights = make_test_weights();
+        let result = b.coarse_prefill(&weights, &[], None);
         assert!(result.is_none());
     }
 
@@ -826,11 +826,11 @@ mod tests {
         use crate::test_fixtures::make_q4k_fixture_index;
         use larql_models::test_fixtures::make_test_q4k_weights;
         let b = backend();
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
         let idx = make_q4k_fixture_index(&weights);
         let mut state = crate::PerLayerDecodeState::with_capacity(weights.num_layers);
         let result =
-            b.coarse_prefill_with_state(&mut weights, &[0u32, 1, 2], Some(&idx), Some(&mut state));
+            b.coarse_prefill_with_state(&weights, &[0u32, 1, 2], Some(&idx), Some(&mut state));
         let (h, handle) = result.expect("Q4K prefill succeeds");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         // Handle width is reported through the inner trait.
@@ -846,12 +846,12 @@ mod tests {
         use crate::test_fixtures::make_q4k_fixture_index;
         use larql_models::test_fixtures::make_test_q4k_weights;
         let b = backend();
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
         let idx = make_q4k_fixture_index(&weights);
         let (_h, mut handle) = b
-            .coarse_prefill(&mut weights, &[0u32, 1, 2], Some(&idx))
+            .coarse_prefill(&weights, &[0u32, 1, 2], Some(&idx))
             .expect("prefill seeds the handle");
-        let result = b.coarse_decode_step(&mut weights, 4u32, Some(&idx), &mut handle, 3);
+        let result = b.coarse_decode_step(&weights, 4u32, Some(&idx), &mut handle, 3);
         let h = result.expect("decode step succeeds with populated handle");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
     }
@@ -866,14 +866,14 @@ mod tests {
         use crate::test_fixtures::make_q4k_fixture_index;
         use larql_models::test_fixtures::make_test_q4k_weights;
         let b = backend();
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
         let idx = make_q4k_fixture_index(&weights);
         let (_h, mut handle) = b
-            .coarse_prefill(&mut weights, &[0u32, 1, 2], Some(&idx))
+            .coarse_prefill(&weights, &[0u32, 1, 2], Some(&idx))
             .expect("prefill seeds the handle");
         let mut state = crate::PerLayerDecodeState::with_capacity(weights.num_layers);
         let result = b.coarse_decode_step_with_state(
-            &mut weights,
+            &weights,
             4u32,
             Some(&idx),
             &mut handle,
@@ -889,10 +889,9 @@ mod tests {
     #[test]
     fn coarse_decode_step_with_state_returns_none_without_index() {
         let b = backend();
-        let mut weights = make_test_weights();
+        let weights = make_test_weights();
         let mut handle = KvHandle::new(CpuQ4kCacheHandle { cache: vec![None] });
-        let result =
-            b.coarse_decode_step_with_state(&mut weights, 0u32, None, &mut handle, 0, None);
+        let result = b.coarse_decode_step_with_state(&weights, 0u32, None, &mut handle, 0, None);
         assert!(result.is_none());
     }
 
@@ -902,9 +901,9 @@ mod tests {
     #[test]
     fn coarse_decode_step_returns_none_without_index() {
         let b = backend();
-        let mut weights = make_test_weights();
+        let weights = make_test_weights();
         let mut handle = KvHandle::new(CpuQ4kCacheHandle { cache: vec![None] });
-        let result = b.coarse_decode_step(&mut weights, 0u32, None, &mut handle, 0);
+        let result = b.coarse_decode_step(&weights, 0u32, None, &mut handle, 0);
         assert!(result.is_none());
     }
 
@@ -915,7 +914,7 @@ mod tests {
     fn coarse_prefill_with_state_returns_none_on_unsupported_arch() {
         use crate::test_fixtures::make_q4k_fixture_index;
         let b = backend();
-        let mut weights = larql_models::test_fixtures::make_test_gemma4_moe_weights();
+        let weights = larql_models::test_fixtures::make_test_gemma4_moe_weights();
         assert!(
             !crate::kquant_forward::supports_cached_decode(&weights),
             "MoE arch must not support cached decode"
@@ -923,7 +922,7 @@ mod tests {
         // A real index is supplied so the `index?` gate passes and the
         // `supports_cached_decode` gate is the one that bites.
         let idx = make_q4k_fixture_index(&weights);
-        let result = b.coarse_prefill_with_state(&mut weights, &[0u32, 1], Some(&idx), None);
+        let result = b.coarse_prefill_with_state(&weights, &[0u32, 1], Some(&idx), None);
         assert!(result.is_none());
     }
 

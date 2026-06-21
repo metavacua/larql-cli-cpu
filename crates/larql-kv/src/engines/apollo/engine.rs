@@ -912,7 +912,7 @@ mod tests {
     fn prefill_quant_via_executor_returns_hidden_state() {
         use larql_inference::ffn::NullFfn;
         use larql_inference::layer_executor::LocalWalkExecutor;
-        let mut weights = larql_inference::test_utils::make_test_weights();
+        let weights = larql_inference::test_utils::make_test_weights();
         let index = larql_inference::test_utils::make_test_vindex(&weights);
         let backend = larql_compute::cpu_backend();
         let executor = LocalWalkExecutor::new(&*backend);
@@ -920,7 +920,7 @@ mod tests {
         let mut engine =
             crate::AnyEngine::Retrieval(Box::new(mk_apollo_for_synthetic_weights(&weights)));
         let h = engine
-            .prefill_quant_via_executor(&mut weights, &executor, &ffn, &index, &[0u32, 1u32])
+            .prefill_quant_via_executor(&weights, &executor, &ffn, &index, &[0u32, 1u32])
             .expect("executor prefill");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
     }
@@ -933,15 +933,15 @@ mod tests {
         // AnyEngine's `*_via_executor` forwards Retrieval variants to
         // these). We assert directly against the trait surface so we
         // retain access to `engine.context_tokens` for the post-condition.
-        let mut weights = larql_inference::test_utils::make_test_weights();
+        let weights = larql_inference::test_utils::make_test_weights();
         let index = larql_inference::test_utils::make_test_vindex(&weights);
         let mut engine = mk_apollo_for_synthetic_weights(&weights);
         engine
-            .prefill_quant(&mut weights, &index, &[0u32])
+            .prefill_quant(&weights, &index, &[0u32])
             .expect("prefill");
         let ctx_before = engine.context_tokens.len();
         let h = engine
-            .decode_step_quant(&mut weights, &index, 1)
+            .decode_step_quant(&weights, &index, 1)
             .expect("decode");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert_eq!(
@@ -955,7 +955,7 @@ mod tests {
     fn prefill_via_executor_uncompressed_path_when_no_boundaries() {
         use larql_inference::ffn::NullFfn;
         use larql_inference::layer_executor::LocalWalkExecutor;
-        let mut weights = larql_inference::test_utils::make_test_weights();
+        let weights = larql_inference::test_utils::make_test_weights();
         let index = larql_inference::test_utils::make_test_vindex(&weights);
         let backend = larql_compute::cpu_backend();
         let executor = LocalWalkExecutor::new(&*backend);
@@ -971,7 +971,7 @@ mod tests {
         apollo.build_routing_index().unwrap();
         let mut engine = crate::AnyEngine::Retrieval(Box::new(apollo));
         let h = engine
-            .prefill_quant_via_executor(&mut weights, &executor, &ffn, &index, &[0u32, 1u32])
+            .prefill_quant_via_executor(&weights, &executor, &ffn, &index, &[0u32, 1u32])
             .expect("executor prefill uncompressed");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
     }
@@ -1005,7 +1005,7 @@ mod tests {
     #[test]
     fn executor_path_honors_ffn_parameter() {
         use larql_inference::layer_executor::LocalWalkExecutor;
-        let mut weights = larql_inference::test_utils::make_test_weights();
+        let weights = larql_inference::test_utils::make_test_weights();
         let index = larql_inference::test_utils::make_test_vindex(&weights);
         let backend = larql_compute::cpu_backend();
         let executor = LocalWalkExecutor::new(&*backend);
@@ -1028,7 +1028,7 @@ mod tests {
             hidden: weights.hidden_size,
         };
         engine
-            .prefill_quant_via_executor(&mut weights, &executor, &ffn, &index, &[0u32, 1u32])
+            .prefill_quant_via_executor(&weights, &executor, &ffn, &index, &[0u32, 1u32])
             .expect("prefill via executor");
         let calls = ffn.calls.load(std::sync::atomic::Ordering::SeqCst);
         // Post retrieval/KV trait split: ApolloEngine is now a
@@ -1049,7 +1049,7 @@ mod tests {
     fn prefill_via_executor_falls_back_when_no_store() {
         use larql_inference::ffn::NullFfn;
         use larql_inference::layer_executor::LocalWalkExecutor;
-        let mut weights = larql_inference::test_utils::make_test_weights();
+        let weights = larql_inference::test_utils::make_test_weights();
         let index = larql_inference::test_utils::make_test_vindex(&weights);
         let backend = larql_compute::cpu_backend();
         let executor = LocalWalkExecutor::new(&*backend);
@@ -1058,7 +1058,7 @@ mod tests {
             crate::AnyEngine::Retrieval(Box::new(ApolloEngine::new(InjectionConfig::default())));
         // No store → prepare_injection returns None → executor path returns None.
         assert!(engine
-            .prefill_quant_via_executor(&mut weights, &executor, &ffn, &index, &[0u32])
+            .prefill_quant_via_executor(&weights, &executor, &ffn, &index, &[0u32])
             .is_err());
     }
 }
