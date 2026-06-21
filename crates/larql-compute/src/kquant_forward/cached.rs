@@ -127,10 +127,10 @@ pub fn predict_kquant_prefill_with_state(
         const BLK: usize = larql_models::quant::ggml::K_QUANT_BLOCK_ELEMS;
         let q_dim =
             weights.arch.num_q_heads_for_layer(layer) * weights.arch.head_dim_for_layer(layer);
-        let use_q4k_ffn =
-            weights.hidden_size % BLK == 0 && index.interleaved_kquant_layer_data(layer).is_some();
-        let use_q4k_attn = weights.hidden_size % BLK == 0
-            && q_dim % BLK == 0
+        let use_q4k_ffn = weights.hidden_size.is_multiple_of(BLK)
+            && index.interleaved_kquant_layer_data(layer).is_some();
+        let use_q4k_attn = weights.hidden_size.is_multiple_of(BLK)
+            && q_dim.is_multiple_of(BLK)
             && index.attn_kquant_layer_data(layer).is_some();
 
         let t0 = std::time::Instant::now();

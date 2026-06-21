@@ -710,8 +710,8 @@ fn decode_q6k_superblock_into(w: &[u8], row_base: usize, sb: usize, wf: &mut [f3
     let qh = &block[128..192];
     let scales = &block[192..208];
     let d = f16_to_f32(u16::from_le_bytes([block[208], block[209]]));
-    for j in 0..16 {
-        let sc = d * (scales[j] as i8) as f32;
+    for (j, &sc_byte) in scales.iter().enumerate() {
+        let sc = d * (sc_byte as i8) as f32;
         for i in 0..16 {
             let idx = j * 16 + i;
             let lo4 = if idx % 2 == 0 {
@@ -724,6 +724,76 @@ fn decode_q6k_superblock_into(w: &[u8], row_base: usize, sb: usize, wf: &mut [f3
             wf[idx] = sc * val as f32;
         }
     }
+}
+
+/// Dot of a decoded 256-element f32 weight block against a 256-element f32
+/// activation slice — the inner of the amortised k-quant matmul. Dispatches to
+/// NEON on aarch64; portable multi-accumulator fallback elsewhere.
+#[inline]
+fn dot_256_f32(wf: &[f32; 256], xs: &[f32]) -> f32 {
+    debug_assert!(xs.len() >= 256);
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: NEON is in the aarch64 base ISA; `wf` is 256 f32 and `xs` has
+        // ≥256 contiguous f32 (the caller slices exactly one super-block).
+        unsafe { dot_256_f32_neon(wf, xs) }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        dot_256_f32_scalar(wf, xs)
+    }
+}
+
+/// Portable reference: 8 independent accumulators so the reduction isn't a
+/// scalar fp-add chain (Rust f32 add isn't associative). Also the parity oracle
+/// for the NEON path. On aarch64 it's reached only from tests (the NEON path
+/// serves the lib), so allow it to be otherwise-unused there.
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+#[inline]
+fn dot_256_f32_scalar(wf: &[f32; 256], xs: &[f32]) -> f32 {
+    let mut acc = [0.0f32; 8];
+    for c in 0..256 / 8 {
+        for l in 0..8 {
+            acc[l] += wf[c * 8 + l] * xs[c * 8 + l];
+        }
+    }
+    acc.iter().sum::<f32>()
+}
+
+/// NEON: 8 `float32x4` accumulators (32 elems/iter × 8 iters = 256). Eight
+/// independent accumulators keep the FMA units busy across M-series' ~4-cycle
+/// FMA latency (one accumulator would serialise at ~25% of peak).
+#[cfg(target_arch = "aarch64")]
+#[inline]
+unsafe fn dot_256_f32_neon(wf: &[f32; 256], xs: &[f32]) -> f32 {
+    use std::arch::aarch64::*;
+    let wp = wf.as_ptr();
+    let xp = xs.as_ptr();
+    let mut a0 = vdupq_n_f32(0.0);
+    let mut a1 = vdupq_n_f32(0.0);
+    let mut a2 = vdupq_n_f32(0.0);
+    let mut a3 = vdupq_n_f32(0.0);
+    let mut a4 = vdupq_n_f32(0.0);
+    let mut a5 = vdupq_n_f32(0.0);
+    let mut a6 = vdupq_n_f32(0.0);
+    let mut a7 = vdupq_n_f32(0.0);
+    let mut i = 0usize;
+    while i < 256 {
+        a0 = vfmaq_f32(a0, vld1q_f32(wp.add(i)), vld1q_f32(xp.add(i)));
+        a1 = vfmaq_f32(a1, vld1q_f32(wp.add(i + 4)), vld1q_f32(xp.add(i + 4)));
+        a2 = vfmaq_f32(a2, vld1q_f32(wp.add(i + 8)), vld1q_f32(xp.add(i + 8)));
+        a3 = vfmaq_f32(a3, vld1q_f32(wp.add(i + 12)), vld1q_f32(xp.add(i + 12)));
+        a4 = vfmaq_f32(a4, vld1q_f32(wp.add(i + 16)), vld1q_f32(xp.add(i + 16)));
+        a5 = vfmaq_f32(a5, vld1q_f32(wp.add(i + 20)), vld1q_f32(xp.add(i + 20)));
+        a6 = vfmaq_f32(a6, vld1q_f32(wp.add(i + 24)), vld1q_f32(xp.add(i + 24)));
+        a7 = vfmaq_f32(a7, vld1q_f32(wp.add(i + 28)), vld1q_f32(xp.add(i + 28)));
+        i += 32;
+    }
+    let s = vaddq_f32(
+        vaddq_f32(vaddq_f32(a0, a1), vaddq_f32(a2, a3)),
+        vaddq_f32(vaddq_f32(a4, a5), vaddq_f32(a6, a7)),
+    );
+    vaddvq_f32(s)
 }
 
 /// Amortised Q4_K × f32 matmul: `out[s, r] = sum_k W[r, k] * X[s, k]`.
@@ -794,9 +864,9 @@ pub fn q6k_matmul_into(
 /// and q6k differ only in `block_bytes` and the per-block `decode`.
 ///
 /// Shape errors (zero dims, `hidden` not a 256-multiple, short `w`) zero the
-/// output in release and `debug_assert` in dev — callers keep the dims valid
-/// (the `use_q4k_ffn` gate, the down padding), so a violation is a caller bug,
-/// not an expected fallback.
+/// output (defensive, mirroring `q4k_matvec_into`); callers keep the dims valid
+/// (the `use_q4k_ffn` gate, the down padding).
+#[allow(clippy::too_many_arguments)]
 fn kquant_matmul_into(
     out: &mut [f32],
     x: &[f32],
@@ -848,20 +918,10 @@ fn kquant_matmul_into(
                 let x_off = sb * ELEMS_PER_BLOCK;
                 for (s, slot) in out_row.iter_mut().enumerate() {
                     let xs = &x_ref[s * hidden + x_off..s * hidden + x_off + ELEMS_PER_BLOCK];
-                    // 8 independent accumulators break the serial fp-add
-                    // dependency so LLVM lowers the reduction to NEON FMA
-                    // (Rust f32 add isn't associative, so a single `acc`
-                    // forces a scalar chain). wf was decoded once above and
-                    // is reused across every `seq` column here.
-                    let mut acc = [0.0f32; 8];
-                    for c in 0..ELEMS_PER_BLOCK / 8 {
-                        let wfc = &wf[c * 8..c * 8 + 8];
-                        let xsc = &xs[c * 8..c * 8 + 8];
-                        for l in 0..8 {
-                            acc[l] += wfc[l] * xsc[l];
-                        }
-                    }
-                    *slot += acc.iter().sum::<f32>();
+                    // `wf` was decoded once above; dot it against this column.
+                    // NEON (8 f32x4 accumulators to hide FMA latency) on
+                    // aarch64, portable multi-accumulator fallback elsewhere.
+                    *slot += dot_256_f32(&wf, xs);
                 }
             }
         }
@@ -1836,6 +1896,101 @@ mod tests {
         let w = vec![0u8; 3 * 144];
         q4k_matmul_into(&mut out, &x, &w, 3, 100, 2);
         assert_eq!(out, vec![0.0f32; 6]);
+    }
+
+    /// `dot_256_f32` (NEON on aarch64) must match the scalar reference and a
+    /// plain sequential dot.
+    #[test]
+    fn dot_256_f32_matches_reference() {
+        let wf: [f32; 256] = std::array::from_fn(|i| (i as f32 * 0.013).sin() * 0.5);
+        let xs: Vec<f32> = (0..256).map(|i| (i as f32 * 0.021).cos() * 0.7).collect();
+        let reference: f64 = (0..256).map(|i| (wf[i] * xs[i]) as f64).sum();
+        let got = dot_256_f32(&wf, &xs);
+        assert!(
+            (got as f64 - reference).abs() < 1e-3,
+            "dot_256_f32 diverged: {got} vs {reference}"
+        );
+        #[cfg(target_arch = "aarch64")]
+        {
+            let neon = unsafe { dot_256_f32_neon(&wf, &xs) };
+            let scalar = dot_256_f32_scalar(&wf, &xs);
+            assert!(
+                (neon - scalar).abs() < 1e-4,
+                "neon {neon} != scalar {scalar}"
+            );
+        }
+    }
+
+    /// Multi-chunk (rows > CHUNK_ROWS = 32, spans multiple parallel work
+    /// units) and seq = 1 — the two q4k_matmul paths the earlier tests missed.
+    #[test]
+    fn q4k_matmul_multi_chunk_and_seq1() {
+        for (rows, seq) in [(40usize, 3usize), (4, 1)] {
+            let hidden = 512;
+            let n_elem = rows * hidden;
+            let weights: Vec<f32> = (0..n_elem)
+                .map(|i| (i as f32 * 0.0005).sin() * 0.6)
+                .collect();
+            let q4k = quantize_q4_k(&weights);
+            let dequant = dequantize_q4_k(&q4k, n_elem);
+            let x: Vec<f32> = (0..seq * hidden)
+                .map(|i| (i as f32 * 0.011).cos() * 0.4)
+                .collect();
+            let mut reference = vec![0.0f32; seq * rows];
+            for s in 0..seq {
+                for r in 0..rows {
+                    let mut acc = 0.0f32;
+                    for k in 0..hidden {
+                        acc += dequant[r * hidden + k] * x[s * hidden + k];
+                    }
+                    reference[s * rows + r] = acc;
+                }
+            }
+            let mut got = vec![0.0f32; seq * rows];
+            q4k_matmul_into(&mut got, &x, &q4k, rows, hidden, seq);
+            let max: f32 = reference
+                .iter()
+                .zip(&got)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0, f32::max);
+            assert!(max < 5e-3, "rows={rows} seq={seq} diverged: {max}");
+        }
+    }
+
+    /// Direct `q6k_matmul_into` kernel parity vs dequantise → matmul.
+    #[test]
+    fn q6k_matmul_matches_dequant_then_matmul() {
+        let rows = 5;
+        let hidden = 512;
+        let seq = 3;
+        let n_elem = rows * hidden;
+        let weights: Vec<f32> = (0..n_elem)
+            .map(|i| (i as f32 * 0.0007).sin() * 0.5)
+            .collect();
+        let q6k = quantize_q6_k(&weights);
+        let dq = crate::kquant_forward::dequant::dequantize_matrix(&q6k, "Q6_K", rows, hidden);
+        let dq = dq.as_slice().expect("contiguous");
+        let x: Vec<f32> = (0..seq * hidden)
+            .map(|i| (i as f32 * 0.009).cos() * 0.5)
+            .collect();
+        let mut reference = vec![0.0f32; seq * rows];
+        for s in 0..seq {
+            for r in 0..rows {
+                let mut acc = 0.0f32;
+                for k in 0..hidden {
+                    acc += dq[r * hidden + k] * x[s * hidden + k];
+                }
+                reference[s * rows + r] = acc;
+            }
+        }
+        let mut got = vec![0.0f32; seq * rows];
+        q6k_matmul_into(&mut got, &x, &q6k, rows, hidden, seq);
+        let max: f32 = reference
+            .iter()
+            .zip(&got)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f32::max);
+        assert!(max < 5e-3, "q6k_matmul diverged: {max}");
     }
 
     /// Defensive: caller passes a malformed `cols` (not multiple of 256).
