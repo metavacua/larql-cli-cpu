@@ -325,7 +325,7 @@ impl KvDispatch for CpuBackend {
 
     fn attention_step(
         &self,
-        weights: &ModelWeights,
+        weights: larql_models::WeightsView,
         query: &Array2<f32>,
         kv: &mut KvHandle,
         layer: usize,
@@ -338,8 +338,7 @@ impl KvDispatch for CpuBackend {
         // copy), then attend over zero-copy views of the full cache. Falls
         // back per layer to the f32 path when the index lacks Q4K attn bytes.
         if let Some(idx) = index.filter(|_| q4k_direct_attn_enabled()) {
-            if let Some(proj) = crate::attention::decode::decode_step_project_q4k_direct(
-                weights,
+            if let Some(proj) = crate::attention::decode::decode_step_project_q4k_direct(weights.canonical(),
                 query,
                 layer,
                 abs_position,
@@ -357,8 +356,7 @@ impl KvDispatch for CpuBackend {
                     .expect("[1, kv_dim] projection row is contiguous");
                 h.append_row(k_row, v_row);
                 let (k_all, v_all) = h.views().expect("non-empty after append");
-                match crate::attention::decode::decode_step_attend_q4k_direct(
-                    weights,
+                match crate::attention::decode::decode_step_attend_q4k_direct(weights.canonical(),
                     query,
                     layer,
                     &proj.q_rope,
@@ -386,7 +384,7 @@ impl KvDispatch for CpuBackend {
         // leaves the handle intact — same semantics as the pre-refactor
         // clone, and this path is cold whenever the q4k flags are on.
         let prior_kv = cpu_handle(kv).to_shared();
-        let (h_post_attn, new_kv) = run_attention_block_decode_step_backend(larql_models::WeightsView::dense(weights),
+        let (h_post_attn, new_kv) = run_attention_block_decode_step_backend(weights,
             query,
             layer,
             prior_kv.as_ref(),
@@ -399,7 +397,7 @@ impl KvDispatch for CpuBackend {
 
     fn attention_prefill(
         &self,
-        weights: &ModelWeights,
+        weights: larql_models::WeightsView,
         tokens_embedded: &Array2<f32>,
         layer: usize,
         _window: Option<usize>,
@@ -407,7 +405,7 @@ impl KvDispatch for CpuBackend {
     ) -> Option<(Array2<f32>, KvHandle)> {
         // See `attention_step` doc for the `_index` convention.
         let (h_post_attn, k_rope, v) =
-            run_attention_with_kv_backend(larql_models::WeightsView::dense(weights), tokens_embedded, layer, Some(self))?;
+            run_attention_with_kv_backend(weights, tokens_embedded, layer, Some(self))?;
         let kv_dim = k_rope.shape()[1];
         let mut handle = CpuKvHandle::new(layer, kv_dim);
         handle.replace_state((k_rope, v));
@@ -429,7 +427,7 @@ impl KvDispatch for CpuBackend {
 
     fn forward_from_layer(
         &self,
-        weights: &ModelWeights,
+        weights: larql_models::WeightsView,
         start_layer: usize,
         residuals: &ResidualHandle,
         token_ids: &[u32],
@@ -459,16 +457,17 @@ impl KvDispatch for CpuBackend {
 
     fn coarse_prefill(
         &self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         token_ids: &[u32],
         index: Option<&dyn crate::KvIndex>,
     ) -> Option<(Array2<f32>, KvHandle)> {
-        self.coarse_prefill_with_state(weights, token_ids, index, None)
+        self.coarse_prefill_with_state(
+weights, token_ids, index, None)
     }
 
     fn coarse_prefill_with_state(
         &self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         token_ids: &[u32],
         index: Option<&dyn crate::KvIndex>,
         state: Option<&mut crate::PerLayerDecodeState>,
@@ -491,7 +490,7 @@ impl KvDispatch for CpuBackend {
 
     fn coarse_decode_step(
         &self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         token_id: u32,
         index: Option<&dyn crate::KvIndex>,
         handle: &mut KvHandle,
@@ -532,7 +531,7 @@ impl KvDispatch for CpuBackend {
     /// an engine asks for it on the indirect path).
     fn coarse_decode_step_with_state(
         &self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         token_id: u32,
         index: Option<&dyn crate::KvIndex>,
         handle: &mut KvHandle,
@@ -781,7 +780,7 @@ mod tests {
         // `cpu_residual` before `forward_from_layer` reads the shape).
         assert_eq!(ResidualHandleInner::shape(&OtherResidual), (1, 4));
         let h = ResidualHandle::new(OtherResidual);
-        let _ = b.forward_from_layer(&weights, 0, &h, &[0u32]);
+        let _ = b.forward_from_layer(larql_models::WeightsView::dense(&weights), 0, &h, &[0u32]);
     }
 
     // ── Coarse default early-return branches ─────────────────────────
@@ -954,14 +953,16 @@ mod tests {
 
         // Step 1 (empty prior KV) through the q4k-direct branch.
         let h1 = b
-            .attention_step(&weights, &query, &mut handle, 0, 0, Some(&idx))
+            .attention_step(
+larql_models::WeightsView::dense(&weights), &query, &mut handle, 0, 0, Some(&idx))
             .expect("q4k-direct attention_step returns Some on the Q4K fixture");
         assert_eq!(h1.shape(), &[1, weights.hidden_size]);
         assert_eq!(handle.cached_len(), 1, "KV grew by 1");
 
         // Step 2 (prior KV present) keeps using the q4k-direct branch.
         let h2 = b
-            .attention_step(&weights, &query, &mut handle, 0, 1, Some(&idx))
+            .attention_step(
+larql_models::WeightsView::dense(&weights), &query, &mut handle, 0, 1, Some(&idx))
             .expect("second q4k-direct attention_step succeeds");
         assert_eq!(h2.shape(), &[1, weights.hidden_size]);
         assert_eq!(handle.cached_len(), 2, "KV grew to 2");
@@ -994,7 +995,8 @@ mod tests {
         // f32-BLAS path on `weights.tensors` (the fixture carries f32 attn
         // tensors), which succeeds.
         let h = b
-            .attention_step(&weights, &query, &mut handle, 0, 0, Some(&EmptyIdx))
+            .attention_step(
+larql_models::WeightsView::dense(&weights), &query, &mut handle, 0, 0, Some(&EmptyIdx))
             .expect("f32 fallback succeeds when the index lacks Q4K attn bytes");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert_eq!(handle.cached_len(), 1);

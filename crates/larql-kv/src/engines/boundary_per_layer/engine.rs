@@ -55,6 +55,9 @@ pub struct BoundaryPerLayerEngine {
     /// dense walk (e.g. backend lacks cached_decode support).
     pub(super) kv_handle: Option<larql_inference::KvHandle>,
     pub(super) backend: Box<dyn EngineBackend>,
+    /// Engine-owned f32 dequant scratch for the per-layer walk fallback
+    /// (see `MarkovResidualEngine::dequant_scratch`). Keeps `weights` immutable.
+    pub(super) dequant_scratch: larql_inference::DequantScratch,
 }
 
 impl BoundaryPerLayerEngine {
@@ -123,6 +126,7 @@ impl BoundaryPerLayerEngine {
             store: None,
             kv_handle: None,
             backend,
+            dequant_scratch: larql_inference::DequantScratch::new(),
         })
     }
 
@@ -150,8 +154,9 @@ impl BoundaryPerLayerEngine {
             .ok_or_else(|| EngineError::InvariantViolation {
                 what: "decode_step called before prefill (store missing)".into(),
             })?;
+        let view = larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch);
         let (hidden, new_rs) = walk::run_decode(
-            weights,
+            view,
             ffn,
             self.backend.as_ref(),
             &self.policy,
@@ -200,7 +205,7 @@ impl KvEngine for BoundaryPerLayerEngine {
             return Err(EngineError::EmptyPrompt);
         }
         let (hidden, store) = walk::run_prefill(
-            weights,
+            larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch),
             ffn,
             self.backend.as_ref(),
             &self.policy,
@@ -255,7 +260,7 @@ impl KvEngine for BoundaryPerLayerEngine {
 
     fn prefill_quant(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         ffn: &dyn FfnBackend,
         index: &larql_inference::larql_vindex::VectorIndex,
         token_ids: &[u32],
@@ -278,15 +283,13 @@ impl KvEngine for BoundaryPerLayerEngine {
         }
         // Fall back to dense f32 walk (compact vindexes / CPU backend).
         self.kv_handle = None;
-        let mut scratch = larql_inference::DequantScratch::new();
-        larql_inference::vindex::dequant::ensure_attn_tensors_dequantised(&mut scratch, weights, index);
-        weights.tensors.extend(scratch);
+        larql_inference::vindex::dequant::ensure_attn_tensors_dequantised(&mut self.dequant_scratch, weights, index);
         self.prefill(weights, ffn, token_ids)
     }
 
     fn decode_step_quant(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         ffn: &dyn FfnBackend,
         index: &larql_inference::larql_vindex::VectorIndex,
         token_id: u32,
@@ -331,9 +334,7 @@ impl KvEngine for BoundaryPerLayerEngine {
                 }
             }
         }
-        let mut scratch = larql_inference::DequantScratch::new();
-        larql_inference::vindex::dequant::ensure_attn_tensors_dequantised(&mut scratch, weights, index);
-        weights.tensors.extend(scratch);
+        larql_inference::vindex::dequant::ensure_attn_tensors_dequantised(&mut self.dequant_scratch, weights, index);
         self.decode_step(weights, ffn, token_id)
     }
 
@@ -359,7 +360,7 @@ impl KvEngine for BoundaryPerLayerEngine {
             return self.prefill(weights, ffn, token_ids);
         }
         let (hidden, store) = executor::run_prefill(
-            weights,
+            larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch),
             executor,
             ffn,
             &self.policy,
@@ -391,7 +392,7 @@ impl KvEngine for BoundaryPerLayerEngine {
                 what: "decode_step_via_executor called before prefill (store missing)".into(),
             })?;
         let (hidden, new_rs) =
-            executor::run_decode(weights, executor, ffn, &self.policy, rs, token_id).ok_or_else(
+            executor::run_decode(larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch), executor, ffn, &self.policy, rs, token_id).ok_or_else(
                 || EngineError::BackendFailure {
                     details: "executor::run_decode returned None".into(),
                 },

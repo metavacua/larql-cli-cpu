@@ -30,7 +30,7 @@ impl MarkovResidualEngine {
     /// doesn't (engine falls back to per-layer walk).
     pub(super) fn try_prefill_via_dispatch(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         index: &VectorIndex,
         token_ids: &[u32],
     ) -> Option<Array2<f32>> {
@@ -133,7 +133,7 @@ impl MarkovResidualEngine {
     /// (W8.2 doubling-capacity in-place append).
     pub(super) fn decode_step_via_dispatch(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         index: &VectorIndex,
         token_id: u32,
     ) -> Option<Array2<f32>> {

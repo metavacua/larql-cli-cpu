@@ -450,7 +450,7 @@ where
 /// state to get logits.
 #[allow(clippy::too_many_arguments)]
 pub fn kv_prefill_run(
-    weights: &ModelWeights,
+    weights: larql_inference::WeightsView,
     ffn: &dyn FfnBackend,
     prompt_ids: &[u32],
     window: Option<usize>,
@@ -466,25 +466,25 @@ pub fn kv_prefill_run(
         None => KvCache::with_layers(num_layers),
     };
 
-    let mut h = embed_tokens_pub(weights, prompt_ids);
+    let mut h = embed_tokens_pub(&weights, prompt_ids);
     // Per-Layer Embedding inputs for Gemma-4 archs. Returns empty Vec
     // for non-PLE archs (`ple_inputs.get(layer)` then yields `None` and
     // `apply_per_layer_embedding` is a no-op).
-    let ple_inputs = precompute_per_layer_inputs(weights, &h, prompt_ids);
+    let ple_inputs = precompute_per_layer_inputs(&weights, &h, prompt_ids);
     for layer in 0..num_layers {
         hook.on_pre_layer(layer, &h);
 
         let (mut h_post_attn, k_rope, v) =
-            run_attention_with_kv_backend(larql_inference::WeightsView::dense(weights), &h, layer, backend)?;
+            run_attention_with_kv_backend(weights, &h, layer, backend)?;
         cache.layers[layer] = Some((k_rope, v));
         cache.clip_layer(layer);
 
         hook.on_post_attention(layer, &mut h_post_attn);
 
-        let (h_post_ffn, _) = run_ffn(weights, &h_post_attn, layer, ffn, false);
+        let (h_post_ffn, _) = run_ffn(&weights, &h_post_attn, layer, ffn, false);
         let mut h_out =
-            apply_per_layer_embedding(weights, &h_post_ffn, layer, ple_inputs.get(layer));
-        apply_layer_scalar(weights, &mut h_out, layer);
+            apply_per_layer_embedding(&weights, &h_post_ffn, layer, ple_inputs.get(layer));
+        apply_layer_scalar(&weights, &mut h_out, layer);
 
         hook.on_post_layer(layer, &mut h_out);
         h = h_out;
@@ -567,7 +567,7 @@ fn generate_cached_hooked_inner(
 
     // ── Phase 1: prefill ──
     let (last_hidden, mut cache) =
-        match kv_prefill_run(weights, ffn, prompt_ids, window, backend, hook) {
+        match kv_prefill_run(larql_inference::WeightsView::dense(weights), ffn, prompt_ids, window, backend, hook) {
             Some(t) => t,
             None => return Vec::new(),
         };
@@ -871,7 +871,7 @@ mod tests {
                 });
             }
             let (hidden, cache) =
-                kv_prefill_run(weights, ffn, token_ids, None, None, &mut NoopHook).ok_or_else(
+                kv_prefill_run(larql_inference::WeightsView::dense(weights), ffn, token_ids, None, None, &mut NoopHook).ok_or_else(
                     || larql_inference::kv_engine::EngineError::BackendFailure {
                         details: "kv_prefill_run returned None".into(),
                     },
@@ -925,7 +925,7 @@ mod tests {
                 });
             }
             let ids: Vec<u32> = (0..initial_hidden.nrows() as u32).collect();
-            let (hidden, cache) = kv_prefill_run(weights, ffn, &ids, None, None, &mut NoopHook)
+            let (hidden, cache) = kv_prefill_run(larql_inference::WeightsView::dense(weights), ffn, &ids, None, None, &mut NoopHook)
                 .ok_or_else(|| larql_inference::kv_engine::EngineError::BackendFailure {
                     details: "kv_prefill_run returned None".into(),
                 })?;
@@ -1264,7 +1264,8 @@ mod tests {
         let ffn = WeightFfn { weights: &weights };
         let prompt = [0u32, 1, 2];
         let (last_hidden, cache) =
-            kv_prefill_run(&weights, &ffn, &prompt, None, None, &mut NoopHook)
+            kv_prefill_run(
+larql_inference::WeightsView::dense(&weights), &ffn, &prompt, None, None, &mut NoopHook)
                 .expect("PLE-arch prefill should not fail");
         assert_eq!(last_hidden.shape(), &[1, weights.hidden_size]);
         assert!(
@@ -1286,7 +1287,8 @@ mod tests {
         let ffn = WeightFfn { weights: &weights };
         let prompt = [0u32, 1];
         let (_h_prefill, mut cache) =
-            kv_prefill_run(&weights, &ffn, &prompt, None, None, &mut NoopHook)
+            kv_prefill_run(
+larql_inference::WeightsView::dense(&weights), &ffn, &prompt, None, None, &mut NoopHook)
                 .expect("PLE-arch prefill should not fail");
 
         for step in 0..3 {

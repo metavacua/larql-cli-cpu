@@ -31,7 +31,7 @@ impl MarkovResidualCodecEngine {
     /// invalidate `cold_kv` because codec round-trip is lossy.
     pub(super) fn try_prefill_via_dispatch(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         index: &larql_inference::larql_vindex::VectorIndex,
         token_ids: &[u32],
     ) -> Option<Array2<f32>> {
@@ -129,7 +129,7 @@ impl MarkovResidualCodecEngine {
     /// `cold_kv` so the next step recomputes against the decoded bytes.
     pub(super) fn decode_step_via_dispatch(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         index: &larql_inference::larql_vindex::VectorIndex,
         token_id: u32,
     ) -> Option<Array2<f32>> {

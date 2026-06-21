@@ -95,6 +95,9 @@ pub struct UnlimitedContextEngine {
     /// prefill routes through `coarse_prefill_with_state`. `None` =
     /// legacy CPU walk path.
     pub(super) kv_handle: Option<larql_inference::KvHandle>,
+    /// Engine-owned f32 dequant scratch for the per-layer walk fallback
+    /// (see `MarkovResidualEngine::dequant_scratch`). Keeps `weights` immutable.
+    pub(super) dequant_scratch: larql_inference::DequantScratch,
 }
 
 impl UnlimitedContextEngine {
@@ -117,6 +120,7 @@ impl UnlimitedContextEngine {
             profiling: false,
             profile: crate::profiler::EngineProfiler::default(),
             kv_handle: None,
+            dequant_scratch: larql_inference::DequantScratch::new(),
         }
     }
 
@@ -191,7 +195,7 @@ impl UnlimitedContextEngine {
         };
 
         let out = rs_extend_from_checkpoint_backend(
-            weights,
+            larql_inference::WeightsView::dense(weights),
             tokens,
             prior,
             abs_offset,
@@ -289,8 +293,9 @@ impl UnlimitedContextEngine {
 
         let abs_start = self.abs_offset + self.current_window_tokens.len();
         let prof = self.profiling.then_some(&mut self.profile);
-        let out = rs_extend_from_checkpoint_quant(
-            weights, index, chunk, prior, abs_start, backend, prof,
+                let view = larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch);
+let out = rs_extend_from_checkpoint_quant(
+            view, index, chunk, prior, abs_start, backend, prof,
         )?;
 
         self.last_hidden = Some(out.last_hidden);
@@ -368,7 +373,7 @@ impl UnlimitedContextEngine {
 
         if use_inplace {
             let last = rs_extend_inplace(
-                weights,
+                larql_inference::WeightsView::dense(weights),
                 chunk,
                 &mut prior,
                 prior_len,
@@ -382,7 +387,7 @@ impl UnlimitedContextEngine {
             self.current_window_kv = Some(prior);
         } else {
             let out = rs_extend_from_checkpoint_backend(
-                weights,
+                larql_inference::WeightsView::dense(weights),
                 chunk,
                 prior,
                 abs_start,
@@ -587,7 +592,7 @@ impl KvEngine for UnlimitedContextEngine {
     /// from captured per-layer state (W1-GPU) or computed via walk.
     fn prefill_quant(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         _ffn: &dyn FfnBackend,
         index: &VectorIndex,
         token_ids: &[u32],
@@ -600,9 +605,7 @@ impl KvEngine for UnlimitedContextEngine {
             return Ok(hidden);
         }
         self.kv_handle = None;
-        let mut scratch = larql_inference::DequantScratch::new();
-        ensure_attn_tensors_dequantised(&mut scratch, weights, index);
-        weights.tensors.extend(scratch);
+        ensure_attn_tensors_dequantised(&mut self.dequant_scratch, weights, index);
         self.process_quant(weights, index, token_ids, backend)
             .ok_or_else(|| EngineError::BackendFailure {
                 details: "process_quant returned None during prefill_quant".into(),
@@ -616,7 +619,7 @@ impl KvEngine for UnlimitedContextEngine {
 
     fn decode_step_quant(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         _ffn: &dyn FfnBackend,
         index: &VectorIndex,
         token_id: u32,
@@ -629,9 +632,7 @@ impl KvEngine for UnlimitedContextEngine {
                     details: "decode_step_via_dispatch returned None".into(),
                 });
         }
-        let mut scratch = larql_inference::DequantScratch::new();
-        ensure_attn_tensors_dequantised(&mut scratch, weights, index);
-        weights.tensors.extend(scratch);
+        ensure_attn_tensors_dequantised(&mut self.dequant_scratch, weights, index);
         self.process_quant(weights, index, &[token_id], backend)
             .ok_or_else(|| EngineError::BackendFailure {
                 details: "process_quant returned None during decode_step_quant".into(),
@@ -656,7 +657,7 @@ impl KvEngine for UnlimitedContextEngine {
     // owns per-layer compute; window state is engine state.
     fn prefill_quant_via_executor(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         executor: &dyn larql_inference::layer_executor::LayerExecutor,
         ffn: &dyn FfnBackend,
         index: &VectorIndex,
@@ -672,9 +673,7 @@ impl KvEngine for UnlimitedContextEngine {
         if matches!(executor.dispatch_kind(), ExecutorDispatchKind::Fused) {
             return self.prefill_quant(weights, ffn, index, token_ids, executor.backend());
         }
-        let mut scratch = larql_inference::DequantScratch::new();
-        ensure_attn_tensors_dequantised(&mut scratch, weights, index);
-        weights.tensors.extend(scratch);
+        ensure_attn_tensors_dequantised(&mut self.dequant_scratch, weights, index);
         self.process_via_executor(weights, executor, ffn, token_ids)
             .ok_or_else(|| EngineError::BackendFailure {
                 details: "process_via_executor returned None during prefill_quant_via_executor"
@@ -689,7 +688,7 @@ impl KvEngine for UnlimitedContextEngine {
 
     fn decode_step_quant_via_executor(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         executor: &dyn larql_inference::layer_executor::LayerExecutor,
         ffn: &dyn FfnBackend,
         index: &VectorIndex,
@@ -699,9 +698,7 @@ impl KvEngine for UnlimitedContextEngine {
         if matches!(executor.dispatch_kind(), ExecutorDispatchKind::Fused) {
             return self.decode_step_quant(weights, ffn, index, token_id, executor.backend());
         }
-        let mut scratch = larql_inference::DequantScratch::new();
-        ensure_attn_tensors_dequantised(&mut scratch, weights, index);
-        weights.tensors.extend(scratch);
+        ensure_attn_tensors_dequantised(&mut self.dequant_scratch, weights, index);
         self.process_via_executor(weights, executor, ffn, &[token_id])
             .ok_or_else(|| EngineError::BackendFailure {
                 details: "process_via_executor returned None during decode_step_quant_via_executor"
@@ -780,7 +777,7 @@ impl UnlimitedContextEngine {
 
             for (layer, kv_slot) in kv_cache.iter_mut().enumerate() {
                 let (h_out, new_kv) =
-                    executor.run_decode_layer(weights, layer, &h, kv_slot, abs_position, ffn)?;
+                    executor.run_decode_layer(larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch), layer, &h, kv_slot, abs_position, ffn)?;
                 h = h_out;
                 *kv_slot = new_kv;
             }

@@ -25,7 +25,7 @@ impl TurboQuantEngine {
     /// entries (one per model layer) for the engine's contract.
     pub(super) fn try_prefill_via_dispatch(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         index: &VectorIndex,
         token_ids: &[u32],
     ) -> Option<Array2<f32>> {
@@ -67,7 +67,7 @@ impl TurboQuantEngine {
     /// buffer (append-only — 2026-05-19 perf fix).
     pub(super) fn decode_step_via_dispatch(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         index: &VectorIndex,
         token_id: u32,
     ) -> Option<Array2<f32>> {

@@ -35,9 +35,10 @@ fn prefill_via_dispatch_matches_legacy_kv_prefill_run() {
     let prompt = vec![0u32, 1, 2, 3];
 
     let (h_trait, _handles) =
-        kv_prefill_via_dispatch(&backend, &weights, &ffn, &prompt, None, None).expect("prefill");
+        kv_prefill_via_dispatch(&backend, larql_inference::WeightsView::dense(&weights), &ffn, &prompt, None, None).expect("prefill");
     let (h_legacy, _cache) =
-        kv_prefill_run(&weights, &ffn, &prompt, None, Some(&backend), &mut NoopHook)
+        kv_prefill_run(
+larql_inference::WeightsView::dense(&weights), &ffn, &prompt, None, Some(&backend), &mut NoopHook)
             .expect("legacy prefill");
 
     assert_eq!(
@@ -55,9 +56,9 @@ fn prefill_via_dispatch_windowed_matches_legacy() {
     let window = Some(2);
 
     let (h_trait, _handles) =
-        kv_prefill_via_dispatch(&backend, &weights, &ffn, &prompt, window, None).expect("prefill");
+        kv_prefill_via_dispatch(&backend, larql_inference::WeightsView::dense(&weights), &ffn, &prompt, window, None).expect("prefill");
     let (h_legacy, _cache) = kv_prefill_run(
-        &weights,
+larql_inference::WeightsView::dense(&weights),
         &ffn,
         &prompt,
         window,
@@ -80,16 +81,17 @@ fn decode_step_via_dispatch_matches_legacy_kv_decode_step_run() {
     let prompt = vec![0u32, 1, 2];
 
     let (_, mut handles) =
-        kv_prefill_via_dispatch(&backend, &weights, &ffn, &prompt, None, None).unwrap();
+        kv_prefill_via_dispatch(&backend, larql_inference::WeightsView::dense(&weights), &ffn, &prompt, None, None).unwrap();
     let (_, mut cache) =
-        kv_prefill_run(&weights, &ffn, &prompt, None, Some(&backend), &mut NoopHook).unwrap();
+        kv_prefill_run(
+larql_inference::WeightsView::dense(&weights), &ffn, &prompt, None, Some(&backend), &mut NoopHook).unwrap();
 
     let next_token = 3u32;
     let abs_position = prompt.len();
 
     let h_trait = kv_decode_step_via_dispatch(
         &backend,
-        &weights,
+        larql_inference::WeightsView::dense(&weights),
         &ffn,
         &mut handles,
         next_token,
@@ -123,16 +125,17 @@ fn multi_step_decode_via_dispatch_matches_legacy() {
     let prompt = vec![0u32, 1];
 
     let (_, mut handles) =
-        kv_prefill_via_dispatch(&backend, &weights, &ffn, &prompt, None, None).unwrap();
+        kv_prefill_via_dispatch(&backend, larql_inference::WeightsView::dense(&weights), &ffn, &prompt, None, None).unwrap();
     let (_, mut cache) =
-        kv_prefill_run(&weights, &ffn, &prompt, None, Some(&backend), &mut NoopHook).unwrap();
+        kv_prefill_run(
+larql_inference::WeightsView::dense(&weights), &ffn, &prompt, None, Some(&backend), &mut NoopHook).unwrap();
 
     for step in 0..3 {
         let token = (2 + step) as u32;
         let abs_position = prompt.len() + step;
         let h_trait = kv_decode_step_via_dispatch(
             &backend,
-            &weights,
+            larql_inference::WeightsView::dense(&weights),
             &ffn,
             &mut handles,
             token,

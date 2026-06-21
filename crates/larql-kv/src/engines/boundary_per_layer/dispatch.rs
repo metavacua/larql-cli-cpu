@@ -36,7 +36,7 @@ use crate::engines::w10_enabled as w10_env_on;
 /// backend / vindex lacks the required support (caller falls back to
 /// `walk::run_prefill`).
 pub(super) fn try_prefill_via_dispatch(
-    weights: &mut ModelWeights,
+    weights: &ModelWeights,
     backend: &dyn EngineBackend,
     policy: &BoundaryLayerPolicy,
     window_size: Option<usize>,
@@ -103,7 +103,7 @@ pub(super) fn try_prefill_via_dispatch(
             for (layer, overflow) in overflow_per_layer.iter().enumerate() {
                 let codec = policy.codec_for(layer);
                 let decoded_overflow = roundtrip(overflow, codec);
-                let (k, v) = recompute_kv(weights, &decoded_overflow, layer, 0, backend, None)
+                let (k, v) = recompute_kv(larql_inference::WeightsView::dense(weights), &decoded_overflow, layer, 0, backend, None)
                     .expect("cold K/V pre-computation failed");
                 cold_kv.push((k, v));
                 let mut enc = PerLayerEncodedColdLayer::empty(codec, weights.hidden_size);
@@ -123,7 +123,7 @@ pub(super) fn try_prefill_via_dispatch(
 /// updated store. `None` signals a state-dump failure — caller should
 /// clear its `kv_handle` and fall back to the dense walk.
 pub(super) fn decode_step_via_dispatch(
-    weights: &mut ModelWeights,
+    weights: &ModelWeights,
     backend: &dyn EngineBackend,
     policy: &BoundaryLayerPolicy,
     handle: &mut KvHandle,
@@ -211,7 +211,7 @@ pub(super) fn decode_step_via_dispatch(
             }
         }
         extend_cold_kv_with_overflow(
-            weights,
+            larql_inference::WeightsView::dense(weights),
             backend,
             policy,
             &mut rs,

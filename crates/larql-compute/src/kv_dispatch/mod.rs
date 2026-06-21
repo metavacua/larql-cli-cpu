@@ -264,7 +264,7 @@ pub trait KvDispatch {
     /// See `docs/specs/kv-dispatch-quantization.md`.
     fn attention_step(
         &self,
-        weights: &ModelWeights,
+        weights: larql_models::WeightsView,
         query: &Array2<f32>,
         kv: &mut KvHandle,
         layer: usize,
@@ -288,7 +288,7 @@ pub trait KvDispatch {
     #[allow(clippy::too_many_arguments)]
     fn attention_step_windowed(
         &self,
-        weights: &ModelWeights,
+        weights: larql_models::WeightsView,
         query: &Array2<f32>,
         kv: &mut KvHandle,
         layer: usize,
@@ -296,7 +296,8 @@ pub trait KvDispatch {
         window: usize,
         index: Option<&dyn crate::KvIndex>,
     ) -> Option<Array2<f32>> {
-        let h = self.attention_step(weights, query, kv, layer, abs_position, index)?;
+        let h = self.attention_step(
+weights, query, kv, layer, abs_position, index)?;
         self.clip_kv(kv, window);
         Some(h)
     }
@@ -313,7 +314,7 @@ pub trait KvDispatch {
     /// `index` follows the same convention as [`Self::attention_step`].
     fn attention_prefill(
         &self,
-        weights: &ModelWeights,
+        weights: larql_models::WeightsView,
         tokens_embedded: &Array2<f32>,
         layer: usize,
         window: Option<usize>,
@@ -332,7 +333,7 @@ pub trait KvDispatch {
     /// [`crate::MatMul`] directly.
     fn recompute_kv_from_residuals(
         &self,
-        weights: &ModelWeights,
+        weights: larql_models::WeightsView,
         residuals: &Array2<f32>,
         layer: usize,
     ) -> Option<KvHandle> {
@@ -368,7 +369,7 @@ pub trait KvDispatch {
     /// pre-crystal layers when boundaries are available.
     fn forward_from_layer(
         &self,
-        weights: &ModelWeights,
+        weights: larql_models::WeightsView,
         start_layer: usize,
         residuals: &ResidualHandle,
         token_ids: &[u32],
@@ -410,7 +411,7 @@ pub trait KvDispatch {
     /// shared state.
     fn coarse_prefill(
         &self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         token_ids: &[u32],
         index: Option<&dyn crate::KvIndex>,
     ) -> Option<(Array2<f32>, KvHandle)> {
@@ -422,7 +423,7 @@ pub trait KvDispatch {
     /// by a prior [`Self::coarse_prefill`] on the same backend.
     fn coarse_decode_step(
         &self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         token_id: u32,
         index: Option<&dyn crate::KvIndex>,
         handle: &mut KvHandle,
@@ -450,13 +451,14 @@ pub trait KvDispatch {
     /// CPU walk.
     fn coarse_prefill_with_state(
         &self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         token_ids: &[u32],
         index: Option<&dyn crate::KvIndex>,
         state: Option<&mut PerLayerDecodeState>,
     ) -> Option<(Array2<f32>, KvHandle)> {
         let _ = state;
-        self.coarse_prefill(weights, token_ids, index)
+        self.coarse_prefill(
+weights, token_ids, index)
     }
 
     /// One coarse decode step **with per-layer state capture** — the
@@ -482,7 +484,7 @@ pub trait KvDispatch {
     /// engine.
     fn coarse_decode_step_with_state(
         &self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         token_id: u32,
         index: Option<&dyn crate::KvIndex>,
         handle: &mut KvHandle,
@@ -490,7 +492,8 @@ pub trait KvDispatch {
         state: Option<&mut PerLayerDecodeState>,
     ) -> Option<Array2<f32>> {
         let _ = state;
-        self.coarse_decode_step(weights, token_id, index, handle, abs_position)
+        self.coarse_decode_step(
+weights, token_id, index, handle, abs_position)
     }
 
     /// Mask-aware variant of [`Self::coarse_decode_step_with_state`].
@@ -506,7 +509,7 @@ pub trait KvDispatch {
     #[allow(clippy::too_many_arguments)]
     fn coarse_decode_step_with_state_masked(
         &self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         token_id: u32,
         index: Option<&dyn crate::KvIndex>,
         handle: &mut KvHandle,
@@ -747,7 +750,8 @@ mod tests {
         let mut handle = stub_kv_handle(0, weights.hidden_size);
         let query = Array2::zeros((1, weights.hidden_size));
         assert!(backend
-            .attention_step(&weights, &query, &mut handle, 0, 0, None)
+            .attention_step(
+larql_models::WeightsView::dense(&weights), &query, &mut handle, 0, 0, None)
             .is_none());
     }
 
@@ -761,7 +765,8 @@ mod tests {
         let mut handle = stub_kv_handle(0, weights.hidden_size);
         let query = Array2::zeros((1, weights.hidden_size));
         assert!(backend
-            .attention_step_windowed(&weights, &query, &mut handle, 0, 0, 4, None)
+            .attention_step_windowed(
+larql_models::WeightsView::dense(&weights), &query, &mut handle, 0, 0, 4, None)
             .is_none());
     }
 
@@ -771,7 +776,8 @@ mod tests {
         let weights = larql_models::test_fixtures::make_test_weights();
         let tokens = Array2::zeros((2, weights.hidden_size));
         assert!(backend
-            .attention_prefill(&weights, &tokens, 0, None, None)
+            .attention_prefill(
+larql_models::WeightsView::dense(&weights), &tokens, 0, None, None)
             .is_none());
     }
 
@@ -781,7 +787,8 @@ mod tests {
         let weights = larql_models::test_fixtures::make_test_weights();
         let residuals = Array2::zeros((1, weights.hidden_size));
         assert!(backend
-            .recompute_kv_from_residuals(&weights, &residuals, 0)
+            .recompute_kv_from_residuals(
+larql_models::WeightsView::dense(&weights), &residuals, 0)
             .is_none());
     }
 
@@ -798,7 +805,7 @@ mod tests {
         let weights = larql_models::test_fixtures::make_test_weights();
         let residuals = stub_residual_handle(1, weights.hidden_size);
         assert!(backend
-            .forward_from_layer(&weights, 0, &residuals, &[0u32])
+            .forward_from_layer(larql_models::WeightsView::dense(&weights), 0, &residuals, &[0u32])
             .is_none());
     }
 

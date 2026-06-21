@@ -63,6 +63,12 @@ pub struct StandardEngine {
     /// its own `next_position` field; this engine tracks it directly.
     abs_position: usize,
     backend: BackendSlot,
+    /// Engine-owned f32 dequant scratch for the per-layer fallback Q4K path
+    /// (`prefill_quant`/`decode_step_quant` populate it; `do_prefill`/
+    /// `do_decode_step` resolve attention/FFN through a
+    /// `WeightsView::with_scratch` over it). Empty on the dense path. Keeps
+    /// `weights` immutable so the engine can hold `Arc<ModelWeights>`.
+    dequant_scratch: larql_inference::DequantScratch,
 }
 
 impl StandardEngine {
@@ -76,6 +82,7 @@ impl StandardEngine {
             handles: None,
             abs_position: 0,
             backend: BackendSlot::Sync(backend),
+            dequant_scratch: larql_inference::DequantScratch::new(),
         }
     }
 
@@ -92,6 +99,7 @@ impl StandardEngine {
             handles: None,
             abs_position: 0,
             backend: BackendSlot::Async(backend),
+            dequant_scratch: larql_inference::DequantScratch::new(),
         }
     }
 
@@ -118,10 +126,11 @@ impl StandardEngine {
         token_ids: &[u32],
         index: Option<&larql_inference::larql_vindex::VectorIndex>,
     ) -> Result<Array2<f32>, EngineError> {
+        let view = larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch);
         let (hidden, handles) = match &self.backend {
             BackendSlot::Sync(b) => kv_prefill_via_dispatch(
                 b.as_ref(),
-                weights,
+                view,
                 ffn,
                 token_ids,
                 self.window_size,
@@ -132,7 +141,7 @@ impl StandardEngine {
             })?,
             BackendSlot::Async(b) => kv_prefill_via_dispatch_async(
                 b.as_ref(),
-                weights,
+                view,
                 ffn,
                 token_ids,
                 self.window_size,
@@ -159,10 +168,11 @@ impl StandardEngine {
         ffn: &dyn FfnBackend,
         initial_hidden: &Array2<f32>,
     ) -> Option<Array2<f32>> {
+        let view = larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch);
         let (hidden, handles) = match &self.backend {
             BackendSlot::Sync(b) => kv_prefill_from_hidden_via_dispatch(
                 b.as_ref(),
-                weights,
+                view,
                 ffn,
                 initial_hidden,
                 self.window_size,
@@ -170,7 +180,7 @@ impl StandardEngine {
             )?,
             BackendSlot::Async(b) => kv_prefill_from_hidden_via_dispatch_async(
                 b.as_ref(),
-                weights,
+                view,
                 ffn,
                 initial_hidden,
                 self.window_size,
@@ -197,6 +207,7 @@ impl StandardEngine {
         token_id: u32,
         index: Option<&larql_inference::larql_vindex::VectorIndex>,
     ) -> Result<Array2<f32>, EngineError> {
+        let view = larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch);
         let handles = self
             .handles
             .as_mut()
@@ -206,7 +217,7 @@ impl StandardEngine {
         let hidden = match &self.backend {
             BackendSlot::Sync(b) => kv_decode_step_via_dispatch(
                 b.as_ref(),
-                weights,
+                view,
                 ffn,
                 handles,
                 token_id,
@@ -219,7 +230,7 @@ impl StandardEngine {
             })?,
             BackendSlot::Async(b) => kv_decode_step_via_dispatch_async(
                 b.as_ref(),
-                weights,
+                view,
                 ffn,
                 handles,
                 token_id,
@@ -306,7 +317,7 @@ impl KvEngine for StandardEngine {
 
     fn prefill_quant(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         ffn: &dyn FfnBackend,
         index: &larql_inference::larql_vindex::VectorIndex,
         token_ids: &[u32],
@@ -332,16 +343,20 @@ impl KvEngine for StandardEngine {
         }
         // Backend doesn't have a coarse path (e.g. f32 model, or
         // hybrid-MoE / cross-layer-KV models that don't fit the cached
-        // shape). Fall back to per-layer dispatch with dequant.
-        let mut scratch = larql_inference::DequantScratch::new();
-        larql_inference::vindex::ensure_attn_tensors_dequantised(&mut scratch, weights, index);
-        weights.tensors.extend(scratch);
+        // shape). Fall back to per-layer dispatch, dequantising attention
+        // into the engine-owned scratch (`do_prefill` resolves it through a
+        // `WeightsView::with_scratch`) — `weights` stays immutable.
+        larql_inference::vindex::ensure_attn_tensors_dequantised(
+            &mut self.dequant_scratch,
+            weights,
+            index,
+        );
         self.do_prefill(weights, ffn, token_ids, Some(index))
     }
 
     fn decode_step_quant(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         ffn: &dyn FfnBackend,
         index: &larql_inference::larql_vindex::VectorIndex,
         token_id: u32,
@@ -379,10 +394,14 @@ impl KvEngine for StandardEngine {
                 return Ok(h);
             }
         }
-        // Per-layer dispatch fallback.
-        let mut scratch = larql_inference::DequantScratch::new();
-        larql_inference::vindex::ensure_attn_tensors_dequantised(&mut scratch, weights, index);
-        weights.tensors.extend(scratch);
+        // Per-layer dispatch fallback. Dequantise attention into the
+        // engine-owned scratch (idempotent — persists across decode steps);
+        // `do_decode_step` resolves it through a `WeightsView::with_scratch`.
+        larql_inference::vindex::ensure_attn_tensors_dequantised(
+            &mut self.dequant_scratch,
+            weights,
+            index,
+        );
         self.do_decode_step(weights, ffn, token_id, Some(index))
     }
 

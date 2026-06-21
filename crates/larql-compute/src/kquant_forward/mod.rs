@@ -165,18 +165,19 @@ mod tests {
 
     #[test]
     fn tensors_insert_q4k_layer_populates_dense_f32_keys() {
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
+        let mut scratch = larql_models::DequantScratch::new();
         let idx = make_q4k_fixture_index(&weights);
-        let keys = insert_q4k_layer_tensors(&mut weights, &idx, 0)
+        let keys = insert_q4k_layer_tensors(&mut scratch, &weights, &idx, 0)
             .expect("insert_q4k_layer_tensors must succeed on Q4K fixture");
         // Q/K/V/O + gate/up/down = 7 keys per layer.
         assert_eq!(keys.len(), 7);
         for key in &keys {
-            assert!(weights.tensors.contains_key(key));
+            assert!(scratch.contains_key(key));
         }
-        remove_layer_tensors(&mut weights, keys.clone());
+        remove_layer_tensors(&mut scratch, keys.clone());
         for key in &keys {
-            assert!(!weights.tensors.contains_key(key));
+            assert!(!scratch.contains_key(key));
         }
     }
 
@@ -186,8 +187,9 @@ mod tests {
         // `ok_or_else` branch in `insert_q4k_layer_tensors` fires.
         struct EmptyIdx;
         impl crate::KvIndex for EmptyIdx {}
-        let mut weights = make_test_q4k_weights();
-        let result = insert_q4k_layer_tensors(&mut weights, &EmptyIdx, 0);
+        let weights = make_test_q4k_weights();
+        let mut scratch = larql_models::DequantScratch::new();
+        let result = insert_q4k_layer_tensors(&mut scratch, &weights, &EmptyIdx, 0);
         let err = result.expect_err("missing attn data must fail");
         assert!(err.contains("attn"));
     }
@@ -220,8 +222,9 @@ mod tests {
             dyn_idx.attn_kquant_layer_data(0).unwrap()[0].0.to_vec()
         };
         let idx = AttnOnlyIdx { attn_bytes };
-        let mut weights = make_test_q4k_weights();
-        let result = insert_q4k_layer_tensors(&mut weights, &idx, 0);
+        let weights = make_test_q4k_weights();
+        let mut scratch = larql_models::DequantScratch::new();
+        let result = insert_q4k_layer_tensors(&mut scratch, &weights, &idx, 0);
         let err = result.expect_err("missing ffn data must fail");
         assert!(err.contains("ffn"));
     }
@@ -402,6 +405,7 @@ mod tests {
     #[test]
     fn predict_kquant_prefill_runs_end_to_end_on_cpu() {
         let mut weights = make_test_q4k_weights();
+        let _scratch = larql_models::DequantScratch::new();
         let idx = make_q4k_fixture_index(&weights);
         let (h, cache, _timings) = predict_kquant_prefill(&mut weights, &[0u32, 1, 2], &idx);
         assert_eq!(h.shape(), &[3, weights.hidden_size]);
@@ -415,6 +419,7 @@ mod tests {
     #[test]
     fn predict_kquant_prefill_with_state_captures_per_layer_residuals() {
         let mut weights = make_test_q4k_weights();
+        let _scratch = larql_models::DequantScratch::new();
         let idx = make_q4k_fixture_index(&weights);
         let mut state = crate::PerLayerDecodeState::with_capacity(weights.num_layers);
         let (h, _cache, _timings) =
@@ -427,6 +432,7 @@ mod tests {
     #[test]
     fn predict_kquant_decode_step_uses_prefill_cache() {
         let mut weights = make_test_q4k_weights();
+        let _scratch = larql_models::DequantScratch::new();
         let idx = make_q4k_fixture_index(&weights);
         // First do prefill to populate the cache.
         let (_h, mut cache, _) = predict_kquant_prefill(&mut weights, &[0u32, 1, 2], &idx);
@@ -439,6 +445,7 @@ mod tests {
     #[test]
     fn predict_kquant_decode_step_rejects_mismatched_cache() {
         let mut weights = make_test_q4k_weights();
+        let _scratch = larql_models::DequantScratch::new();
         let idx = make_q4k_fixture_index(&weights);
         // Wrong-sized cache → early return None.
         let mut wrong = vec![None; weights.num_layers + 1];
@@ -449,6 +456,7 @@ mod tests {
     #[test]
     fn predict_kquant_decode_step_direct_runs_with_q4k_fixture() {
         let mut weights = make_test_q4k_weights();
+        let _scratch = larql_models::DequantScratch::new();
         let idx = make_q4k_fixture_index(&weights);
         let (_h, mut cache, _) = predict_kquant_prefill(&mut weights, &[0u32, 1, 2], &idx);
         let backend = crate::CpuBackend;
@@ -466,6 +474,7 @@ mod tests {
     #[test]
     fn predict_kquant_decode_step_direct_with_state_captures_per_layer() {
         let mut weights = make_test_q4k_weights();
+        let _scratch = larql_models::DequantScratch::new();
         let idx = make_q4k_fixture_index(&weights);
         let (_h, mut cache, _) = predict_kquant_prefill(&mut weights, &[0u32, 1, 2], &idx);
         let backend = crate::CpuBackend;
@@ -590,13 +599,14 @@ mod tests {
     #[test]
     fn attention_decode_step_native_runs_on_q4k_fixture() {
         use ndarray::Array2;
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
+        let mut scratch = larql_models::DequantScratch::new();
         let idx = make_q4k_fixture_index(&weights);
         let backend = crate::CpuBackend;
         // Need to insert the layer 0 tensors so weights.tensors holds
         // the Q/K/V/O dense f32 matrices (the helper reads them).
         let inserted =
-            insert_q4k_layer_tensors(&mut weights, &idx, 0).expect("layer 0 q4k tensors insert");
+            insert_q4k_layer_tensors(&mut scratch, &weights, &idx, 0).expect("layer 0 q4k tensors insert");
         let h_new = Array2::<f32>::from_shape_vec(
             (1, weights.hidden_size),
             vec![0.01; weights.hidden_size],
@@ -608,7 +618,7 @@ mod tests {
         );
         let _ = result;
         // Clean up so subsequent tests don't see stale tensors.
-        remove_layer_tensors(&mut weights, inserted);
+        remove_layer_tensors(&mut scratch, inserted);
     }
 
     /// `ffn_decode_step_native` end-to-end on Q4K weights — drives
@@ -616,11 +626,12 @@ mod tests {
     #[test]
     fn ffn_decode_step_native_runs_on_q4k_fixture() {
         use ndarray::Array2;
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
+        let mut scratch = larql_models::DequantScratch::new();
         let idx = make_q4k_fixture_index(&weights);
         let backend = crate::CpuBackend;
         let inserted =
-            insert_q4k_layer_tensors(&mut weights, &idx, 0).expect("layer 0 q4k tensors insert");
+            insert_q4k_layer_tensors(&mut scratch, &weights, &idx, 0).expect("layer 0 q4k tensors insert");
         let h_post_attn = Array2::<f32>::from_shape_vec(
             (1, weights.hidden_size),
             vec![0.01; weights.hidden_size],
@@ -628,7 +639,7 @@ mod tests {
         .unwrap();
         let result = ffn_decode_step_native(&weights, &idx, &backend, &h_post_attn, 0);
         let _ = result;
-        remove_layer_tensors(&mut weights, inserted);
+        remove_layer_tensors(&mut scratch, inserted);
     }
 
     /// `fused_prefill` short-circuits on `!supports_quant(Q4_K)`
@@ -754,6 +765,7 @@ mod tests {
         // supports dense FFN" when the guard fires. Skip if the fixture
         // is dense — we cover the happy-path branch in the next test.
         let mut weights = make_test_q4k_weights();
+        let _scratch = larql_models::DequantScratch::new();
         assert!(!weights.arch.is_hybrid_moe());
         let idx = make_q4k_fixture_index(&weights);
         let mut hook = crate::forward::NoopHook;

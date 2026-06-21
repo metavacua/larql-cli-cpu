@@ -9,7 +9,6 @@ use larql_compute::ComputeBackend;
 use larql_inference::attention::{run_attention_with_kv_backend, SharedKV};
 use larql_inference::ffn::BackendFfn;
 use larql_inference::forward::embed_tokens_pub;
-use larql_inference::model::ModelWeights;
 use ndarray::{s, Array2};
 
 use crate::engines::markov_residual::recompute_kv;
@@ -24,7 +23,7 @@ pub struct RsPrefillResultCodec {
 
 #[allow(clippy::too_many_arguments)]
 pub fn rs_prefill_codec(
-    weights: &ModelWeights,
+    weights: larql_inference::WeightsView,
     token_ids: &[u32],
     max_window: Option<usize>,
     codec: ColdResidualCodec,
@@ -33,16 +32,16 @@ pub fn rs_prefill_codec(
 ) -> RsPrefillResultCodec {
     let num_layers = weights.num_layers;
     let seq_len = token_ids.len();
-    let mut h = embed_tokens_pub(weights, token_ids);
+    let mut h = embed_tokens_pub(&weights, token_ids);
     let mut stored: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
     let be = Some(backend);
 
     for layer in 0..num_layers {
         stored.push(h.clone());
-        let (h_post_attn, _k, _v) = run_attention_with_kv_backend(larql_inference::WeightsView::dense(weights), &h, layer, be)
+        let (h_post_attn, _k, _v) = run_attention_with_kv_backend(weights, &h, layer, be)
             .expect("attention failed during MarkovResidualCodec prefill");
-        let bffn = BackendFfn { weights, backend };
-        let h_out = crate::engines::layer_ffn_or_moe(weights, &h_post_attn, layer, &bffn, moe_ffn);
+        let bffn = BackendFfn { weights: weights.canonical(), backend };
+        let h_out = crate::engines::layer_ffn_or_moe(weights.canonical(), &h_post_attn, layer, &bffn, moe_ffn);
         h = h_out;
     }
 
@@ -93,7 +92,7 @@ pub fn rs_prefill_codec(
 }
 
 pub fn rs_decode_step_codec(
-    weights: &ModelWeights,
+    weights: larql_inference::WeightsView,
     new_token_id: u32,
     rs: RsStoreCodec,
     backend: &dyn ComputeBackend,
@@ -102,7 +101,7 @@ pub fn rs_decode_step_codec(
 ) -> Option<(Array2<f32>, RsStoreCodec)> {
     let num_layers = weights.num_layers;
     let abs_position = rs.next_position;
-    let mut h_new = embed_tokens_pub(weights, &[new_token_id]);
+    let mut h_new = embed_tokens_pub(&weights, &[new_token_id]);
     let mut new_stored: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
 
     // W2 hot-K/V cache on the resident walk (2026-06-13), twin of
@@ -261,8 +260,8 @@ pub fn rs_decode_step_codec(
             h_post_attn
         };
 
-        let bffn = BackendFfn { weights, backend };
-        let h_out = crate::engines::layer_ffn_or_moe(weights, &h_post_attn, layer, &bffn, moe_ffn);
+        let bffn = BackendFfn { weights: weights.canonical(), backend };
+        let h_out = crate::engines::layer_ffn_or_moe(weights.canonical(), &h_post_attn, layer, &bffn, moe_ffn);
         h_new = h_out;
     }
 
@@ -371,7 +370,7 @@ mod tests {
     fn prefill_returns_finite_hidden() {
         let weights = make_test_weights();
         let result = rs_prefill_codec(
-            &weights,
+larql_inference::WeightsView::dense(&weights),
             &[0u32, 1, 2],
             None,
             ColdResidualCodec::Bf16,
@@ -386,7 +385,7 @@ mod tests {
     fn prefill_no_window_does_not_create_cold_tier() {
         let weights = make_test_weights();
         let result = rs_prefill_codec(
-            &weights,
+larql_inference::WeightsView::dense(&weights),
             &[0u32, 1],
             None,
             ColdResidualCodec::Bf16,
@@ -401,7 +400,7 @@ mod tests {
     fn prefill_with_overflow_creates_encoded_cold_tier() {
         let weights = make_test_weights();
         let result = rs_prefill_codec(
-            &weights,
+larql_inference::WeightsView::dense(&weights),
             &[0u32, 1, 2, 3],
             Some(2),
             ColdResidualCodec::Bf16,
@@ -423,7 +422,7 @@ mod tests {
     fn decode_step_extends_position() {
         let weights = make_test_weights();
         let prefill = rs_prefill_codec(
-            &weights,
+larql_inference::WeightsView::dense(&weights),
             &[0u32, 1],
             None,
             ColdResidualCodec::Bf16,
@@ -432,7 +431,8 @@ mod tests {
         );
         assert_eq!(prefill.store.next_position, 2);
         let (_, rs2) =
-            rs_decode_step_codec(&weights, 2, prefill.store, &CpuBackend, None, None).unwrap();
+            rs_decode_step_codec(
+larql_inference::WeightsView::dense(&weights), 2, prefill.store, &CpuBackend, None, None).unwrap();
         assert_eq!(rs2.next_position, 3);
     }
 
@@ -440,7 +440,7 @@ mod tests {
     fn decode_with_cold_kv_path_produces_finite_output() {
         let weights = make_test_weights();
         let prefill = rs_prefill_codec(
-            &weights,
+larql_inference::WeightsView::dense(&weights),
             &[0u32, 1, 2, 3],
             Some(2),
             ColdResidualCodec::Bf16,
@@ -449,7 +449,8 @@ mod tests {
         );
         assert!(prefill.store.cold_kv.is_some());
         let (h, _) =
-            rs_decode_step_codec(&weights, 4, prefill.store, &CpuBackend, None, None).unwrap();
+            rs_decode_step_codec(
+larql_inference::WeightsView::dense(&weights), 4, prefill.store, &CpuBackend, None, None).unwrap();
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert!(h.iter().all(|v| v.is_finite()));
     }
@@ -460,7 +461,7 @@ mod tests {
         // exercised (we read from cold_encoded directly via decode).
         let weights = make_test_weights();
         let prefill = rs_prefill_codec(
-            &weights,
+larql_inference::WeightsView::dense(&weights),
             &[0u32, 1, 2, 3],
             Some(2),
             ColdResidualCodec::Bf16,
@@ -468,10 +469,12 @@ mod tests {
             None,
         );
         let (_, rs2) =
-            rs_decode_step_codec(&weights, 4, prefill.store, &CpuBackend, None, None).unwrap();
+            rs_decode_step_codec(
+larql_inference::WeightsView::dense(&weights), 4, prefill.store, &CpuBackend, None, None).unwrap();
         // Second decode: cold_kv was cleared by overflow at the first decode,
         // so this step exercises the cold_encoded recompute branch.
-        let (h, _) = rs_decode_step_codec(&weights, 5, rs2, &CpuBackend, None, None).unwrap();
+        let (h, _) = rs_decode_step_codec(
+larql_inference::WeightsView::dense(&weights), 5, rs2, &CpuBackend, None, None).unwrap();
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert!(h.iter().all(|v| v.is_finite()));
     }
@@ -519,7 +522,7 @@ mod tests {
                 Some(if inplace { "1" } else { "0" }),
             );
             let prefill = rs_prefill_codec(
-                &weights,
+larql_inference::WeightsView::dense(&weights),
                 &[0u32, 1, 2],
                 None,
                 ColdResidualCodec::Bf16,
@@ -530,7 +533,8 @@ mod tests {
             let mut hiddens = Vec::new();
             for tok in 3u32..=12 {
                 let (h, rs2) =
-                    rs_decode_step_codec(&weights, tok, rs, &CpuBackend, None, Some(&index))
+                    rs_decode_step_codec(
+larql_inference::WeightsView::dense(&weights), tok, rs, &CpuBackend, None, Some(&index))
                         .expect("decode");
                 assert!(h.iter().all(|v| v.is_finite()));
                 hiddens.push(h.iter().map(|v| v.to_bits()).collect());

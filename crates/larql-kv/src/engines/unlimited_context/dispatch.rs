@@ -28,7 +28,7 @@ impl UnlimitedContextEngine {
     /// append a single row in-place rather than re-allocating.
     pub(super) fn try_prefill_via_dispatch(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         index: &VectorIndex,
         token_ids: &[u32],
     ) -> Option<Array2<f32>> {
@@ -92,7 +92,7 @@ impl UnlimitedContextEngine {
     /// count crosses `window_size`.
     pub(super) fn decode_step_via_dispatch(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         index: &VectorIndex,
         token_id: u32,
     ) -> Option<Array2<f32>> {

@@ -41,6 +41,9 @@ pub struct MarkovResidualCodecEngine {
     /// W1-GPU: see `MarkovResidualEngine::kv_handle`.
     pub(super) kv_handle: Option<larql_inference::KvHandle>,
     pub(super) abs_position: usize,
+    /// Engine-owned f32 dequant scratch for the per-layer codec-walk fallback
+    /// (see `MarkovResidualEngine::dequant_scratch`). Keeps `weights` immutable.
+    pub(super) dequant_scratch: larql_inference::DequantScratch,
 }
 
 impl MarkovResidualCodecEngine {
@@ -64,6 +67,7 @@ impl MarkovResidualCodecEngine {
             profile: EngineProfiler::default(),
             kv_handle: None,
             abs_position: 0,
+            dequant_scratch: larql_inference::DequantScratch::new(),
         }
     }
 
@@ -105,7 +109,7 @@ impl MarkovResidualCodecEngine {
                 what: "decode_step called before prefill (store missing)".into(),
             })?;
         let (hidden, new_rs) = rs_decode_step_codec(
-            weights,
+            larql_inference::WeightsView::dense(weights),
             token_id,
             rs,
             self.backend.as_ref(),
@@ -153,7 +157,7 @@ impl KvEngine for MarkovResidualCodecEngine {
             return Err(EngineError::EmptyPrompt);
         }
         let result = rs_prefill_codec(
-            weights,
+            larql_inference::WeightsView::dense(weights),
             token_ids,
             self.window_size,
             self.codec,
@@ -200,7 +204,7 @@ impl KvEngine for MarkovResidualCodecEngine {
 
     fn prefill_quant(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         _ffn: &dyn FfnBackend,
         index: &larql_inference::larql_vindex::VectorIndex,
         token_ids: &[u32],
@@ -216,11 +220,10 @@ impl KvEngine for MarkovResidualCodecEngine {
         if let Some(hidden) = self.try_prefill_via_dispatch(weights, index, token_ids) {
             return Ok(hidden);
         }
-        let mut scratch = larql_inference::DequantScratch::new();
-        ensure_attn_tensors_dequantised(&mut scratch, weights, index);
-        weights.tensors.extend(scratch);
+        ensure_attn_tensors_dequantised(&mut self.dequant_scratch, weights, index);
+        let view = larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch);
         let result = rs_prefill_codec_walk(
-            weights,
+            view,
             index,
             token_ids,
             self.window_size,
@@ -236,7 +239,7 @@ impl KvEngine for MarkovResidualCodecEngine {
 
     fn decode_step_quant(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         _ffn: &dyn FfnBackend,
         index: &larql_inference::larql_vindex::VectorIndex,
         token_id: u32,
@@ -249,9 +252,8 @@ impl KvEngine for MarkovResidualCodecEngine {
                     details: "decode_step_via_dispatch returned None".into(),
                 });
         }
-        let mut scratch = larql_inference::DequantScratch::new();
-        ensure_attn_tensors_dequantised(&mut scratch, weights, index);
-        weights.tensors.extend(scratch);
+        ensure_attn_tensors_dequantised(&mut self.dequant_scratch, weights, index);
+        let view = larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch);
         let rs = self
             .store
             .take()
@@ -260,7 +262,7 @@ impl KvEngine for MarkovResidualCodecEngine {
             })?;
         let prof = self.profiling.then_some(&mut self.profile);
         let (hidden, new_rs) = rs_decode_step_codec_walk(
-            weights, index, token_id, rs, backend, prof,
+            view, index, token_id, rs, backend, prof,
         )
         .ok_or_else(|| EngineError::BackendFailure {
             details: "rs_decode_step_codec_walk returned None".into(),
@@ -286,7 +288,7 @@ impl KvEngine for MarkovResidualCodecEngine {
 
     fn prefill_quant_via_executor(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         executor: &dyn larql_inference::layer_executor::LayerExecutor,
         ffn: &dyn FfnBackend,
         index: &larql_inference::larql_vindex::VectorIndex,
@@ -310,7 +312,7 @@ impl KvEngine for MarkovResidualCodecEngine {
 
     fn decode_step_quant_via_executor(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         executor: &dyn larql_inference::layer_executor::LayerExecutor,
         ffn: &dyn FfnBackend,
         index: &larql_inference::larql_vindex::VectorIndex,

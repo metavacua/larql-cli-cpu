@@ -352,7 +352,7 @@ pub trait KvEngine: Send {
     /// cost; subsequent decode steps reuse the cached tensors).
     fn prefill_quant(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         ffn: &dyn FfnBackend,
         index: &larql_vindex::VectorIndex,
         token_ids: &[u32],
@@ -368,7 +368,7 @@ pub trait KvEngine: Send {
     /// when available, f32 fallback otherwise.
     fn decode_step_quant(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         ffn: &dyn FfnBackend,
         index: &larql_vindex::VectorIndex,
         token_id: u32,
@@ -451,7 +451,7 @@ pub trait KvEngine: Send {
     /// parameter properly.
     fn prefill_quant_via_executor(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         executor: &dyn crate::layer_executor::LayerExecutor,
         ffn: &dyn FfnBackend,
         index: &larql_vindex::VectorIndex,
@@ -464,7 +464,7 @@ pub trait KvEngine: Send {
     /// [`prefill_quant_via_executor`] for the migration contract.
     fn decode_step_quant_via_executor(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         executor: &dyn crate::layer_executor::LayerExecutor,
         ffn: &dyn FfnBackend,
         index: &larql_vindex::VectorIndex,
@@ -538,29 +538,32 @@ pub trait RetrievalEngine: Send {
     /// engine session.
     fn prefill_quant(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         index: &larql_vindex::VectorIndex,
         token_ids: &[u32],
     ) -> Result<Array2<f32>, EngineError> {
-        let mut scratch = larql_models::DequantScratch::new();
-        crate::vindex::ensure_attn_tensors_dequantised(&mut scratch, weights, index);
-        weights.tensors.extend(scratch);
-        self.prefill(weights, token_ids)
+        let _ = (weights, index, token_ids);
+        Err(EngineError::InvariantViolation {
+            what: "RetrievalEngine::prefill_quant must be overridden for Q4K vindexes — the \
+                   default cannot thread an engine-owned dequant scratch through the \
+                   `ffn`-less `prefill` (it would have to mutate `weights`)."
+                .into(),
+        })
     }
 
-    /// One decode step against a Q4K-quantised vindex. Default impl
-    /// dequantises the attention tensors and delegates to
-    /// [`decode_step`](Self::decode_step).
+    /// One decode step against a Q4K-quantised vindex. No default — engines
+    /// that serve Q4K must override (see [`prefill_quant`](Self::prefill_quant)).
     fn decode_step_quant(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         index: &larql_vindex::VectorIndex,
         token_id: u32,
     ) -> Result<Array2<f32>, EngineError> {
-        let mut scratch = larql_models::DequantScratch::new();
-        crate::vindex::ensure_attn_tensors_dequantised(&mut scratch, weights, index);
-        weights.tensors.extend(scratch);
-        self.decode_step(weights, token_id)
+        let _ = (weights, index, token_id);
+        Err(EngineError::InvariantViolation {
+            what: "RetrievalEngine::decode_step_quant must be overridden for Q4K vindexes."
+                .into(),
+        })
     }
 
     /// Bytes of persistent engine state (excludes model weights).
@@ -720,7 +723,7 @@ impl AnyEngine {
     /// it (they dequantise + run on f32 internally).
     pub fn prefill_quant(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         ffn: &dyn FfnBackend,
         index: &larql_vindex::VectorIndex,
         token_ids: &[u32],
@@ -736,7 +739,7 @@ impl AnyEngine {
     /// [`prefill_quant`].
     pub fn decode_step_quant(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         ffn: &dyn FfnBackend,
         index: &larql_vindex::VectorIndex,
         token_id: u32,
@@ -785,7 +788,7 @@ impl AnyEngine {
     /// executor loops).
     pub fn prefill_quant_via_executor(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         executor: &dyn crate::layer_executor::LayerExecutor,
         ffn: &dyn FfnBackend,
         index: &larql_vindex::VectorIndex,
@@ -801,7 +804,7 @@ impl AnyEngine {
     /// fall-back semantics as [`prefill_quant_via_executor`].
     pub fn decode_step_quant_via_executor(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         executor: &dyn crate::layer_executor::LayerExecutor,
         ffn: &dyn FfnBackend,
         index: &larql_vindex::VectorIndex,

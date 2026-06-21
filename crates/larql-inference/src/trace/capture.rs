@@ -289,7 +289,7 @@ mod tests {
         let node = t
             .node(w.num_layers as i32 - 1, tokens.len() - 1)
             .expect("final trace node");
-        let raw = forward_raw_logits(w, tokens, None);
+        let raw = forward_raw_logits(larql_models::WeightsView::dense(w), tokens, None);
 
         let traced_h =
             Array2::from_shape_vec((1, w.hidden_size), node.residual.clone()).expect("trace row");

@@ -74,6 +74,12 @@ pub struct ApolloEngine {
     /// running all 34 layers — ~8.5× faster on Gemma 3 4B (crystal_layer=30 → 4 layers).
     pub(super) boundary_residual: Option<Vec<f32>>,
     pub(super) crystal_layer: usize,
+    /// Engine-owned f32 dequant scratch for the Q4K path — `prefill_quant`/
+    /// `decode_step_quant` dequantise attn+FFN into it; `prefill`/`decode_step`
+    /// resolve `forward_raw_logits`/`forward_from_layer` through a
+    /// `WeightsView::with_scratch` over it. Empty on the dense path. Keeps
+    /// `weights` immutable (no `weights.tensors` mutation).
+    pub(super) dequant_scratch: larql_inference::DequantScratch,
 }
 
 impl ApolloEngine {
@@ -86,6 +92,7 @@ impl ApolloEngine {
             injection_delta: None,
             boundary_residual: None,
             crystal_layer: 0,
+            dequant_scratch: larql_inference::DequantScratch::new(),
         }
     }
 
@@ -287,9 +294,9 @@ impl ApolloEngine {
         let perturb = Some((self.config.injection_layer, delta.view()));
         let raw = if let Some(ref bnd) = boundary {
             // Compressed: skip layers 0..crystal, run only crystal..34 (~4 layers)
-            forward_from_layer(weights, query_ids, bnd, crystal, perturb)
+            forward_from_layer(larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch), query_ids, bnd, crystal, perturb)
         } else {
-            forward_raw_logits(weights, &context, perturb)
+            forward_raw_logits(larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch), &context, perturb)
         };
         let (top1_id, top1_logit) = raw
             .logits
@@ -394,9 +401,9 @@ impl RetrievalEngine for ApolloEngine {
 
         let raw = if let Some(ref bnd) = boundary {
             // Compressed: boundary residual acts as position-0; skip layers 0..crystal.
-            forward_from_layer(weights, token_ids, bnd, crystal, perturb)
+            forward_from_layer(larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch), token_ids, bnd, crystal, perturb)
         } else {
-            forward_raw_logits(weights, &context, perturb)
+            forward_raw_logits(larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch), &context, perturb)
         };
 
         // Cache decode state.
@@ -432,14 +439,14 @@ impl RetrievalEngine for ApolloEngine {
         let raw = if let Some(ref bnd) = self.boundary_residual {
             // Compressed: re-run only crystal_layer..num_layers over growing query.
             forward_from_layer(
-                weights,
+                larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch),
                 &self.context_tokens,
                 bnd,
                 self.crystal_layer,
                 perturb,
             )
         } else {
-            forward_raw_logits(weights, &self.context_tokens, perturb)
+            forward_raw_logits(larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch), &self.context_tokens, perturb)
         };
 
         let last = raw.h_pre_norm.shape()[0] - 1;
@@ -452,31 +459,27 @@ impl RetrievalEngine for ApolloEngine {
     /// override.
     fn prefill_quant(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         index: &larql_inference::larql_vindex::VectorIndex,
         token_ids: &[u32],
     ) -> Result<Array2<f32>, EngineError> {
-        let mut scratch = larql_inference::DequantScratch::new();
-        larql_inference::vindex::ensure_attn_tensors_dequantised(&mut scratch, weights, index);
+        larql_inference::vindex::ensure_attn_tensors_dequantised(&mut self.dequant_scratch, weights, index);
         for layer in 0..weights.num_layers {
-            let _ = larql_inference::vindex::insert_q4k_layer_tensors(&mut scratch, weights, index, layer);
+            let _ = larql_inference::vindex::insert_q4k_layer_tensors(&mut self.dequant_scratch, weights, index, layer);
         }
-        weights.tensors.extend(scratch);
         self.prefill(weights, token_ids)
     }
 
     fn decode_step_quant(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         index: &larql_inference::larql_vindex::VectorIndex,
         token_id: u32,
     ) -> Result<Array2<f32>, EngineError> {
-        let mut scratch = larql_inference::DequantScratch::new();
-        larql_inference::vindex::ensure_attn_tensors_dequantised(&mut scratch, weights, index);
+        larql_inference::vindex::ensure_attn_tensors_dequantised(&mut self.dequant_scratch, weights, index);
         for layer in 0..weights.num_layers {
-            let _ = larql_inference::vindex::insert_q4k_layer_tensors(&mut scratch, weights, index, layer);
+            let _ = larql_inference::vindex::insert_q4k_layer_tensors(&mut self.dequant_scratch, weights, index, layer);
         }
-        weights.tensors.extend(scratch);
         self.decode_step(weights, token_id)
     }
 

@@ -17,7 +17,6 @@ use crate::profiler::EngineProfiler;
 use larql_inference::attention::run_attention_with_kv_backend;
 use larql_inference::attention::SharedKV;
 use larql_inference::forward::{embed_tokens_pub, run_ffn};
-use larql_inference::model::ModelWeights;
 use larql_inference::vindex::{WalkFfn, WalkFfnConfig};
 
 /// Re-export — see [`larql_inference::vindex::dequant::ensure_attn_tensors_dequantised`].
@@ -25,7 +24,7 @@ pub use larql_inference::vindex::ensure_attn_tensors_dequantised;
 
 /// Prefill using `WalkFfn` (Q4K FFN) instead of `BackendFfn` (f32 FFN).
 pub(super) fn rs_prefill_walk(
-    weights: &ModelWeights,
+    weights: larql_inference::WeightsView,
     index: &VectorIndex,
     token_ids: &[u32],
     max_window: Option<usize>,
@@ -33,7 +32,7 @@ pub(super) fn rs_prefill_walk(
 ) -> RsPrefillResult {
     let num_layers = weights.num_layers;
     let seq_len = token_ids.len();
-    let mut h = embed_tokens_pub(weights, token_ids);
+    let mut h = embed_tokens_pub(&weights, token_ids);
     let mut stored: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
     let be = Some(backend);
 
@@ -41,7 +40,7 @@ pub(super) fn rs_prefill_walk(
     // this rebuilt the WalkFfn 34 times per prefill (once per layer);
     // now once total. WalkFfn carries no per-layer state — it's the
     // gate-index + backend pair, both stable across the loop.
-    let walk_ffn = WalkFfn::from_config(weights, index, WalkFfnConfig::dense(num_layers))
+    let walk_ffn = WalkFfn::from_config(weights.canonical(), index, WalkFfnConfig::dense(num_layers))
         .with_backend(backend);
 
     // Capture per-layer K/V from each layer's attention block. These
@@ -53,10 +52,10 @@ pub(super) fn rs_prefill_walk(
     let mut hot_kv_captured: Vec<SharedKV> = Vec::with_capacity(num_layers);
     for layer in 0..num_layers {
         stored.push(h.clone());
-        let (h_post_attn, k, v) = run_attention_with_kv_backend(larql_inference::WeightsView::dense(weights), &h, layer, be)
+        let (h_post_attn, k, v) = run_attention_with_kv_backend(weights, &h, layer, be)
             .expect("attention failed during MarkovRS Q4K prefill");
         hot_kv_captured.push((k, v));
-        let (h_out, _) = run_ffn(weights, &h_post_attn, layer, &walk_ffn, false);
+        let (h_out, _) = run_ffn(&weights, &h_post_attn, layer, &walk_ffn, false);
         h = h_out;
     }
 
@@ -133,7 +132,7 @@ pub(super) fn rs_prefill_walk(
 /// path. Sibling of [`super::compute::rs_decode_step_inner`] for the
 /// Q4K side.
 pub(super) fn rs_decode_step_walk(
-    weights: &ModelWeights,
+    weights: larql_inference::WeightsView,
     index: &VectorIndex,
     new_token_id: u32,
     rs: RsStore,
@@ -154,7 +153,7 @@ pub(super) fn rs_decode_step_walk(
     let abs_position = rs.next_position;
     let t_step = if timing { Some(Instant::now()) } else { None };
     let t_embed_start = t_step;
-    let mut h_new = embed_tokens_pub(weights, &[new_token_id]);
+    let mut h_new = embed_tokens_pub(&weights, &[new_token_id]);
     let embed_us = t_embed_start
         .map(|t| t.elapsed().as_secs_f64() * 1e6)
         .unwrap_or(0.0);
@@ -162,7 +161,7 @@ pub(super) fn rs_decode_step_walk(
 
     // Hoist WalkFfn out of the per-layer loop — see note in
     // `rs_prefill_walk`. Was 34× construction per decode step.
-    let walk_ffn = WalkFfn::from_config(weights, index, WalkFfnConfig::dense(num_layers))
+    let walk_ffn = WalkFfn::from_config(weights.canonical(), index, WalkFfnConfig::dense(num_layers))
         .with_backend(backend);
 
     // Per-stage accumulators. With W2 caching landed, both
@@ -280,7 +279,7 @@ pub(super) fn rs_decode_step_walk(
         let t_attn = if timing { Some(Instant::now()) } else { None };
         let kv_pair = (k_full, v_full);
         let native_result = larql_inference::vindex::attention_decode_step_native(
-            weights,
+            weights.canonical(),
             index,
             backend,
             &h_new,
@@ -327,14 +326,14 @@ pub(super) fn rs_decode_step_walk(
         // the backend doesn't have native quant support or the layer
         // isn't direct-matvec-eligible.
         let h_out = larql_inference::vindex::ffn_decode_step_native(
-            weights,
+            weights.canonical(),
             index,
             backend,
             &h_post_attn,
             layer,
         )
         .unwrap_or_else(|| {
-            let (h, _) = run_ffn(weights, &h_post_attn, layer, &walk_ffn, false);
+            let (h, _) = run_ffn(&weights, &h_post_attn, layer, &walk_ffn, false);
             h
         });
         if let Some(t) = t_ffn {
@@ -450,7 +449,8 @@ mod tests {
     fn prefill_walk_returns_finite_hidden_and_full_window_store() {
         let weights = make_test_weights();
         let index = make_test_vindex(&weights);
-        let result = rs_prefill_walk(&weights, &index, &[0u32, 1, 2], None, &CpuBackend);
+        let result = rs_prefill_walk(
+larql_inference::WeightsView::dense(&weights), &index, &[0u32, 1, 2], None, &CpuBackend);
         assert_eq!(result.hidden.shape(), &[1, weights.hidden_size]);
         assert!(result.hidden.iter().all(|v| v.is_finite()));
         assert!(result.store.cold_residuals.is_none());
@@ -464,7 +464,8 @@ mod tests {
     fn prefill_walk_with_overflow_populates_cold_tier_from_evicted_hot_kv() {
         let weights = make_test_weights();
         let index = make_test_vindex(&weights);
-        let result = rs_prefill_walk(&weights, &index, &[0u32, 1, 2, 3], Some(2), &CpuBackend);
+        let result = rs_prefill_walk(
+larql_inference::WeightsView::dense(&weights), &index, &[0u32, 1, 2, 3], Some(2), &CpuBackend);
         assert!(result.store.cold_residuals.is_some());
         assert!(result.store.cold_kv.is_some());
         // Window-clipped, but cold tier captured the two evicted rows.
@@ -478,10 +479,12 @@ mod tests {
     fn decode_walk_extends_position_and_returns_finite() {
         let weights = make_test_weights();
         let index = make_test_vindex(&weights);
-        let prefill = rs_prefill_walk(&weights, &index, &[0u32, 1], None, &CpuBackend);
+        let prefill = rs_prefill_walk(
+larql_inference::WeightsView::dense(&weights), &index, &[0u32, 1], None, &CpuBackend);
         assert_eq!(prefill.store.next_position, 2);
         let (h, rs2) =
-            rs_decode_step_walk(&weights, &index, 2, prefill.store, &CpuBackend, None).unwrap();
+            rs_decode_step_walk(
+larql_inference::WeightsView::dense(&weights), &index, 2, prefill.store, &CpuBackend, None).unwrap();
         assert_eq!(rs2.next_position, 3);
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert!(h.iter().all(|v| v.is_finite()));
@@ -494,10 +497,11 @@ mod tests {
         // the timing accumulators on every per-stage block.
         let weights = make_test_weights();
         let index = make_test_vindex(&weights);
-        let prefill = rs_prefill_walk(&weights, &index, &[0u32, 1, 2, 3], Some(2), &CpuBackend);
+        let prefill = rs_prefill_walk(
+larql_inference::WeightsView::dense(&weights), &index, &[0u32, 1, 2, 3], Some(2), &CpuBackend);
         let mut prof = EngineProfiler::default();
         let (h, _) = rs_decode_step_walk(
-            &weights,
+larql_inference::WeightsView::dense(&weights),
             &index,
             4,
             prefill.store,
@@ -521,12 +525,14 @@ mod tests {
         // from h_hot and concat with the cached cold K/V.
         let weights = make_test_weights();
         let index = make_test_vindex(&weights);
-        let prefill = rs_prefill_walk(&weights, &index, &[0u32, 1, 2, 3], Some(2), &CpuBackend);
+        let prefill = rs_prefill_walk(
+larql_inference::WeightsView::dense(&weights), &index, &[0u32, 1, 2, 3], Some(2), &CpuBackend);
         let mut store = prefill.store;
         store.hot_kv = None;
         let mut prof = EngineProfiler::default();
         let (h, rs2) =
-            rs_decode_step_walk(&weights, &index, 4, store, &CpuBackend, Some(&mut prof)).unwrap();
+            rs_decode_step_walk(
+larql_inference::WeightsView::dense(&weights), &index, 4, store, &CpuBackend, Some(&mut prof)).unwrap();
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         // hot_kv is repopulated on every decode step.
         assert!(rs2.hot_kv.is_some());
@@ -540,11 +546,13 @@ mod tests {
         // recomputing the K/V.
         let weights = make_test_weights();
         let index = make_test_vindex(&weights);
-        let prefill = rs_prefill_walk(&weights, &index, &[0u32, 1, 2, 3], Some(2), &CpuBackend);
+        let prefill = rs_prefill_walk(
+larql_inference::WeightsView::dense(&weights), &index, &[0u32, 1, 2, 3], Some(2), &CpuBackend);
         let mut store = prefill.store;
         store.hot_kv = None;
         store.cold_kv = None;
-        let (h, _) = rs_decode_step_walk(&weights, &index, 4, store, &CpuBackend, None).unwrap();
+        let (h, _) = rs_decode_step_walk(
+larql_inference::WeightsView::dense(&weights), &index, 4, store, &CpuBackend, None).unwrap();
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert!(h.iter().all(|v| v.is_finite()));
     }
@@ -557,10 +565,12 @@ mod tests {
         // initialised from the evicted block.
         let weights = make_test_weights();
         let index = make_test_vindex(&weights);
-        let prefill = rs_prefill_walk(&weights, &index, &[0u32, 1], Some(2), &CpuBackend);
+        let prefill = rs_prefill_walk(
+larql_inference::WeightsView::dense(&weights), &index, &[0u32, 1], Some(2), &CpuBackend);
         assert!(prefill.store.cold_residuals.is_none());
         let (_, rs2) =
-            rs_decode_step_walk(&weights, &index, 2, prefill.store, &CpuBackend, None).unwrap();
+            rs_decode_step_walk(
+larql_inference::WeightsView::dense(&weights), &index, 2, prefill.store, &CpuBackend, None).unwrap();
         assert!(rs2.cold_residuals.is_some());
         // 2026-05-19 audit fix: shape()[0] is doubling capacity. Use cold_len.
         assert_eq!(rs2.cold_len, 1);

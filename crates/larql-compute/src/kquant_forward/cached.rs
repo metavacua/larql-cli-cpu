@@ -35,7 +35,6 @@ use crate::attention::{
     rope::apply_rope_partial_at_full,
     run_attention_with_kv_backend,
 };
-use crate::ffn::WeightFfn;
 use crate::forward::embed_tokens_pub;
 use crate::forward::layer::apply_layer_scalar;
 use crate::forward::ple::{apply_per_layer_embedding, precompute_per_layer_inputs};
@@ -86,7 +85,7 @@ pub fn supports_cached_decode(weights: &ModelWeights) -> bool {
 /// Returns the `[seq_len, hidden]` hidden state and the populated
 /// cache. Caller takes the last row for lm_head.
 pub fn predict_kquant_prefill(
-    weights: &mut ModelWeights,
+    weights: &ModelWeights,
     token_ids: &[u32],
     index: &dyn crate::KvIndex,
 ) -> (Array2<f32>, CpuKvCache, CachedTimings) {
@@ -102,7 +101,7 @@ pub fn predict_kquant_prefill(
 /// from a single prefill pass without a follow-up CPU re-walk. When
 /// `state` is `None`, bit-identical to [`predict_kquant_prefill`].
 pub fn predict_kquant_prefill_with_state(
-    weights: &mut ModelWeights,
+    weights: &ModelWeights,
     token_ids: &[u32],
     index: &dyn crate::KvIndex,
     mut state: Option<&mut crate::PerLayerDecodeState>,
@@ -110,14 +109,17 @@ pub fn predict_kquant_prefill_with_state(
     let num_layers = weights.num_layers;
     let mut cache: CpuKvCache = vec![None; num_layers];
     let mut timings = CachedTimings::default();
+    // Forward-local dequant scratch — per-forward derived state; `weights`
+    // stays immutable. Readers resolve via with_scratch (scratch ∪ canonical).
+    let mut scratch = larql_models::DequantScratch::new();
 
     let mut h = embed_tokens_pub(weights, token_ids);
     let ple_inputs = precompute_per_layer_inputs(weights, &h, token_ids);
 
     for layer in 0..num_layers {
         let t0 = std::time::Instant::now();
-        let inserted =
-            insert_q4k_layer_tensors(weights, index, layer).unwrap_or_else(|err| panic!("{err}"));
+        let inserted = insert_q4k_layer_tensors(&mut scratch, weights, index, layer)
+            .unwrap_or_else(|err| panic!("{err}"));
         timings.dequant_ms += t0.elapsed().as_secs_f64() * 1000.0;
 
         // Snapshot pre-attention residual for this layer if engine wants it.
@@ -129,14 +131,18 @@ pub fn predict_kquant_prefill_with_state(
         // Attention with K/V capture. Backend stays None — we want the
         // CPU BLAS path for the dequantised f32 tensors that
         // `insert_q4k_layer_tensors` just placed in `weights.tensors`.
-        let (h_post_attn, k_rope, v_final) =
-            match run_attention_with_kv_backend(larql_models::WeightsView::dense(weights), &h, layer, None) {
-                Some(t) => t,
-                None => {
-                    remove_layer_tensors(weights, inserted);
-                    return (h, cache, timings);
-                }
-            };
+        let (h_post_attn, k_rope, v_final) = match run_attention_with_kv_backend(
+            larql_models::WeightsView::with_scratch(weights, &scratch),
+            &h,
+            layer,
+            None,
+        ) {
+            Some(t) => t,
+            None => {
+                remove_layer_tensors(&mut scratch, inserted);
+                return (h, cache, timings);
+            }
+        };
 
         if let Some(s) = state.as_deref_mut() {
             // Prefill K/V for THIS layer = full seq_len × kv_dim.
@@ -146,13 +152,15 @@ pub fn predict_kquant_prefill_with_state(
                 .push(crate::state_handle::CpuStateHandle::boxed(v_final.clone()));
         }
 
-        let ffn = WeightFfn { weights };
+        let ffn = crate::ffn::ViewFfn {
+            view: larql_models::WeightsView::with_scratch(weights, &scratch),
+        };
         let (h_post_ffn, _) = run_ffn(weights, &h_post_attn, layer, &ffn, false);
         let mut h_out =
             apply_per_layer_embedding(weights, &h_post_ffn, layer, ple_inputs.get(layer));
         apply_layer_scalar(weights, &mut h_out, layer);
 
-        remove_layer_tensors(weights, inserted);
+        remove_layer_tensors(&mut scratch, inserted);
 
         cache[layer] = Some((k_rope, v_final));
         h = h_out;
@@ -169,7 +177,7 @@ pub fn predict_kquant_prefill_with_state(
 /// `prompt_len + steps_already_decoded`. The caller maintains this
 /// counter (typical: `prompt_len + step_index` starting at 0).
 pub fn predict_kquant_decode_step(
-    weights: &mut ModelWeights,
+    weights: &ModelWeights,
     token_id: u32,
     index: &dyn crate::KvIndex,
     cache: &mut CpuKvCache,
@@ -180,6 +188,7 @@ pub fn predict_kquant_decode_step(
         return None;
     }
     let mut timings = CachedTimings::default();
+    let mut scratch = larql_models::DequantScratch::new();
 
     // 1-row embed + 1-row PLE for the new token.
     let mut h = embed_tokens_pub(weights, &[token_id]);
@@ -187,12 +196,13 @@ pub fn predict_kquant_decode_step(
 
     for layer in 0..num_layers {
         let t0 = std::time::Instant::now();
-        let inserted =
-            insert_q4k_layer_tensors(weights, index, layer).unwrap_or_else(|err| panic!("{err}"));
+        let inserted = insert_q4k_layer_tensors(&mut scratch, weights, index, layer)
+            .unwrap_or_else(|err| panic!("{err}"));
         timings.dequant_ms += t0.elapsed().as_secs_f64() * 1000.0;
 
         let kv_entry = cache[layer].as_ref();
-        let (h_post_attn, new_kv) = match run_attention_block_decode_step_backend(larql_models::WeightsView::dense(weights),
+        let (h_post_attn, new_kv) = match run_attention_block_decode_step_backend(
+            larql_models::WeightsView::with_scratch(weights, &scratch),
             &h,
             layer,
             kv_entry,
@@ -201,19 +211,21 @@ pub fn predict_kquant_decode_step(
         ) {
             Some(t) => t,
             None => {
-                remove_layer_tensors(weights, inserted);
+                remove_layer_tensors(&mut scratch, inserted);
                 return None;
             }
         };
         cache[layer] = Some(new_kv);
 
-        let ffn = WeightFfn { weights };
+        let ffn = crate::ffn::ViewFfn {
+            view: larql_models::WeightsView::with_scratch(weights, &scratch),
+        };
         let (h_post_ffn, _) = run_ffn(weights, &h_post_attn, layer, &ffn, false);
         let mut h_out =
             apply_per_layer_embedding(weights, &h_post_ffn, layer, ple_inputs.get(layer));
         apply_layer_scalar(weights, &mut h_out, layer);
 
-        remove_layer_tensors(weights, inserted);
+        remove_layer_tensors(&mut scratch, inserted);
 
         h = h_out;
     }
@@ -918,7 +930,7 @@ fn run_ffn_decode_step_q4k_direct(
 /// if any layer has a format the direct-matvec path doesn't handle
 /// (caller falls back to [`predict_kquant_decode_step`]).
 pub fn predict_kquant_decode_step_direct(
-    weights: &mut ModelWeights,
+    weights: &ModelWeights,
     token_id: u32,
     index: &dyn crate::KvIndex,
     backend: &dyn ComputeBackend,
@@ -945,7 +957,7 @@ pub fn predict_kquant_decode_step_direct(
 /// coarse_decode_step_with_state`. When `state` is `None` this is
 /// bit-identical to [`predict_kquant_decode_step_direct`].
 pub fn predict_kquant_decode_step_direct_with_state(
-    weights: &mut ModelWeights,
+    weights: &ModelWeights,
     token_id: u32,
     index: &dyn crate::KvIndex,
     backend: &dyn ComputeBackend,
