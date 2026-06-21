@@ -42,7 +42,7 @@ use crate::forward::run_ffn;
 use crate::forward::{add_bias, apply_norm};
 use crate::residual::{rms_norm_heads, rms_norm_heads_no_weight};
 
-use super::tensors::{insert_q4k_layer_tensors, remove_layer_tensors};
+use super::tensors::{insert_q4k_attn_tensors, insert_q4k_layer_tensors, remove_layer_tensors};
 
 /// Per-layer K/V captured during prefill. One entry per layer; matches
 /// the [`crate::attention::decode::KvCache`] convention so future work
@@ -117,9 +117,20 @@ pub fn predict_kquant_prefill_with_state(
     let ple_inputs = precompute_per_layer_inputs(weights, &h, token_ids);
 
     for layer in 0..num_layers {
+        // q4k-direct FFN: when the vindex exposes interleaved Q4_K FFN bytes
+        // and `hidden` is a 256-multiple, run gate/up/down straight on the
+        // Q4_K bytes via `Q4kMatmulFfn` and dequantise only Q/K/V/O. The FFN
+        // weights are ~4× the attention weights, so skipping their f32
+        // materialisation removes the bulk of prefill's per-layer dequant.
+        let use_q4k_ffn = weights.hidden_size % larql_models::quant::ggml::K_QUANT_BLOCK_ELEMS == 0
+            && index.interleaved_kquant_layer_data(layer).is_some();
         let t0 = std::time::Instant::now();
-        let inserted = insert_q4k_layer_tensors(&mut scratch, weights, index, layer)
-            .unwrap_or_else(|err| panic!("{err}"));
+        let inserted = if use_q4k_ffn {
+            insert_q4k_attn_tensors(&mut scratch, weights, index, layer)
+        } else {
+            insert_q4k_layer_tensors(&mut scratch, weights, index, layer)
+        }
+        .unwrap_or_else(|err| panic!("{err}"));
         timings.dequant_ms += t0.elapsed().as_secs_f64() * 1000.0;
 
         // Snapshot pre-attention residual for this layer if engine wants it.
@@ -152,10 +163,15 @@ pub fn predict_kquant_prefill_with_state(
                 .push(crate::state_handle::CpuStateHandle::boxed(v_final.clone()));
         }
 
-        let ffn = crate::ffn::ViewFfn {
-            view: larql_models::WeightsView::with_scratch(weights, &scratch),
+        let h_post_ffn = if use_q4k_ffn {
+            let ffn = crate::ffn::Q4kMatmulFfn { weights, index };
+            run_ffn(weights, &h_post_attn, layer, &ffn, false).0
+        } else {
+            let ffn = crate::ffn::ViewFfn {
+                view: larql_models::WeightsView::with_scratch(weights, &scratch),
+            };
+            run_ffn(weights, &h_post_attn, layer, &ffn, false).0
         };
-        let (h_post_ffn, _) = run_ffn(weights, &h_post_attn, layer, &ffn, false);
         let mut h_out =
             apply_per_layer_embedding(weights, &h_post_ffn, layer, ple_inputs.get(layer));
         apply_layer_scalar(weights, &mut h_out, layer);

@@ -10,7 +10,8 @@
 pub mod weight;
 
 pub use weight::{
-    dense_ffn_forward, dense_ffn_forward_backend, BackendFfn, NullFfn, ViewFfn, WeightFfn,
+    dense_ffn_forward, dense_ffn_forward_backend, BackendFfn, NullFfn, Q4kMatmulFfn, ViewFfn,
+    WeightFfn,
 };
 
 use ndarray::Array2;
