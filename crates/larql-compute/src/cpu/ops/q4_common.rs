@@ -697,6 +697,35 @@ fn decode_q4k_superblock_into(w: &[u8], row_base: usize, sb: usize, wf: &mut [f3
     }
 }
 
+/// Decode one Q6_K super-block (256 elements, 210 bytes) of row `row_base` into
+/// `wf` as full f32 weight values — mirrors [`larql_models::quant::ggml`]'s
+/// `dequantize_q6_k` per-block math: a 4-bit low nibble (`ql`) plus a 2-bit high
+/// part (`qh`), biased by −32, times the per-16-element int8 scale and the f16
+/// super-block scale.
+#[inline(always)]
+fn decode_q6k_superblock_into(w: &[u8], row_base: usize, sb: usize, wf: &mut [f32; 256]) {
+    const BLOCK_BYTES: usize = 210;
+    let block = &w[row_base + sb * BLOCK_BYTES..row_base + (sb + 1) * BLOCK_BYTES];
+    let ql = &block[0..128];
+    let qh = &block[128..192];
+    let scales = &block[192..208];
+    let d = f16_to_f32(u16::from_le_bytes([block[208], block[209]]));
+    for j in 0..16 {
+        let sc = d * (scales[j] as i8) as f32;
+        for i in 0..16 {
+            let idx = j * 16 + i;
+            let lo4 = if idx % 2 == 0 {
+                ql[idx / 2] & 0x0F
+            } else {
+                (ql[idx / 2] >> 4) & 0x0F
+            };
+            let hi2 = (qh[idx / 4] >> ((idx % 4) * 2)) & 0x03;
+            let val = ((lo4 as i32) | ((hi2 as i32) << 4)) - 32;
+            wf[idx] = sc * val as f32;
+        }
+    }
+}
+
 /// Amortised Q4_K × f32 matmul: `out[s, r] = sum_k W[r, k] * X[s, k]`.
 ///
 /// `w` is `[rows, hidden]` Q4_K (144-byte super-blocks), `x` is
@@ -722,16 +751,73 @@ pub fn q4k_matmul_into(
     hidden: usize,
     seq: usize,
 ) {
+    kquant_matmul_into(
+        out,
+        x,
+        w,
+        rows,
+        hidden,
+        seq,
+        144,
+        decode_q4k_superblock_into,
+    );
+}
+
+/// Amortised Q6_K × f32 matmul — the Q6_K twin of [`q4k_matmul_into`], used for
+/// the `down_proj` (Q6_K is the default down format in a q4k vindex). Same
+/// `[seq, rows]` output contract; reads the Q6_K weight once instead of
+/// dequantising the whole matrix to f32 first.
+pub fn q6k_matmul_into(
+    out: &mut [f32],
+    x: &[f32],
+    w: &[u8],
+    rows: usize,
+    hidden: usize,
+    seq: usize,
+) {
+    kquant_matmul_into(
+        out,
+        x,
+        w,
+        rows,
+        hidden,
+        seq,
+        210,
+        decode_q6k_superblock_into,
+    );
+}
+
+/// Shared amortised k-quant matmul: `out[s, r] = sum_k W[r, k] * X[s, k]`,
+/// `out` is `[seq, rows]` row-major. Each weight super-block is decoded to f32
+/// **once** via `decode` and FMA'd across all `seq` columns, so the quantised
+/// weight is read once (not `seq×`) and never fully materialised as f32. q4k
+/// and q6k differ only in `block_bytes` and the per-block `decode`.
+///
+/// Shape errors (zero dims, `hidden` not a 256-multiple, short `w`) zero the
+/// output in release and `debug_assert` in dev — callers keep the dims valid
+/// (the `use_q4k_ffn` gate, the down padding), so a violation is a caller bug,
+/// not an expected fallback.
+fn kquant_matmul_into(
+    out: &mut [f32],
+    x: &[f32],
+    w: &[u8],
+    rows: usize,
+    hidden: usize,
+    seq: usize,
+    block_bytes: usize,
+    decode: impl Fn(&[u8], usize, usize, &mut [f32; 256]) + Sync,
+) {
     debug_assert_eq!(out.len(), seq * rows);
     debug_assert_eq!(x.len(), seq * hidden);
-    const BLOCK_BYTES: usize = 144;
     const ELEMS_PER_BLOCK: usize = 256;
+    // Shape errors zero the output (defensive, mirrors `q4k_matvec_into` — see
+    // `q4k_matmul_rejects_non_multiple_of_256`); callers keep the dims valid.
     if rows == 0 || seq == 0 || hidden == 0 || !hidden.is_multiple_of(ELEMS_PER_BLOCK) {
         out.iter_mut().for_each(|v| *v = 0.0);
         return;
     }
     let n_blocks = hidden / ELEMS_PER_BLOCK;
-    let row_bytes = n_blocks * BLOCK_BYTES;
+    let row_bytes = n_blocks * block_bytes;
     if w.len() < rows * row_bytes {
         out.iter_mut().for_each(|v| *v = 0.0);
         return;
@@ -746,6 +832,7 @@ pub fn q4k_matmul_into(
     const CHUNK_ROWS: usize = 32;
     let x_ref = x;
     let w_ref = w;
+    let decode_ref = &decode;
     crate::cpu::spin_pool::par_chunks_mut(&mut tmp, CHUNK_ROWS * seq, |chunk_idx, chunk_slots| {
         let row_base_chunk = chunk_idx * CHUNK_ROWS;
         let mut wf = [0.0f32; ELEMS_PER_BLOCK];
@@ -757,7 +844,7 @@ pub fn q4k_matmul_into(
             let out_row = &mut chunk_slots[local_r * seq..local_r * seq + seq];
             let row_base = r * row_bytes;
             for sb in 0..n_blocks {
-                decode_q4k_superblock_into(w_ref, row_base, sb, &mut wf);
+                decode_ref(w_ref, row_base, sb, &mut wf);
                 let x_off = sb * ELEMS_PER_BLOCK;
                 for (s, slot) in out_row.iter_mut().enumerate() {
                     let xs = &x_ref[s * hidden + x_off..s * hidden + x_off + ELEMS_PER_BLOCK];
