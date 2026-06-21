@@ -31,19 +31,9 @@ use larql_models::ModelWeights;
 use larql_vindex::VectorIndex;
 use ndarray::Array2;
 
-use crate::attention::{
-    decode::{gqa_attention_decode_step, run_attention_block_decode_step_backend},
-    rope::apply_rope_partial_at_full,
-    run_attention_with_kv_backend,
-};
-use crate::forward::embed_tokens_pub;
-use crate::forward::layer::apply_layer_scalar;
-use crate::forward::ple::{apply_per_layer_embedding, precompute_per_layer_inputs};
-use crate::forward::run_ffn;
+use crate::attention::{decode::gqa_attention_decode_step, rope::apply_rope_partial_at_full};
 use crate::forward::{add_bias, apply_norm};
 use crate::residual::{rms_norm_heads, rms_norm_heads_no_weight};
-
-use super::tensors::{insert_q4k_layer_tensors, remove_layer_tensors};
 
 /// Per-layer K/V captured during prefill. One entry per layer; matches
 /// the [`crate::attention::decode::KvCache`] convention so future work
@@ -105,75 +95,25 @@ pub fn predict_kquant_prefill_with_state(
     weights: &ModelWeights,
     token_ids: &[u32],
     index: &VectorIndex,
-    mut state: Option<&mut crate::PerLayerDecodeState>,
+    state: Option<&mut crate::PerLayerDecodeState>,
 ) -> (Array2<f32>, CpuKvCache, CachedTimings) {
-    let num_layers = weights.num_layers;
-    let mut cache: CpuKvCache = vec![None; num_layers];
-    let mut timings = CachedTimings::default();
-    // Forward-local dequant scratch — per-forward derived state, so `weights`
-    // stays immutable. Insert/evict per layer; readers resolve via with_scratch.
-    let mut scratch = larql_models::DequantScratch::new();
-
-    let mut h = embed_tokens_pub(weights, token_ids);
-    let ple_inputs = precompute_per_layer_inputs(weights, &h, token_ids);
-
-    for layer in 0..num_layers {
-        let t0 = std::time::Instant::now();
-        let inserted = insert_q4k_layer_tensors(&mut scratch, weights, index, layer)
-            .unwrap_or_else(|err| panic!("{err}"));
-        timings.dequant_ms += t0.elapsed().as_secs_f64() * 1000.0;
-
-        // Snapshot pre-attention residual for this layer if engine wants it.
-        if let Some(s) = state.as_deref_mut() {
-            s.h_in_per_layer
-                .push(larql_compute::state_handle::CpuStateHandle::boxed(
-                    h.clone(),
-                ));
-        }
-
-        // Attention with K/V capture. Backend stays None — we want the
-        // CPU BLAS path for the dequantised f32 tensors that
-        // `insert_q4k_layer_tensors` just placed in `weights.tensors`.
-        let (h_post_attn, k_rope, v_final) = match run_attention_with_kv_backend(
-            larql_models::WeightsView::with_scratch(weights, &scratch),
-            &h,
-            layer,
-            None,
-        ) {
-            Some(t) => t,
-            None => {
-                remove_layer_tensors(&mut scratch, inserted);
-                return (h, cache, timings);
-            }
-        };
-
-        if let Some(s) = state.as_deref_mut() {
-            // Prefill K/V for THIS layer = full seq_len × kv_dim.
-            s.k_new_per_layer
-                .push(larql_compute::state_handle::CpuStateHandle::boxed(
-                    k_rope.clone(),
-                ));
-            s.v_new_per_layer
-                .push(larql_compute::state_handle::CpuStateHandle::boxed(
-                    v_final.clone(),
-                ));
-        }
-
-        let ffn = larql_compute::ffn::ViewFfn {
-            view: larql_models::WeightsView::with_scratch(weights, &scratch),
-        };
-        let (h_post_ffn, _) = run_ffn(weights, &h_post_attn, layer, &ffn, false);
-        let mut h_out =
-            apply_per_layer_embedding(weights, &h_post_ffn, layer, ple_inputs.get(layer));
-        apply_layer_scalar(weights, &mut h_out, layer);
-
-        remove_layer_tensors(&mut scratch, inserted);
-
-        cache[layer] = Some((k_rope, v_final));
-        h = h_out;
-    }
-
-    (h, cache, timings)
+    // Delegate to the substrate copy in larql-compute — the single source of
+    // truth for the Q4_K CPU forward (ADR-0022). `VectorIndex` satisfies
+    // `larql_compute::KvIndex`; the only impedance is `CachedTimings`, a
+    // same-shape struct defined in each crate.
+    let (h, cache, timings) = larql_compute::kquant_forward::predict_kquant_prefill_with_state(
+        weights,
+        token_ids,
+        index as &dyn larql_compute::KvIndex,
+        state,
+    );
+    (
+        h,
+        cache,
+        CachedTimings {
+            dequant_ms: timings.dequant_ms,
+        },
+    )
 }
 
 /// Decode step: run a single new token through every layer using the
@@ -190,54 +130,23 @@ pub fn predict_kquant_decode_step(
     cache: &mut CpuKvCache,
     abs_position: usize,
 ) -> Option<(Array2<f32>, CachedTimings)> {
-    let num_layers = weights.num_layers;
-    if cache.len() != num_layers {
-        return None;
-    }
-    let mut timings = CachedTimings::default();
-    let mut scratch = larql_models::DequantScratch::new();
-
-    // 1-row embed + 1-row PLE for the new token.
-    let mut h = embed_tokens_pub(weights, &[token_id]);
-    let ple_inputs = precompute_per_layer_inputs(weights, &h, &[token_id]);
-
-    for layer in 0..num_layers {
-        let t0 = std::time::Instant::now();
-        let inserted = insert_q4k_layer_tensors(&mut scratch, weights, index, layer)
-            .unwrap_or_else(|err| panic!("{err}"));
-        timings.dequant_ms += t0.elapsed().as_secs_f64() * 1000.0;
-
-        let kv_entry = cache[layer].as_ref();
-        let (h_post_attn, new_kv) = match run_attention_block_decode_step_backend(
-            larql_models::WeightsView::with_scratch(weights, &scratch),
-            &h,
-            layer,
-            kv_entry,
-            abs_position,
-            None,
-        ) {
-            Some(t) => t,
-            None => {
-                remove_layer_tensors(&mut scratch, inserted);
-                return None;
-            }
-        };
-        cache[layer] = Some(new_kv);
-
-        let ffn = larql_compute::ffn::ViewFfn {
-            view: larql_models::WeightsView::with_scratch(weights, &scratch),
-        };
-        let (h_post_ffn, _) = run_ffn(weights, &h_post_attn, layer, &ffn, false);
-        let mut h_out =
-            apply_per_layer_embedding(weights, &h_post_ffn, layer, ple_inputs.get(layer));
-        apply_layer_scalar(weights, &mut h_out, layer);
-
-        remove_layer_tensors(&mut scratch, inserted);
-
-        h = h_out;
-    }
-
-    Some((h, timings))
+    // Delegate to the substrate copy in larql-compute (ADR-0022); bridge the
+    // per-crate `CachedTimings`.
+    larql_compute::kquant_forward::predict_kquant_decode_step(
+        weights,
+        token_id,
+        index as &dyn larql_compute::KvIndex,
+        cache,
+        abs_position,
+    )
+    .map(|(h, timings)| {
+        (
+            h,
+            CachedTimings {
+                dequant_ms: timings.dequant_ms,
+            },
+        )
+    })
 }
 
 impl CachedTimings {
@@ -955,59 +864,18 @@ pub fn predict_kquant_decode_step_direct_with_state(
     backend: &dyn ComputeBackend,
     cache: &mut CpuKvCache,
     abs_position: usize,
-    mut state: Option<&mut crate::PerLayerDecodeState>,
+    state: Option<&mut crate::PerLayerDecodeState>,
 ) -> Option<Array2<f32>> {
-    use ndarray::s;
-    let num_layers = weights.num_layers;
-    if cache.len() != num_layers {
-        return None;
-    }
-
-    let mut h = embed_tokens_pub(weights, &[token_id]);
-    let ple_inputs = precompute_per_layer_inputs(weights, &h, &[token_id]);
-
-    for layer in 0..num_layers {
-        if let Some(s) = state.as_deref_mut() {
-            s.h_in_per_layer
-                .push(larql_compute::state_handle::CpuStateHandle::boxed(
-                    h.clone(),
-                ));
-        }
-        let kv_entry = cache[layer].as_ref();
-        let (h_post_attn, new_kv) = attention_decode_step_native(
-            weights,
-            index,
-            backend,
-            &h,
-            layer,
-            kv_entry,
-            abs_position,
-        )?;
-        if let Some(s) = state.as_deref_mut() {
-            // new_kv is the full prior+new K/V; the new row is the
-            // last row. Engines that cache per-layer K/V (markov_rs
-            // hot_kv, turbo_quant compressed) consume this row.
-            let n = new_kv.0.shape()[0];
-            s.k_new_per_layer
-                .push(larql_compute::state_handle::CpuStateHandle::boxed(
-                    new_kv.0.slice(s![n - 1..n, ..]).to_owned(),
-                ));
-            s.v_new_per_layer
-                .push(larql_compute::state_handle::CpuStateHandle::boxed(
-                    new_kv.1.slice(s![n - 1..n, ..]).to_owned(),
-                ));
-        }
-        cache[layer] = Some(new_kv);
-
-        let h_post_ffn =
-            run_ffn_decode_step_q4k_direct(weights, index, backend, &h_post_attn, layer)?;
-        let mut h_out =
-            apply_per_layer_embedding(weights, &h_post_ffn, layer, ple_inputs.get(layer));
-        apply_layer_scalar(weights, &mut h_out, layer);
-        h = h_out;
-    }
-
-    Some(h)
+    // Delegate to the substrate copy in larql-compute (ADR-0022).
+    larql_compute::kquant_forward::predict_kquant_decode_step_direct_with_state(
+        weights,
+        token_id,
+        index as &dyn larql_compute::KvIndex,
+        backend,
+        cache,
+        abs_position,
+        state,
+    )
 }
 
 #[cfg(test)]
