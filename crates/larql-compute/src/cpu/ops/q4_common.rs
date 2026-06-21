@@ -658,6 +658,135 @@ fn process_q4k_superblock(w: &[u8], x: &[f32], sum_x: &[f32], row_base: usize, s
     acc
 }
 
+/// Decode one Q4_K super-block (256 elements, 144 bytes) of row `row_base`
+/// into `wf` as full f32 weight values. Per element the dequant is
+/// `d * scale[sb] * q - dmin * min[sb]` — identical arithmetic to
+/// [`process_q4k_superblock`], but materialised per element so the decoded
+/// weights can be reused across many activation columns instead of folded
+/// into a single dot. Nibble packing mirrors the matvec: each of the 4
+/// 32-byte groups holds sub-block `2g` in the low nibble and `2g+1` in the
+/// high nibble.
+#[inline(always)]
+fn decode_q4k_superblock_into(w: &[u8], row_base: usize, sb: usize, wf: &mut [f32; 256]) {
+    const BLOCK_BYTES: usize = 144;
+    let block = &w[row_base + sb * BLOCK_BYTES..row_base + (sb + 1) * BLOCK_BYTES];
+    let d = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
+    let dmin = f16_to_f32(u16::from_le_bytes([block[2], block[3]]));
+    let p = &block[4..16];
+    let mut scales = [0u8; 8];
+    let mut mins = [0u8; 8];
+    for j in 0..4 {
+        scales[j] = p[j] & 0x3F;
+        mins[j] = p[j + 4] & 0x3F;
+        scales[j + 4] = (p[j + 8] & 0x0F) | ((p[j] >> 6) << 4);
+        mins[j + 4] = (p[j + 8] >> 4) | ((p[j + 4] >> 6) << 4);
+    }
+    let quants = &block[16..144];
+    for g in 0..4 {
+        let sb_lo = 2 * g;
+        let sb_hi = 2 * g + 1;
+        let sc_lo = d * scales[sb_lo] as f32;
+        let sc_hi = d * scales[sb_hi] as f32;
+        let mn_lo = dmin * mins[sb_lo] as f32;
+        let mn_hi = dmin * mins[sb_hi] as f32;
+        let chunk = &quants[g * 32..(g + 1) * 32];
+        for i in 0..32 {
+            wf[sb_lo * 32 + i] = sc_lo * (chunk[i] & 0x0F) as f32 - mn_lo;
+            wf[sb_hi * 32 + i] = sc_hi * (chunk[i] >> 4) as f32 - mn_hi;
+        }
+    }
+}
+
+/// Amortised Q4_K × f32 matmul: `out[s, r] = sum_k W[r, k] * X[s, k]`.
+///
+/// `w` is `[rows, hidden]` Q4_K (144-byte super-blocks), `x` is
+/// `[seq, hidden]` f32 row-major, `out` is `[seq, rows]` f32 row-major.
+///
+/// The win over the alternatives prefill could use:
+/// * vs `seq ×` [`q4k_matvec_into`]: each weight super-block is decoded to
+///   f32 **once** and reused across all `seq` columns, so the Q4_K bytes
+///   are read once instead of `seq` times (the per-position matvec loop
+///   re-reads every weight `seq` times — ~50× slower than f32 sgemm at
+///   long context).
+/// * vs dequant-whole-layer + BLAS sgemm: never materialises the full f32
+///   weight matrix (4× the bytes of Q4_K), so it skips the per-layer
+///   dequant that dominates short-prompt prefill.
+///
+/// Shape errors (zero dims, `hidden` not a multiple of 256, short `w`)
+/// zero the output rather than panic, mirroring [`q4k_matvec_into`].
+pub fn q4k_matmul_into(
+    out: &mut [f32],
+    x: &[f32],
+    w: &[u8],
+    rows: usize,
+    hidden: usize,
+    seq: usize,
+) {
+    debug_assert_eq!(out.len(), seq * rows);
+    debug_assert_eq!(x.len(), seq * hidden);
+    const BLOCK_BYTES: usize = 144;
+    const ELEMS_PER_BLOCK: usize = 256;
+    if rows == 0 || seq == 0 || hidden == 0 || !hidden.is_multiple_of(ELEMS_PER_BLOCK) {
+        out.iter_mut().for_each(|v| *v = 0.0);
+        return;
+    }
+    let n_blocks = hidden / ELEMS_PER_BLOCK;
+    let row_bytes = n_blocks * BLOCK_BYTES;
+    if w.len() < rows * row_bytes {
+        out.iter_mut().for_each(|v| *v = 0.0);
+        return;
+    }
+
+    // Accumulate into a row-major scratch `[rows, seq]` (each row's `seq`
+    // outputs contiguous) so the hot loop is row-parallel and write-local;
+    // transpose to the `[seq, rows]` contract afterwards. The transpose
+    // touches `rows * seq` f32 once — cheap next to the matmul, and it
+    // never re-reads the weights.
+    let mut tmp = vec![0.0f32; rows * seq];
+    const CHUNK_ROWS: usize = 32;
+    let x_ref = x;
+    let w_ref = w;
+    crate::cpu::spin_pool::par_chunks_mut(&mut tmp, CHUNK_ROWS * seq, |chunk_idx, chunk_slots| {
+        let row_base_chunk = chunk_idx * CHUNK_ROWS;
+        let mut wf = [0.0f32; ELEMS_PER_BLOCK];
+        for local_r in 0..CHUNK_ROWS {
+            let r = row_base_chunk + local_r;
+            if r >= rows {
+                break;
+            }
+            let out_row = &mut chunk_slots[local_r * seq..local_r * seq + seq];
+            let row_base = r * row_bytes;
+            for sb in 0..n_blocks {
+                decode_q4k_superblock_into(w_ref, row_base, sb, &mut wf);
+                let x_off = sb * ELEMS_PER_BLOCK;
+                for (s, slot) in out_row.iter_mut().enumerate() {
+                    let xs = &x_ref[s * hidden + x_off..s * hidden + x_off + ELEMS_PER_BLOCK];
+                    // 8 independent accumulators break the serial fp-add
+                    // dependency so LLVM lowers the reduction to NEON FMA
+                    // (Rust f32 add isn't associative, so a single `acc`
+                    // forces a scalar chain). wf was decoded once above and
+                    // is reused across every `seq` column here.
+                    let mut acc = [0.0f32; 8];
+                    for c in 0..ELEMS_PER_BLOCK / 8 {
+                        let wfc = &wf[c * 8..c * 8 + 8];
+                        let xsc = &xs[c * 8..c * 8 + 8];
+                        for l in 0..8 {
+                            acc[l] += wfc[l] * xsc[l];
+                        }
+                    }
+                    *slot += acc.iter().sum::<f32>();
+                }
+            }
+        }
+    });
+
+    for r in 0..rows {
+        for s in 0..seq {
+            out[s * rows + r] = tmp[r * seq + s];
+        }
+    }
+}
+
 /// Fused two-weight Q4_K matvec sharing one input vector.
 ///
 /// `out_a[N] = W_a[N, K] · x[K]`, `out_b[N] = W_b[N, K] · x[K]`.
@@ -1521,6 +1650,105 @@ mod tests {
             .map(|(a, b)| (a - b).abs())
             .fold(0.0, f32::max);
         assert!(max_diff < 5e-3, "multi-block diverged: max_diff={max_diff}");
+    }
+
+    /// Amortised matmul must match dequantise→matmul for multiple rows AND
+    /// multiple sequence positions across several super-blocks. Exercises
+    /// the row-stride, the per-seq accumulation, and the [rows,seq] →
+    /// [seq,rows] transpose.
+    #[test]
+    fn q4k_matmul_matches_dequant_then_matmul() {
+        let rows = 5;
+        let hidden = 512; // 2 super-blocks per row
+        let seq = 4;
+        let n_elem = rows * hidden;
+        let weights: Vec<f32> = (0..n_elem)
+            .map(|i| (i as f32 * 0.0007).sin() * 0.9)
+            .collect();
+        let q4k = quantize_q4_k(&weights);
+        let dequant = dequantize_q4_k(&q4k, n_elem);
+
+        let x: Vec<f32> = (0..seq * hidden)
+            .map(|i| (i as f32 * 0.013).cos() * 0.5)
+            .collect();
+
+        // Reference: dequant → row-major matmul, out[s, r].
+        let mut reference = vec![0.0f32; seq * rows];
+        for s in 0..seq {
+            for r in 0..rows {
+                let mut acc = 0.0f32;
+                for k in 0..hidden {
+                    acc += dequant[r * hidden + k] * x[s * hidden + k];
+                }
+                reference[s * rows + r] = acc;
+            }
+        }
+
+        let mut got = vec![0.0f32; seq * rows];
+        q4k_matmul_into(&mut got, &x, &q4k, rows, hidden, seq);
+
+        let max_diff: f32 = reference
+            .iter()
+            .zip(&got)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f32::max);
+        assert!(
+            max_diff < 5e-3,
+            "q4k_matmul diverged from dequant→matmul: max_diff={max_diff}"
+        );
+    }
+
+    /// Each sequence row of the matmul must equal the single-vector
+    /// `q4k_matvec` for that activation. The two kernels share decode
+    /// arithmetic, so they must agree row-for-row — catches transpose /
+    /// offset bugs that a dequant reference could mask if both paths were
+    /// wrong the same way.
+    #[test]
+    fn q4k_matmul_rows_match_q4k_matvec() {
+        let rows = 6;
+        let hidden = 256;
+        let seq = 3;
+        let weights: Vec<f32> = (0..rows * hidden)
+            .map(|i| ((i as f32 * 0.002) - 1.0) * 0.3)
+            .collect();
+        let q4k = quantize_q4_k(&weights);
+        let x: Vec<f32> = (0..seq * hidden)
+            .map(|i| (i as f32 * 0.017).sin())
+            .collect();
+
+        let mut mm = vec![0.0f32; seq * rows];
+        q4k_matmul_into(&mut mm, &x, &q4k, rows, hidden, seq);
+
+        for s in 0..seq {
+            let mut mv = vec![0.0f32; rows];
+            q4k_matvec_into(
+                &mut mv,
+                &x[s * hidden..(s + 1) * hidden],
+                &q4k,
+                rows,
+                hidden,
+            );
+            for r in 0..rows {
+                let diff = (mm[s * rows + r] - mv[r]).abs();
+                assert!(
+                    diff < 1e-4,
+                    "matmul row s={s} r={r} != matvec: {} vs {}",
+                    mm[s * rows + r],
+                    mv[r]
+                );
+            }
+        }
+    }
+
+    /// Defensive shape guard: `hidden` not a multiple of 256 → zeroed
+    /// output (mirrors `q4k_matvec_into`).
+    #[test]
+    fn q4k_matmul_rejects_non_multiple_of_256() {
+        let mut out = vec![1.0f32; 2 * 3]; // seq=2, rows=3, pre-filled to detect zeroing
+        let x = vec![0.5f32; 2 * 100];
+        let w = vec![0u8; 3 * 144];
+        q4k_matmul_into(&mut out, &x, &w, 3, 100, 2);
+        assert_eq!(out, vec![0.0f32; 6]);
     }
 
     /// Defensive: caller passes a malformed `cols` (not multiple of 256).

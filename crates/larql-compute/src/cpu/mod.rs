@@ -92,6 +92,23 @@ impl QuantMatVec for CpuBackend {
         Some(out)
     }
 
+    fn q4k_matmul(
+        &self,
+        q4k_data: &[u8],
+        x: &[f32],
+        num_rows: usize,
+        hidden: usize,
+        seq_len: usize,
+    ) -> Option<Vec<f32>> {
+        // Amortised Q4_K matmul: decode each weight super-block to f32 once
+        // and reuse it across all `seq_len` activation columns — reads the
+        // Q4_K weight a single time, vs `seq_len ×` for repeated
+        // `q4k_matvec` or 4× the bytes for the dequant→sgemm prefill path.
+        let mut out = vec![0.0f32; seq_len * num_rows];
+        ops::q4_common::q4k_matmul_into(&mut out, x, q4k_data, num_rows, hidden, seq_len);
+        Some(out)
+    }
+
     fn q6k_matvec(
         &self,
         q6k_data: &[u8],
