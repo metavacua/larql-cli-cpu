@@ -55,6 +55,9 @@ pub struct BoundaryPerLayerEngine {
     /// dense walk (e.g. backend lacks cached_decode support).
     pub(super) kv_handle: Option<larql_inference::KvHandle>,
     pub(super) backend: Box<dyn EngineBackend>,
+    /// Engine-owned f32 dequant scratch for the per-layer walk fallback
+    /// (see `MarkovResidualEngine::dequant_scratch`). Keeps `weights` immutable.
+    pub(super) dequant_scratch: larql_inference::DequantScratch,
 }
 
 impl BoundaryPerLayerEngine {
@@ -123,6 +126,7 @@ impl BoundaryPerLayerEngine {
             store: None,
             kv_handle: None,
             backend,
+            dequant_scratch: larql_inference::DequantScratch::new(),
         })
     }
 
@@ -150,8 +154,9 @@ impl BoundaryPerLayerEngine {
             .ok_or_else(|| EngineError::InvariantViolation {
                 what: "decode_step called before prefill (store missing)".into(),
             })?;
+        let view = larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch);
         let (hidden, new_rs) = walk::run_decode(
-            weights,
+            view,
             ffn,
             self.backend.as_ref(),
             &self.policy,
@@ -200,7 +205,7 @@ impl KvEngine for BoundaryPerLayerEngine {
             return Err(EngineError::EmptyPrompt);
         }
         let (hidden, store) = walk::run_prefill(
-            weights,
+            larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch),
             ffn,
             self.backend.as_ref(),
             &self.policy,
@@ -255,7 +260,7 @@ impl KvEngine for BoundaryPerLayerEngine {
 
     fn prefill_quant(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         ffn: &dyn FfnBackend,
         index: &larql_inference::larql_vindex::VectorIndex,
         token_ids: &[u32],
@@ -278,13 +283,17 @@ impl KvEngine for BoundaryPerLayerEngine {
         }
         // Fall back to dense f32 walk (compact vindexes / CPU backend).
         self.kv_handle = None;
-        larql_inference::vindex::dequant::ensure_attn_tensors_dequantised(weights, index);
+        larql_inference::vindex::dequant::ensure_attn_tensors_dequantised(
+            &mut self.dequant_scratch,
+            weights,
+            index,
+        );
         self.prefill(weights, ffn, token_ids)
     }
 
     fn decode_step_quant(
         &mut self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         ffn: &dyn FfnBackend,
         index: &larql_inference::larql_vindex::VectorIndex,
         token_id: u32,
@@ -329,7 +338,11 @@ impl KvEngine for BoundaryPerLayerEngine {
                 }
             }
         }
-        larql_inference::vindex::dequant::ensure_attn_tensors_dequantised(weights, index);
+        larql_inference::vindex::dequant::ensure_attn_tensors_dequantised(
+            &mut self.dequant_scratch,
+            weights,
+            index,
+        );
         self.decode_step(weights, ffn, token_id)
     }
 
@@ -355,7 +368,7 @@ impl KvEngine for BoundaryPerLayerEngine {
             return self.prefill(weights, ffn, token_ids);
         }
         let (hidden, store) = executor::run_prefill(
-            weights,
+            larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch),
             executor,
             ffn,
             &self.policy,
@@ -386,12 +399,17 @@ impl KvEngine for BoundaryPerLayerEngine {
             .ok_or_else(|| EngineError::InvariantViolation {
                 what: "decode_step_via_executor called before prefill (store missing)".into(),
             })?;
-        let (hidden, new_rs) =
-            executor::run_decode(weights, executor, ffn, &self.policy, rs, token_id).ok_or_else(
-                || EngineError::BackendFailure {
-                    details: "executor::run_decode returned None".into(),
-                },
-            )?;
+        let (hidden, new_rs) = executor::run_decode(
+            larql_inference::WeightsView::with_scratch(weights, &self.dequant_scratch),
+            executor,
+            ffn,
+            &self.policy,
+            rs,
+            token_id,
+        )
+        .ok_or_else(|| EngineError::BackendFailure {
+            details: "executor::run_decode returned None".into(),
+        })?;
         self.store = Some(new_rs);
         Ok(hidden)
     }
@@ -800,7 +818,7 @@ mod tests {
         // NullFfn instead — the dense walk's FFN dispatch through
         // NullFfn produces zero residuals, which is fine for shape
         // checks (we only assert the output shape, not values).
-        let mut weights = make_test_weights();
+        let weights = make_test_weights();
         let index = larql_inference::test_utils::make_test_vindex(&weights);
         let policy = BoundaryLayerPolicy::bf16_uniform("test", weights.num_layers);
         let store = store_with_record(&policy);
@@ -809,7 +827,7 @@ mod tests {
         let backend = larql_compute::CpuBackend;
         let ffn = larql_inference::ffn::NullFfn;
         let h = engine
-            .prefill_quant(&mut weights, &ffn, &index, &[0u32, 1], &backend)
+            .prefill_quant(&weights, &ffn, &index, &[0u32, 1], &backend)
             .expect("dispatch-None fall-through must succeed via walk");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         // kv_handle should be None on the fall-through path.
@@ -821,7 +839,7 @@ mod tests {
         // After a fall-through prefill (kv_handle is None), decode_step_quant
         // takes the `self.kv_handle.is_some()` == false path → falls into
         // self.decode_step via the dense walk.
-        let mut weights = make_test_weights();
+        let weights = make_test_weights();
         let index = larql_inference::test_utils::make_test_vindex(&weights);
         let policy = BoundaryLayerPolicy::bf16_uniform("test", weights.num_layers);
         let store = store_with_record(&policy);
@@ -830,11 +848,11 @@ mod tests {
         let backend = larql_compute::CpuBackend;
         let ffn = larql_inference::ffn::NullFfn;
         engine
-            .prefill_quant(&mut weights, &ffn, &index, &[0u32, 1], &backend)
+            .prefill_quant(&weights, &ffn, &index, &[0u32, 1], &backend)
             .unwrap();
         assert!(engine.kv_handle.is_none());
         let h = engine
-            .decode_step_quant(&mut weights, &ffn, &index, 2, &backend)
+            .decode_step_quant(&weights, &ffn, &index, 2, &backend)
             .expect("decode fall-through must succeed");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
     }
@@ -940,7 +958,7 @@ mod tests {
     #[test]
     fn prefill_quant_returns_empty_prompt_error_on_empty_input() {
         use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
         let index = make_test_q4k_vindex(&weights);
         let backend = larql_compute::cpu_backend();
         let policy = BoundaryLayerPolicy::bf16_uniform("test", weights.num_layers);
@@ -949,7 +967,7 @@ mod tests {
             BoundaryPerLayerEngine::new(None, policy, weights.num_layers, &store).unwrap();
         let ffn = larql_inference::ffn::NullFfn;
         let err = engine
-            .prefill_quant(&mut weights, &ffn, &index, &[], &*backend)
+            .prefill_quant(&weights, &ffn, &index, &[], &*backend)
             .unwrap_err();
         assert_eq!(err, larql_inference::kv_engine::EngineError::EmptyPrompt);
     }
@@ -973,7 +991,7 @@ mod tests {
     #[test]
     fn decode_step_quant_returns_invariant_violation_before_prefill() {
         use larql_inference::test_utils::{make_test_q4k_vindex, make_test_q4k_weights};
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
         let index = make_test_q4k_vindex(&weights);
         let backend = larql_compute::cpu_backend();
         let policy = BoundaryLayerPolicy::bf16_uniform("test", weights.num_layers);
@@ -982,7 +1000,7 @@ mod tests {
             BoundaryPerLayerEngine::new(None, policy, weights.num_layers, &store).unwrap();
         let ffn = larql_inference::ffn::NullFfn;
         let err = engine
-            .decode_step_quant(&mut weights, &ffn, &index, 0, &*backend)
+            .decode_step_quant(&weights, &ffn, &index, 0, &*backend)
             .unwrap_err();
         assert!(matches!(
             err,

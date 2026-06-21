@@ -117,10 +117,12 @@ impl RelationResolver {
         let layer = Self::probe_layer(weights.num_layers);
         // Only the layers up to the probe layer need to be f32 for the partial
         // forward — dequant just those (cheap).
+        let mut scratch = larql_inference::DequantScratch::new();
         for l in 0..=layer {
-            larql_inference::vindex::insert_q4k_layer_tensors(&mut weights, &index, l)
+            larql_inference::vindex::insert_q4k_layer_tensors(&mut scratch, &weights, &index, l)
                 .map_err(|e| LqlError::exec("relation resolver: dequant", e))?;
         }
+        weights.tensors.extend(scratch);
 
         // Training set: one residual per (relation, probe entity).
         let mut samples: Vec<(Vec<f32>, usize)> =

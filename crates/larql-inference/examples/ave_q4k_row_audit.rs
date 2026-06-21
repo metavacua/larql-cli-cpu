@@ -12,7 +12,7 @@
 //! Usage: `cargo run --release --example ave_q4k_row_audit -- [VINDEX_DIR] [LAYERS...]`
 
 use larql_compute::cpu::ops::q4_common::{dequantize_q4_k, q4k_matvec_into};
-use larql_inference::vindex::{insert_q4k_layer_tensors, remove_layer_tensors};
+use larql_inference::vindex::{insert_q4k_layer_tensors_resident, remove_layer_tensors_resident};
 
 fn main() {
     if std::env::var("LARQL_F16_PROBE").is_ok() {
@@ -76,7 +76,8 @@ fn main() {
 
         // Staged tensor for (c).
         let k_bytes_owned = k_bytes.to_vec();
-        let inserted = insert_q4k_layer_tensors(&mut weights, &index, layer).expect("insert");
+        let inserted =
+            insert_q4k_layer_tensors_resident(&mut weights, &index, layer).expect("insert");
         let k_key = weights.arch.attn_k_key(layer);
         let w_staged = weights.tensors.get(&k_key).expect("staged K").clone();
         println!("  staged tensor shape: {:?}", w_staged.shape());
@@ -187,7 +188,7 @@ fn main() {
                 .count();
             println!("    elems differing in this block: {n_diff}/256");
         }
-        remove_layer_tensors(&mut weights, inserted);
+        remove_layer_tensors_resident(&mut weights, inserted);
     }
 }
 

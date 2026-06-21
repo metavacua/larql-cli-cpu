@@ -325,7 +325,7 @@ impl KvDispatch for CpuBackend {
 
     fn attention_step(
         &self,
-        weights: &ModelWeights,
+        weights: larql_models::WeightsView,
         query: &Array2<f32>,
         kv: &mut KvHandle,
         layer: usize,
@@ -339,7 +339,7 @@ impl KvDispatch for CpuBackend {
         // back per layer to the f32 path when the index lacks Q4K attn bytes.
         if let Some(idx) = index.filter(|_| q4k_direct_attn_enabled()) {
             if let Some(proj) = crate::attention::decode::decode_step_project_q4k_direct(
-                weights,
+                weights.canonical(),
                 query,
                 layer,
                 abs_position,
@@ -358,7 +358,7 @@ impl KvDispatch for CpuBackend {
                 h.append_row(k_row, v_row);
                 let (k_all, v_all) = h.views().expect("non-empty after append");
                 match crate::attention::decode::decode_step_attend_q4k_direct(
-                    weights,
+                    weights.canonical(),
                     query,
                     layer,
                     &proj.q_rope,
@@ -400,7 +400,7 @@ impl KvDispatch for CpuBackend {
 
     fn attention_prefill(
         &self,
-        weights: &ModelWeights,
+        weights: larql_models::WeightsView,
         tokens_embedded: &Array2<f32>,
         layer: usize,
         _window: Option<usize>,
@@ -408,7 +408,7 @@ impl KvDispatch for CpuBackend {
     ) -> Option<(Array2<f32>, KvHandle)> {
         // See `attention_step` doc for the `_index` convention.
         let (h_post_attn, k_rope, v) =
-            run_attention_with_kv_backend(weights, tokens_embedded, layer, Some(self))?;
+            run_attention_with_kv_backend(weights, tokens_embedded, layer, Some(self), None)?;
         let kv_dim = k_rope.shape()[1];
         let mut handle = CpuKvHandle::new(layer, kv_dim);
         handle.replace_state((k_rope, v));
@@ -430,7 +430,7 @@ impl KvDispatch for CpuBackend {
 
     fn forward_from_layer(
         &self,
-        weights: &ModelWeights,
+        weights: larql_models::WeightsView,
         start_layer: usize,
         residuals: &ResidualHandle,
         token_ids: &[u32],
@@ -460,7 +460,7 @@ impl KvDispatch for CpuBackend {
 
     fn coarse_prefill(
         &self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         token_ids: &[u32],
         index: Option<&dyn crate::KvIndex>,
     ) -> Option<(Array2<f32>, KvHandle)> {
@@ -469,7 +469,7 @@ impl KvDispatch for CpuBackend {
 
     fn coarse_prefill_with_state(
         &self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         token_ids: &[u32],
         index: Option<&dyn crate::KvIndex>,
         state: Option<&mut crate::PerLayerDecodeState>,
@@ -492,7 +492,7 @@ impl KvDispatch for CpuBackend {
 
     fn coarse_decode_step(
         &self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         token_id: u32,
         index: Option<&dyn crate::KvIndex>,
         handle: &mut KvHandle,
@@ -533,7 +533,7 @@ impl KvDispatch for CpuBackend {
     /// an engine asks for it on the indirect path).
     fn coarse_decode_step_with_state(
         &self,
-        weights: &mut ModelWeights,
+        weights: &ModelWeights,
         token_id: u32,
         index: Option<&dyn crate::KvIndex>,
         handle: &mut KvHandle,
@@ -782,7 +782,7 @@ mod tests {
         // `cpu_residual` before `forward_from_layer` reads the shape).
         assert_eq!(ResidualHandleInner::shape(&OtherResidual), (1, 4));
         let h = ResidualHandle::new(OtherResidual);
-        let _ = b.forward_from_layer(&weights, 0, &h, &[0u32]);
+        let _ = b.forward_from_layer(larql_models::WeightsView::dense(&weights), 0, &h, &[0u32]);
     }
 
     // ── Coarse default early-return branches ─────────────────────────
@@ -793,8 +793,8 @@ mod tests {
     #[test]
     fn coarse_prefill_with_state_returns_none_on_empty_tokens() {
         let b = backend();
-        let mut weights = make_test_weights();
-        let result = b.coarse_prefill_with_state(&mut weights, &[], None, None);
+        let weights = make_test_weights();
+        let result = b.coarse_prefill_with_state(&weights, &[], None, None);
         assert!(result.is_none());
     }
 
@@ -802,8 +802,8 @@ mod tests {
     #[test]
     fn coarse_prefill_with_state_returns_none_without_index() {
         let b = backend();
-        let mut weights = make_test_weights();
-        let result = b.coarse_prefill_with_state(&mut weights, &[0u32, 1], None, None);
+        let weights = make_test_weights();
+        let result = b.coarse_prefill_with_state(&weights, &[0u32, 1], None, None);
         assert!(result.is_none());
     }
 
@@ -812,8 +812,8 @@ mod tests {
     #[test]
     fn coarse_prefill_delegates_to_with_state_variant() {
         let b = backend();
-        let mut weights = make_test_weights();
-        let result = b.coarse_prefill(&mut weights, &[], None);
+        let weights = make_test_weights();
+        let result = b.coarse_prefill(&weights, &[], None);
         assert!(result.is_none());
     }
 
@@ -826,11 +826,11 @@ mod tests {
         use crate::test_fixtures::make_q4k_fixture_index;
         use larql_models::test_fixtures::make_test_q4k_weights;
         let b = backend();
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
         let idx = make_q4k_fixture_index(&weights);
         let mut state = crate::PerLayerDecodeState::with_capacity(weights.num_layers);
         let result =
-            b.coarse_prefill_with_state(&mut weights, &[0u32, 1, 2], Some(&idx), Some(&mut state));
+            b.coarse_prefill_with_state(&weights, &[0u32, 1, 2], Some(&idx), Some(&mut state));
         let (h, handle) = result.expect("Q4K prefill succeeds");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         // Handle width is reported through the inner trait.
@@ -846,12 +846,12 @@ mod tests {
         use crate::test_fixtures::make_q4k_fixture_index;
         use larql_models::test_fixtures::make_test_q4k_weights;
         let b = backend();
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
         let idx = make_q4k_fixture_index(&weights);
         let (_h, mut handle) = b
-            .coarse_prefill(&mut weights, &[0u32, 1, 2], Some(&idx))
+            .coarse_prefill(&weights, &[0u32, 1, 2], Some(&idx))
             .expect("prefill seeds the handle");
-        let result = b.coarse_decode_step(&mut weights, 4u32, Some(&idx), &mut handle, 3);
+        let result = b.coarse_decode_step(&weights, 4u32, Some(&idx), &mut handle, 3);
         let h = result.expect("decode step succeeds with populated handle");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
     }
@@ -866,14 +866,14 @@ mod tests {
         use crate::test_fixtures::make_q4k_fixture_index;
         use larql_models::test_fixtures::make_test_q4k_weights;
         let b = backend();
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
         let idx = make_q4k_fixture_index(&weights);
         let (_h, mut handle) = b
-            .coarse_prefill(&mut weights, &[0u32, 1, 2], Some(&idx))
+            .coarse_prefill(&weights, &[0u32, 1, 2], Some(&idx))
             .expect("prefill seeds the handle");
         let mut state = crate::PerLayerDecodeState::with_capacity(weights.num_layers);
         let result = b.coarse_decode_step_with_state(
-            &mut weights,
+            &weights,
             4u32,
             Some(&idx),
             &mut handle,
@@ -889,10 +889,9 @@ mod tests {
     #[test]
     fn coarse_decode_step_with_state_returns_none_without_index() {
         let b = backend();
-        let mut weights = make_test_weights();
+        let weights = make_test_weights();
         let mut handle = KvHandle::new(CpuQ4kCacheHandle { cache: vec![None] });
-        let result =
-            b.coarse_decode_step_with_state(&mut weights, 0u32, None, &mut handle, 0, None);
+        let result = b.coarse_decode_step_with_state(&weights, 0u32, None, &mut handle, 0, None);
         assert!(result.is_none());
     }
 
@@ -902,9 +901,9 @@ mod tests {
     #[test]
     fn coarse_decode_step_returns_none_without_index() {
         let b = backend();
-        let mut weights = make_test_weights();
+        let weights = make_test_weights();
         let mut handle = KvHandle::new(CpuQ4kCacheHandle { cache: vec![None] });
-        let result = b.coarse_decode_step(&mut weights, 0u32, None, &mut handle, 0);
+        let result = b.coarse_decode_step(&weights, 0u32, None, &mut handle, 0);
         assert!(result.is_none());
     }
 
@@ -915,7 +914,7 @@ mod tests {
     fn coarse_prefill_with_state_returns_none_on_unsupported_arch() {
         use crate::test_fixtures::make_q4k_fixture_index;
         let b = backend();
-        let mut weights = larql_models::test_fixtures::make_test_gemma4_moe_weights();
+        let weights = larql_models::test_fixtures::make_test_gemma4_moe_weights();
         assert!(
             !crate::kquant_forward::supports_cached_decode(&weights),
             "MoE arch must not support cached decode"
@@ -923,7 +922,7 @@ mod tests {
         // A real index is supplied so the `index?` gate passes and the
         // `supports_cached_decode` gate is the one that bites.
         let idx = make_q4k_fixture_index(&weights);
-        let result = b.coarse_prefill_with_state(&mut weights, &[0u32, 1], Some(&idx), None);
+        let result = b.coarse_prefill_with_state(&weights, &[0u32, 1], Some(&idx), None);
         assert!(result.is_none());
     }
 
@@ -955,14 +954,28 @@ mod tests {
 
         // Step 1 (empty prior KV) through the q4k-direct branch.
         let h1 = b
-            .attention_step(&weights, &query, &mut handle, 0, 0, Some(&idx))
+            .attention_step(
+                larql_models::WeightsView::dense(&weights),
+                &query,
+                &mut handle,
+                0,
+                0,
+                Some(&idx),
+            )
             .expect("q4k-direct attention_step returns Some on the Q4K fixture");
         assert_eq!(h1.shape(), &[1, weights.hidden_size]);
         assert_eq!(handle.cached_len(), 1, "KV grew by 1");
 
         // Step 2 (prior KV present) keeps using the q4k-direct branch.
         let h2 = b
-            .attention_step(&weights, &query, &mut handle, 0, 1, Some(&idx))
+            .attention_step(
+                larql_models::WeightsView::dense(&weights),
+                &query,
+                &mut handle,
+                0,
+                1,
+                Some(&idx),
+            )
             .expect("second q4k-direct attention_step succeeds");
         assert_eq!(h2.shape(), &[1, weights.hidden_size]);
         assert_eq!(handle.cached_len(), 2, "KV grew to 2");
@@ -995,7 +1008,14 @@ mod tests {
         // f32-BLAS path on `weights.tensors` (the fixture carries f32 attn
         // tensors), which succeeds.
         let h = b
-            .attention_step(&weights, &query, &mut handle, 0, 0, Some(&EmptyIdx))
+            .attention_step(
+                larql_models::WeightsView::dense(&weights),
+                &query,
+                &mut handle,
+                0,
+                0,
+                Some(&EmptyIdx),
+            )
             .expect("f32 fallback succeeds when the index lacks Q4K attn bytes");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert_eq!(handle.cached_len(), 1);

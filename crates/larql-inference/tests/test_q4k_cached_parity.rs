@@ -79,7 +79,7 @@ fn cached_decode_matches_uncached_tokens() {
 
     let mut cb = SilentLoadCallbacks;
     let mut weights_a = load_model_weights_kquant(&vindex_path, &mut cb).expect("load weights A");
-    let mut weights_b = load_model_weights_kquant(&vindex_path, &mut cb).expect("load weights B");
+    let weights_b = load_model_weights_kquant(&vindex_path, &mut cb).expect("load weights B");
     let mut index = VectorIndex::load_vindex(&vindex_path, &mut cb).expect("load index");
     index.load_attn_kquant(&vindex_path).expect("load attn Q4K");
     index
@@ -107,7 +107,7 @@ fn cached_decode_matches_uncached_tokens() {
     for step in 1..STEPS {
         let abs_position = prompt_ids.len() + (step - 1);
         let (h_new, _) =
-            predict_kquant_decode_step(&mut weights_a, next_id, &index, &mut cache, abs_position)
+            predict_kquant_decode_step(&weights_a, next_id, &index, &mut cache, abs_position)
                 .expect("cached decode step");
         next_id = argmax_token(&weights_a, &tokenizer, &h_new);
         cached_ids.push(next_id);
@@ -115,12 +115,12 @@ fn cached_decode_matches_uncached_tokens() {
 
     // ── Path B: uncached predict_kquant_hidden per step ──────────────
     let mut ids = prompt_ids.clone();
-    let h_full = predict_kquant_hidden(&mut weights_b, &ids, &index, None);
+    let h_full = predict_kquant_hidden(&weights_b, &ids, &index, None);
     let mut next_id = argmax_token(&weights_b, &tokenizer, &h_full);
     let mut uncached_ids = vec![next_id];
     ids.push(next_id);
     for _ in 1..STEPS {
-        let h_full = predict_kquant_hidden(&mut weights_b, &ids, &index, None);
+        let h_full = predict_kquant_hidden(&weights_b, &ids, &index, None);
         next_id = argmax_token(&weights_b, &tokenizer, &h_full);
         uncached_ids.push(next_id);
         ids.push(next_id);
@@ -192,7 +192,7 @@ fn direct_matvec_decode_matches_dequant_path() {
     for step in 1..STEPS {
         let abs_position = prompt_ids.len() + (step - 1);
         let (h_new, _) =
-            predict_kquant_decode_step(&mut weights_b, next_id, &index, &mut cache_b, abs_position)
+            predict_kquant_decode_step(&weights_b, next_id, &index, &mut cache_b, abs_position)
                 .expect("dequant decode step");
         next_id = argmax_token(&weights_b, &tokenizer, &h_new);
         dequant_ids.push(next_id);
@@ -245,14 +245,9 @@ fn direct_matvec_decode_matches_dequant_path() {
         prompt_ids.len(),
     )
     .expect("direct step");
-    let (h_dequant, _) = predict_kquant_decode_step(
-        &mut weights_b,
-        first,
-        &index,
-        &mut cache_b,
-        prompt_ids.len(),
-    )
-    .expect("dequant step");
+    let (h_dequant, _) =
+        predict_kquant_decode_step(&weights_b, first, &index, &mut cache_b, prompt_ids.len())
+            .expect("dequant step");
     let a = h_direct.row(0);
     let b = h_dequant.row(0);
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();

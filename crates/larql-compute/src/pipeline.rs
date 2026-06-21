@@ -31,6 +31,14 @@ pub enum QuantFormat {
     BF16,  // raw bfloat16 (2 bytes per value, no quantization scales)
     F16,   // raw float16  (2 bytes per value)
     F32,   // raw float32  (4 bytes per value)
+    /// BitNet 1.58-bit ternary (GGML I2_S, type 36): 4 trits/byte packed
+    /// row-major (`cols/4` bytes per row) plus a separate per-channel f32
+    /// scale array. Unlike the block-quant formats, the weight is NOT a
+    /// flat `&[u8]` block stream — it is carried by
+    /// [`crate::cpu::ops::ternary_matvec::BitLinearWeight`] (bytes + scales)
+    /// and served by the dedicated `ternary_matvec` dispatch, not the
+    /// block-quant `quant_matvec` path (which has no per-channel-scale input).
+    I2S,
 }
 
 impl QuantFormat {
@@ -111,8 +119,36 @@ impl QuantFormat {
             "BF16" => Self::BF16,
             "F16" => Self::F16,
             "F32" => Self::F32,
+            // BitNet ternary (GGML type 36). The vindex bitnet sidecar tags
+            // its I2_S weight stream with this so the registry recognises it.
+            "I2_S" => Self::I2S,
             _ => return None,
         })
+    }
+
+    /// Inverse of [`Self::from_registry_tag`] — the canonical registry tag
+    /// string for this format. `from_registry_tag(f.registry_tag()) == Some(f)`
+    /// for every variant. Used by writers that record the per-tensor format
+    /// tag into the weight manifest / index.
+    pub fn registry_tag(self) -> &'static str {
+        match self {
+            Self::Q4_0 => "Q4_0",
+            Self::Q4_K => "Q4_K",
+            Self::Q4_KF => "Q4_KF",
+            Self::Q6_K => "Q6_K",
+            Self::Q8_0 => "Q8_0",
+            Self::BF16 => "BF16",
+            Self::F16 => "F16",
+            Self::F32 => "F32",
+            Self::I2S => "I2_S",
+        }
+    }
+
+    /// Whether this format is BitNet ternary (I2_S). Served by the dedicated
+    /// `ternary_matvec` path with a [`crate::cpu::ops::ternary_matvec::BitLinearWeight`],
+    /// never the block-quant `quant_matvec` dispatch.
+    pub fn is_ternary(self) -> bool {
+        matches!(self, Self::I2S)
     }
 }
 
@@ -813,6 +849,40 @@ mod tests {
     fn activation_from_bool() {
         assert_eq!(Activation::from(true), Activation::GeluTanh);
         assert_eq!(Activation::from(false), Activation::Silu);
+    }
+
+    #[test]
+    fn registry_tag_round_trips_every_variant() {
+        // registry_tag() is the exact inverse of from_registry_tag() for
+        // every variant — including the new ternary I2_S.
+        for f in [
+            QuantFormat::Q4_0,
+            QuantFormat::Q4_K,
+            QuantFormat::Q4_KF,
+            QuantFormat::Q6_K,
+            QuantFormat::Q8_0,
+            QuantFormat::BF16,
+            QuantFormat::F16,
+            QuantFormat::F32,
+            QuantFormat::I2S,
+        ] {
+            assert_eq!(QuantFormat::from_registry_tag(f.registry_tag()), Some(f));
+        }
+    }
+
+    #[test]
+    fn i2s_tag_and_family_predicates() {
+        assert_eq!(
+            QuantFormat::from_registry_tag("I2_S"),
+            Some(QuantFormat::I2S)
+        );
+        assert_eq!(QuantFormat::I2S.registry_tag(), "I2_S");
+        assert!(QuantFormat::I2S.is_ternary());
+        assert!(!QuantFormat::Q4_K.is_ternary());
+        // I2_S is none of the block-quant families and has no flat block layout.
+        assert!(!QuantFormat::I2S.is_kquant_family());
+        assert!(!QuantFormat::I2S.is_legacy_q8());
+        assert!(QuantFormat::I2S.packed_block_layout().is_none());
     }
 
     #[test]

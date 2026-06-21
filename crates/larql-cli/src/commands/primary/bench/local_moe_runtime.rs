@@ -48,7 +48,7 @@ pub(super) fn run_local_moe(
     // for the whole generation (experts stay Q4K — read directly by
     // `build_moe_weights`). Matches the `larql run --moe-shards` CPU default.
     for layer in 0..weights.num_layers {
-        larql_inference::vindex::insert_q4k_layer_tensors(weights, index, layer)
+        larql_inference::vindex::insert_q4k_layer_tensors_resident(weights, index, layer)
             .map_err(|e| format!("failed to dequantize layer {layer} to f32: {e}"))?;
     }
 

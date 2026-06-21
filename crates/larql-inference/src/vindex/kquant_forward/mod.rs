@@ -51,5 +51,8 @@ pub use metal::{
 pub use remote_ffn::{
     predict_kquant_hidden_with_ffn, predict_kquant_with_ffn, predict_kquant_with_ffn_early_exit,
 };
-pub use tensors::{insert_q4k_layer_tensors, remove_layer_tensors};
+pub use tensors::{
+    insert_q4k_layer_tensors, insert_q4k_layer_tensors_resident, remove_layer_tensors,
+    remove_layer_tensors_resident,
+};
 pub use walk_ffn::{kquant_ffn_forward_layer, kquant_ffn_forward_layer_q8k};

@@ -15,12 +15,13 @@ use super::tensors::{insert_q4k_layer_tensors, remove_layer_tensors};
 /// vindex, dequantising attn + FFN one layer at a time. Returns the
 /// `[seq_len, hidden]` array; caller owns the lm_head step.
 pub fn predict_kquant_hidden(
-    weights: &mut ModelWeights,
+    weights: &ModelWeights,
     token_ids: &[u32],
     index: &VectorIndex,
     moe_remote: Option<&crate::ffn::RemoteMoeBackend>,
 ) -> Array2<f32> {
     let num_layers = weights.num_layers;
+    let mut scratch = larql_models::DequantScratch::new();
     let mut h = embed_tokens_pub(weights, token_ids);
 
     let ple_inputs = precompute_per_layer_inputs(weights, &h, token_ids);
@@ -34,18 +35,19 @@ pub fn predict_kquant_hidden(
     }
 
     for layer in 0..num_layers {
-        let inserted =
-            insert_q4k_layer_tensors(weights, index, layer).unwrap_or_else(|err| panic!("{err}"));
+        let inserted = insert_q4k_layer_tensors(&mut scratch, weights, index, layer)
+            .unwrap_or_else(|err| panic!("{err}"));
 
         let shared_kv = weights
             .arch
             .kv_shared_source_layer(layer)
             .and_then(|src| kv_cache.get(&src));
         let is_moe_layer = weights.arch.is_hybrid_moe();
-        let ffn_backend = crate::ffn::WeightFfn { weights };
+        let view = larql_models::WeightsView::with_scratch(weights, &scratch);
+        let ffn_backend = crate::ffn::ViewFfn { view };
         if is_moe_layer {
             if let Some((h_new, kv_out)) = run_moe_layer_cpu(
-                weights,
+                view,
                 &h,
                 layer,
                 &ffn_backend,
@@ -59,7 +61,7 @@ pub fn predict_kquant_hidden(
                 }
             }
         } else if let Some((h_new, _, kv_out)) = run_layer_with_ffn(
-            weights,
+            view,
             &h,
             layer,
             &ffn_backend,
@@ -73,7 +75,7 @@ pub fn predict_kquant_hidden(
             }
         }
 
-        remove_layer_tensors(weights, inserted);
+        remove_layer_tensors(&mut scratch, inserted);
 
         if let Some(dir) = dump_dir {
             let slice = h.as_slice().unwrap_or(&[]);
@@ -117,7 +119,7 @@ fn build_moe_router_weights<'a>(
 
 /// CPU forward for one hybrid-MoE layer (Gemma 4 26B A4B).
 fn run_moe_layer_cpu(
-    weights: &ModelWeights,
+    weights: larql_models::WeightsView,
     h: &Array2<f32>,
     layer: usize,
     ffn: &dyn crate::ffn::FfnBackend,
@@ -135,7 +137,14 @@ fn run_moe_layer_cpu(
         (h_pa, Some((k_rope, v_final)))
     };
 
-    let h_out = moe_ffn_block_cpu(weights, &h_post_attn, layer, ffn, ple_input, moe_remote);
+    let h_out = moe_ffn_block_cpu(
+        weights.canonical(),
+        &h_post_attn,
+        layer,
+        ffn,
+        ple_input,
+        moe_remote,
+    );
     Some((h_out, kv_out))
 }
 
@@ -342,9 +351,9 @@ mod tests {
     /// hybrid-MoE arch fixture; this test covers the rest.
     #[test]
     fn predict_kquant_hidden_returns_shape_and_finite() {
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
         let index = make_test_q4k_vindex(&weights);
-        let h = predict_kquant_hidden(&mut weights, &[0u32, 1, 2], &index, None);
+        let h = predict_kquant_hidden(&weights, &[0u32, 1, 2], &index, None);
         assert_eq!(h.shape(), &[3, weights.hidden_size]);
         assert!(
             h.iter().all(|v| v.is_finite()),
@@ -354,9 +363,9 @@ mod tests {
 
     #[test]
     fn predict_kquant_hidden_single_token() {
-        let mut weights = make_test_q4k_weights();
+        let weights = make_test_q4k_weights();
         let index = make_test_q4k_vindex(&weights);
-        let h = predict_kquant_hidden(&mut weights, &[5u32], &index, None);
+        let h = predict_kquant_hidden(&weights, &[5u32], &index, None);
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
     }
 
@@ -393,9 +402,9 @@ mod tests {
     #[test]
     fn predict_kquant_hidden_routes_through_moe_branch_on_gemma4_fixture() {
         use crate::test_utils::{make_test_gemma4_moe_weights, make_test_q4k_vindex};
-        let mut weights = make_test_gemma4_moe_weights();
+        let weights = make_test_gemma4_moe_weights();
         let index = make_test_q4k_vindex(&weights);
-        let h = predict_kquant_hidden(&mut weights, &[0u32, 1], &index, None);
+        let h = predict_kquant_hidden(&weights, &[0u32, 1], &index, None);
         assert_eq!(h.shape(), &[2, weights.hidden_size]);
         assert!(
             h.iter().all(|v| v.is_finite()),
@@ -414,7 +423,7 @@ mod tests {
         let mut weights = make_test_gemma4_moe_weights();
         let index = make_test_q4k_vindex(&weights);
         weights.raw_bytes.clear(); // drop per-expert blobs → build_moe_weights None
-        let h = predict_kquant_hidden(&mut weights, &[0u32, 1], &index, None);
+        let h = predict_kquant_hidden(&weights, &[0u32, 1], &index, None);
         assert_eq!(h.shape(), &[2, weights.hidden_size]);
         assert!(
             h.iter().all(|v| v.is_finite()),
@@ -444,20 +453,20 @@ mod tests {
             }
         }
 
-        let mut weights = make_test_gemma4_moe_weights();
+        let weights = make_test_gemma4_moe_weights();
         let index = make_test_q4k_vindex(&weights);
         let nl = weights.num_layers;
 
         let _reset = RoutingReset;
         set_routing(None);
-        let dense = predict_kquant_hidden(&mut weights, &[0u32, 1], &index, None);
+        let dense = predict_kquant_hidden(&weights, &[0u32, 1], &index, None);
 
         // Aggressively prune every expert layer's feature set.
         set_routing(Some(WithinExpertRouting {
             frac_per_layer: vec![Some(0.125); nl],
             selector: ExpertFeatureSelector::ActMagnitude,
         }));
-        let pruned = predict_kquant_hidden(&mut weights, &[0u32, 1], &index, None);
+        let pruned = predict_kquant_hidden(&weights, &[0u32, 1], &index, None);
         drop(_reset); // restore before asserting
 
         assert_eq!(pruned.shape(), dense.shape());
@@ -483,10 +492,10 @@ mod tests {
     fn predict_kquant_hidden_with_disconnected_remote_moe_backend_falls_back() {
         use crate::ffn::RemoteMoeBackend;
         use crate::test_utils::{make_test_gemma4_moe_weights, make_test_q4k_vindex};
-        let mut weights = make_test_gemma4_moe_weights();
+        let weights = make_test_gemma4_moe_weights();
         let index = make_test_q4k_vindex(&weights);
         let remote = RemoteMoeBackend::new_disconnected();
-        let h = predict_kquant_hidden(&mut weights, &[0u32, 1], &index, Some(&remote));
+        let h = predict_kquant_hidden(&weights, &[0u32, 1], &index, Some(&remote));
         assert_eq!(h.shape(), &[2, weights.hidden_size]);
         assert!(
             h.iter().all(|v| v.is_finite()),
@@ -529,9 +538,9 @@ mod tests {
         );
 
         use crate::test_utils::{make_test_gemma4_moe_weights, make_test_q4k_vindex};
-        let mut weights = make_test_gemma4_moe_weights();
+        let weights = make_test_gemma4_moe_weights();
         let index = make_test_q4k_vindex(&weights);
-        let h = predict_kquant_hidden(&mut weights, &[0u32, 1], &index, None);
+        let h = predict_kquant_hidden(&weights, &[0u32, 1], &index, None);
         assert_eq!(h.shape(), &[2, weights.hidden_size]);
 
         // Embed dump must exist (written at line 33 unconditionally when

@@ -13,7 +13,6 @@ use larql_inference::attention::SharedKV;
 use larql_inference::attention::{apply_rope_partial_at, run_attention_with_kv_backend};
 use larql_inference::ffn::BackendFfn;
 use larql_inference::forward::{add_bias, apply_norm, embed_tokens_pub};
-use larql_inference::model::ModelWeights;
 use larql_inference::residual::{rms_norm_heads, rms_norm_heads_no_weight};
 
 #[derive(Clone, Copy)]
@@ -83,7 +82,7 @@ pub struct RsPrefillResult {
 }
 
 pub fn rs_prefill(
-    weights: &ModelWeights,
+    weights: larql_inference::WeightsView,
     token_ids: &[u32],
     max_window: Option<usize>,
     backend: &dyn ComputeBackend,
@@ -91,16 +90,25 @@ pub fn rs_prefill(
 ) -> RsPrefillResult {
     let num_layers = weights.num_layers;
     let seq_len = token_ids.len();
-    let mut h = embed_tokens_pub(weights, token_ids);
+    let mut h = embed_tokens_pub(&weights, token_ids);
     let mut stored: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
     let be = Some(backend);
 
     for layer in 0..num_layers {
         stored.push(h.clone());
-        let (h_post_attn, _k, _v) = run_attention_with_kv_backend(weights, &h, layer, be)
+        let (h_post_attn, _k, _v) = run_attention_with_kv_backend(weights, &h, layer, be, None)
             .expect("attention failed during MarkovRS prefill");
-        let bffn = BackendFfn { weights, backend };
-        let h_out = crate::engines::layer_ffn_or_moe(weights, &h_post_attn, layer, &bffn, moe_ffn);
+        let bffn = BackendFfn {
+            weights: weights.canonical(),
+            backend,
+        };
+        let h_out = crate::engines::layer_ffn_or_moe(
+            weights.canonical(),
+            &h_post_attn,
+            layer,
+            &bffn,
+            moe_ffn,
+        );
         h = h_out;
     }
 
@@ -146,7 +154,7 @@ pub fn rs_prefill(
 }
 
 pub fn rs_decode_step(
-    weights: &ModelWeights,
+    weights: larql_inference::WeightsView,
     new_token_id: u32,
     rs: RsStore,
     backend: &dyn ComputeBackend,
@@ -158,7 +166,7 @@ pub fn rs_decode_step(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn rs_decode_step_profiled(
-    weights: &ModelWeights,
+    weights: larql_inference::WeightsView,
     new_token_id: u32,
     rs: RsStore,
     backend: &dyn ComputeBackend,
@@ -179,7 +187,7 @@ pub(crate) fn rs_decode_step_profiled(
 
 #[allow(clippy::too_many_arguments)]
 fn rs_decode_step_inner(
-    weights: &ModelWeights,
+    weights: larql_inference::WeightsView,
     new_token_id: u32,
     rs: RsStore,
     backend: &dyn ComputeBackend,
@@ -196,7 +204,7 @@ fn rs_decode_step_inner(
     } else {
         None
     };
-    let mut h_new = embed_tokens_pub(weights, &[new_token_id]);
+    let mut h_new = embed_tokens_pub(&weights, &[new_token_id]);
     let mut new_stored: Vec<Array2<f32>> = Vec::with_capacity(num_layers);
     let mut recompute_cold_us = 0.0f64;
     let mut recompute_hot_us = 0.0f64;
@@ -422,8 +430,17 @@ fn rs_decode_step_inner(
         } else {
             None
         };
-        let bffn = BackendFfn { weights, backend };
-        let h_out = crate::engines::layer_ffn_or_moe(weights, &h_post_attn, layer, &bffn, moe_ffn);
+        let bffn = BackendFfn {
+            weights: weights.canonical(),
+            backend,
+        };
+        let h_out = crate::engines::layer_ffn_or_moe(
+            weights.canonical(),
+            &h_post_attn,
+            layer,
+            &bffn,
+            moe_ffn,
+        );
         if let Some(t) = t_ffn {
             ffn_us += t.elapsed().as_secs_f64() * 1e6;
         }
@@ -517,7 +534,7 @@ fn rs_decode_step_inner(
 /// the right kernel (Q4K today; Q6K / future formats slot in
 /// automatically). `None` keeps the f32 fallback for legacy callers.
 pub fn recompute_kv(
-    weights: &ModelWeights,
+    weights: larql_inference::WeightsView,
     h_stored: &Array2<f32>,
     layer: usize,
     abs_start: usize,
@@ -536,7 +553,7 @@ pub fn recompute_kv(
     };
 
     let h_norm = apply_norm(
-        weights,
+        &weights,
         h_stored,
         &arch.input_layernorm_key(layer),
         norm_offset,
@@ -699,17 +716,17 @@ type AttnKvWeightPair<'a> = (
     &'a ArrayBase<ndarray::OwnedArcRepr<f32>, Ix2>,
 );
 
-fn attn_kv_projection_weights(
-    weights: &ModelWeights,
+fn attn_kv_projection_weights<'a>(
+    weights: larql_inference::WeightsView<'a>,
     layer: usize,
-) -> Option<AttnKvWeightPair<'_>> {
+) -> Option<AttnKvWeightPair<'a>> {
     let arch = &*weights.arch;
-    let w_k = weights.tensors.get(&arch.attn_k_key(layer))?;
-    let v_from_k = !weights.tensors.contains_key(&arch.attn_v_key(layer));
+    let w_k = weights.tensor(&arch.attn_k_key(layer))?;
+    let v_from_k = !weights.has_tensor(&arch.attn_v_key(layer));
     let w_v = if v_from_k {
         w_k
     } else {
-        weights.tensors.get(&arch.attn_v_key(layer))?
+        weights.tensor(&arch.attn_v_key(layer))?
     };
     Some((w_k, w_v))
 }
@@ -994,7 +1011,7 @@ fn parse_quant_format(fmt: &str) -> Option<QuantFormat> {
 }
 
 /// Equivalent Standard KV memory in bytes for `seq_len` tokens (FP16).
-pub fn kv_memory_bytes_for_seq(weights: &ModelWeights, seq_len: usize) -> usize {
+pub fn kv_memory_bytes_for_seq(weights: larql_inference::WeightsView, seq_len: usize) -> usize {
     let arch = &*weights.arch;
     (0..weights.num_layers)
         .map(|l| {
@@ -1021,7 +1038,14 @@ mod tests {
     fn recompute_kv_returns_some_with_valid_weights() {
         let weights = make_test_weights();
         let h = Array2::from_elem((3, weights.hidden_size), 0.5f32);
-        let result = recompute_kv(&weights, &h, 0, 0, &CpuBackend, None);
+        let result = recompute_kv(
+            larql_inference::WeightsView::dense(&weights),
+            &h,
+            0,
+            0,
+            &CpuBackend,
+            None,
+        );
         assert!(
             result.is_some(),
             "recompute_kv should return Some with valid weights"
@@ -1033,7 +1057,15 @@ mod tests {
         let weights = make_test_weights();
         let seq_len = 4;
         let h = Array2::from_elem((seq_len, weights.hidden_size), 1.0f32);
-        let (k, v) = recompute_kv(&weights, &h, 0, 0, &CpuBackend, None).unwrap();
+        let (k, v) = recompute_kv(
+            larql_inference::WeightsView::dense(&weights),
+            &h,
+            0,
+            0,
+            &CpuBackend,
+            None,
+        )
+        .unwrap();
         let kv_dim = weights.num_kv_heads * weights.head_dim;
         assert_eq!(k.shape(), &[seq_len, kv_dim], "K shape mismatch");
         assert_eq!(v.shape(), &[seq_len, kv_dim], "V shape mismatch");
@@ -1043,7 +1075,15 @@ mod tests {
     fn recompute_kv_output_is_finite() {
         let weights = make_test_weights();
         let h = Array2::from_elem((2, weights.hidden_size), 0.1f32);
-        let (k, v) = recompute_kv(&weights, &h, 0, 0, &CpuBackend, None).unwrap();
+        let (k, v) = recompute_kv(
+            larql_inference::WeightsView::dense(&weights),
+            &h,
+            0,
+            0,
+            &CpuBackend,
+            None,
+        )
+        .unwrap();
         assert!(
             k.iter().all(|v| v.is_finite()),
             "K contains non-finite values"
@@ -1059,8 +1099,24 @@ mod tests {
         let weights = make_test_weights();
         let h = Array2::from_elem((1, weights.hidden_size), 0.5f32);
         // Different abs_start should produce different RoPE-applied K
-        let (k0, _) = recompute_kv(&weights, &h, 0, 0, &CpuBackend, None).unwrap();
-        let (k5, _) = recompute_kv(&weights, &h, 0, 5, &CpuBackend, None).unwrap();
+        let (k0, _) = recompute_kv(
+            larql_inference::WeightsView::dense(&weights),
+            &h,
+            0,
+            0,
+            &CpuBackend,
+            None,
+        )
+        .unwrap();
+        let (k5, _) = recompute_kv(
+            larql_inference::WeightsView::dense(&weights),
+            &h,
+            0,
+            5,
+            &CpuBackend,
+            None,
+        )
+        .unwrap();
         let diff: f32 = k0.iter().zip(k5.iter()).map(|(a, b)| (a - b).abs()).sum();
         assert!(
             diff > 0.0,
@@ -1158,7 +1214,13 @@ mod tests {
     #[test]
     fn rs_prefill_returns_correct_shape() {
         let weights = make_test_weights();
-        let result = rs_prefill(&weights, &[0u32, 1, 2], None, &CpuBackend, None);
+        let result = rs_prefill(
+            larql_inference::WeightsView::dense(&weights),
+            &[0u32, 1, 2],
+            None,
+            &CpuBackend,
+            None,
+        );
         assert_eq!(result.hidden.shape(), &[1, weights.hidden_size]);
         assert!(result.hidden.iter().all(|v| v.is_finite()));
     }
@@ -1166,7 +1228,13 @@ mod tests {
     #[test]
     fn rs_prefill_stores_all_layers() {
         let weights = make_test_weights();
-        let result = rs_prefill(&weights, &[0u32], None, &CpuBackend, None);
+        let result = rs_prefill(
+            larql_inference::WeightsView::dense(&weights),
+            &[0u32],
+            None,
+            &CpuBackend,
+            None,
+        );
         assert_eq!(result.store.stored.len(), weights.num_layers);
         assert_eq!(result.store.next_position, 1);
     }
@@ -1174,7 +1242,13 @@ mod tests {
     #[test]
     fn rs_prefill_with_window_clips_hot_store() {
         let weights = make_test_weights();
-        let result = rs_prefill(&weights, &[0u32, 1, 2, 3, 4], Some(2), &CpuBackend, None);
+        let result = rs_prefill(
+            larql_inference::WeightsView::dense(&weights),
+            &[0u32, 1, 2, 3, 4],
+            Some(2),
+            &CpuBackend,
+            None,
+        );
         assert!(
             result.window_tokens <= 2,
             "window_tokens={} > 2",
@@ -1187,9 +1261,22 @@ mod tests {
     #[test]
     fn rs_decode_step_produces_finite_hidden() {
         let weights = make_test_weights();
-        let prefill = rs_prefill(&weights, &[0u32], None, &CpuBackend, None);
-        let (h, _) = rs_decode_step(&weights, 1, prefill.store, &CpuBackend, None, None)
-            .expect("decode step");
+        let prefill = rs_prefill(
+            larql_inference::WeightsView::dense(&weights),
+            &[0u32],
+            None,
+            &CpuBackend,
+            None,
+        );
+        let (h, _) = rs_decode_step(
+            larql_inference::WeightsView::dense(&weights),
+            1,
+            prefill.store,
+            &CpuBackend,
+            None,
+            None,
+        )
+        .expect("decode step");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert!(h.iter().all(|v| v.is_finite()));
     }
@@ -1197,11 +1284,33 @@ mod tests {
     #[test]
     fn rs_decode_step_advances_position() {
         let weights = make_test_weights();
-        let prefill = rs_prefill(&weights, &[0u32, 1], None, &CpuBackend, None);
+        let prefill = rs_prefill(
+            larql_inference::WeightsView::dense(&weights),
+            &[0u32, 1],
+            None,
+            &CpuBackend,
+            None,
+        );
         assert_eq!(prefill.store.next_position, 2);
-        let (_, rs2) = rs_decode_step(&weights, 2, prefill.store, &CpuBackend, None, None).unwrap();
+        let (_, rs2) = rs_decode_step(
+            larql_inference::WeightsView::dense(&weights),
+            2,
+            prefill.store,
+            &CpuBackend,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(rs2.next_position, 3);
-        let (_, rs3) = rs_decode_step(&weights, 3, rs2, &CpuBackend, None, None).unwrap();
+        let (_, rs3) = rs_decode_step(
+            larql_inference::WeightsView::dense(&weights),
+            3,
+            rs2,
+            &CpuBackend,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(rs3.next_position, 4);
     }
 
@@ -1212,20 +1321,40 @@ mod tests {
         // `Some(cold_kv)` branch (lines 128-147) instead of the
         // cold-residual recomputation path.
         let weights = make_test_weights();
-        let prefill = rs_prefill(&weights, &[0u32, 1, 2, 3], Some(2), &CpuBackend, None);
+        let prefill = rs_prefill(
+            larql_inference::WeightsView::dense(&weights),
+            &[0u32, 1, 2, 3],
+            Some(2),
+            &CpuBackend,
+            None,
+        );
         assert!(
             prefill.store.cold_kv.is_some(),
             "expected cold_kv to be set"
         );
-        let (h, rs2) = rs_decode_step(&weights, 4, prefill.store, &CpuBackend, None, None)
-            .expect("decode_step over cold_kv");
+        let (h, rs2) = rs_decode_step(
+            larql_inference::WeightsView::dense(&weights),
+            4,
+            prefill.store,
+            &CpuBackend,
+            None,
+            None,
+        )
+        .expect("decode_step over cold_kv");
         assert_eq!(h.shape(), &[1, weights.hidden_size]);
         assert!(h.iter().all(|v| v.is_finite()));
         // After overflow merges into cold_residuals, cold_kv is cleared
         // (compute.rs line 260) so a second decode exercises the
         // cold_residuals-only branch (lines 149-160).
-        let (h2, _) = rs_decode_step(&weights, 5, rs2, &CpuBackend, None, None)
-            .expect("decode_step over cold_residuals");
+        let (h2, _) = rs_decode_step(
+            larql_inference::WeightsView::dense(&weights),
+            5,
+            rs2,
+            &CpuBackend,
+            None,
+            None,
+        )
+        .expect("decode_step over cold_residuals");
         assert_eq!(h2.shape(), &[1, weights.hidden_size]);
         assert!(h2.iter().all(|v| v.is_finite()));
     }
@@ -1260,12 +1389,25 @@ mod tests {
                 "LARQL_MARKOV_INPLACE_KV",
                 Some(if inplace { "1" } else { "0" }),
             );
-            let prefill = rs_prefill(&weights, &[0u32, 1, 2], None, &CpuBackend, None);
+            let prefill = rs_prefill(
+                larql_inference::WeightsView::dense(&weights),
+                &[0u32, 1, 2],
+                None,
+                &CpuBackend,
+                None,
+            );
             let mut rs = prefill.store;
             let mut hiddens = Vec::new();
             for tok in 3u32..=12 {
-                let (h, rs2) = rs_decode_step(&weights, tok, rs, &CpuBackend, None, Some(&index))
-                    .expect("decode");
+                let (h, rs2) = rs_decode_step(
+                    larql_inference::WeightsView::dense(&weights),
+                    tok,
+                    rs,
+                    &CpuBackend,
+                    None,
+                    Some(&index),
+                )
+                .expect("decode");
                 assert!(h.iter().all(|v| v.is_finite()));
                 hiddens.push(h.iter().map(|v| v.to_bits()).collect());
                 rs = rs2;
@@ -1292,8 +1434,8 @@ mod tests {
     #[test]
     fn kv_memory_bytes_for_seq_scales_linearly() {
         let weights = make_test_weights();
-        let one = kv_memory_bytes_for_seq(&weights, 1);
-        let ten = kv_memory_bytes_for_seq(&weights, 10);
+        let one = kv_memory_bytes_for_seq(larql_inference::WeightsView::dense(&weights), 1);
+        let ten = kv_memory_bytes_for_seq(larql_inference::WeightsView::dense(&weights), 10);
         assert!(one > 0);
         assert_eq!(ten, one * 10, "kv memory must scale linearly with seq len");
     }
@@ -1336,13 +1478,19 @@ mod tests {
     fn profiled_decode_step_exercises_all_timing_branches() {
         use crate::profiler::EngineProfiler;
         let weights = make_test_weights();
-        let prefill = rs_prefill(&weights, &[0u32, 1, 2, 3], Some(2), &CpuBackend, None);
+        let prefill = rs_prefill(
+            larql_inference::WeightsView::dense(&weights),
+            &[0u32, 1, 2, 3],
+            Some(2),
+            &CpuBackend,
+            None,
+        );
         // Has cold_kv populated → exercises lines 130-147 (cold_kv branch
         // with profiler timing recompute_hot).
         assert!(prefill.store.cold_kv.is_some());
         let mut profiler = EngineProfiler::default();
         let result = rs_decode_step_profiled(
-            &weights,
+            larql_inference::WeightsView::dense(&weights),
             4,
             prefill.store,
             &CpuBackend,
@@ -1365,15 +1513,36 @@ mod tests {
         // Two decodes from windowed prefill: first overflows + clears
         // cold_kv (compute.rs line 260); second hits the cold_residuals
         // branch (lines 149-160) under profiling.
-        let prefill = rs_prefill(&weights, &[0u32, 1, 2, 3], Some(2), &CpuBackend, None);
-        let (_, rs2) = rs_decode_step(&weights, 4, prefill.store, &CpuBackend, None, None).unwrap();
+        let prefill = rs_prefill(
+            larql_inference::WeightsView::dense(&weights),
+            &[0u32, 1, 2, 3],
+            Some(2),
+            &CpuBackend,
+            None,
+        );
+        let (_, rs2) = rs_decode_step(
+            larql_inference::WeightsView::dense(&weights),
+            4,
+            prefill.store,
+            &CpuBackend,
+            None,
+            None,
+        )
+        .unwrap();
         assert!(
             rs2.cold_kv.is_none(),
             "cold_kv should be cleared after overflow"
         );
         let mut profiler = EngineProfiler::default();
-        let result =
-            rs_decode_step_profiled(&weights, 5, rs2, &CpuBackend, &mut profiler, None, None);
+        let result = rs_decode_step_profiled(
+            larql_inference::WeightsView::dense(&weights),
+            5,
+            rs2,
+            &CpuBackend,
+            &mut profiler,
+            None,
+            None,
+        );
         assert!(result.is_some());
         // cold_residuals branch exercises recompute_cold counter (line 171).
         assert!(profiler.recompute_cold.count > 0);
@@ -1568,7 +1737,15 @@ mod tests {
         set_markov_env_override("LARQL_MARKOV_KV_FORCE_F32", Some("1"));
         let weights = make_test_weights();
         let h = Array2::from_elem((2, weights.hidden_size), 0.5f32);
-        let (k, v) = recompute_kv(&weights, &h, 0, 0, &CpuBackend, None).unwrap();
+        let (k, v) = recompute_kv(
+            larql_inference::WeightsView::dense(&weights),
+            &h,
+            0,
+            0,
+            &CpuBackend,
+            None,
+        )
+        .unwrap();
         let kv_dim = weights.num_kv_heads * weights.head_dim;
         assert_eq!(k.shape(), &[2, kv_dim]);
         assert_eq!(v.shape(), &[2, kv_dim]);
@@ -1581,7 +1758,14 @@ mod tests {
         set_markov_env_override("LARQL_MARKOV_WALK_KV_TOPK", Some("2"));
         let weights = make_test_weights();
         let h = Array2::from_elem((2, weights.hidden_size), 0.25f32);
-        let result = recompute_kv(&weights, &h, 0, 0, &CpuBackend, None);
+        let result = recompute_kv(
+            larql_inference::WeightsView::dense(&weights),
+            &h,
+            0,
+            0,
+            &CpuBackend,
+            None,
+        );
         assert!(result.is_some());
         clear_markov_env_overrides();
     }
@@ -1595,9 +1779,23 @@ mod tests {
         let h = Array2::from_elem((2, weights.hidden_size), 0.25f32);
         // Layer 0: should_cache_selection fires, populates
         // WALK_KV_SELECTION; layer 1: walk_project_cached_topk reads it.
-        let _ = recompute_kv(&weights, &h, 0, 0, &CpuBackend, None);
+        let _ = recompute_kv(
+            larql_inference::WeightsView::dense(&weights),
+            &h,
+            0,
+            0,
+            &CpuBackend,
+            None,
+        );
         if weights.num_layers >= 2 {
-            let result = recompute_kv(&weights, &h, 1, 0, &CpuBackend, None);
+            let result = recompute_kv(
+                larql_inference::WeightsView::dense(&weights),
+                &h,
+                1,
+                0,
+                &CpuBackend,
+                None,
+            );
             assert!(result.is_some());
         }
         clear_markov_env_overrides();
@@ -1609,7 +1807,14 @@ mod tests {
         set_markov_env_override("LARQL_MARKOV_WALK_KV_DIAG", Some("1"));
         let weights = make_test_weights();
         let h = Array2::from_elem((1, weights.hidden_size), 0.5f32);
-        let result = recompute_kv(&weights, &h, 0, 0, &CpuBackend, None);
+        let result = recompute_kv(
+            larql_inference::WeightsView::dense(&weights),
+            &h,
+            0,
+            0,
+            &CpuBackend,
+            None,
+        );
         assert!(result.is_some());
         clear_markov_env_overrides();
     }
@@ -1646,7 +1851,14 @@ mod tests {
             max_window: None,
             cold_len: 0,
         };
-        let result = rs_decode_step(&weights, 0, store, &CpuBackend, None, None);
+        let result = rs_decode_step(
+            larql_inference::WeightsView::dense(&weights),
+            0,
+            store,
+            &CpuBackend,
+            None,
+            None,
+        );
         assert!(result.is_some());
         let (h, _) = result.unwrap();
         assert_eq!(h.shape(), &[1, weights.hidden_size]);

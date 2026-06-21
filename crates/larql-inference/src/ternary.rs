@@ -74,17 +74,25 @@
 //!   self-contained single-shot-prefill + greedy/temperature decode
 //!   so the BitNet path is verifiable on its own (it was qualified
 //!   end-to-end against the real 2 B model: "capital of France" ->
-//!   Paris 94.5%).  The optimized future path — int8-quantized
-//!   activations + a sign-select NEON/AVX2 kernel dispatched through
-//!   the backend, and a shared KV-cache — lines up with the
-//!   `FormatRoute`/quant-registry roadmap; when that lands, the
-//!   decode loop here should ride it rather than duplicate it.
+//!   Paris 94.5%).  Status (branch feat/quant-ternary-a8): the
+//!   int8-quantized-activation (A8) kernel + NEON sign-select now
+//!   EXIST in `larql_compute::cpu::ops::ternary_matvec`, and this
+//!   forward already runs on them (`matvec_i2s_a8_f32_into`). What
+//!   remains is the *shared* path — dispatch through the
+//!   `QuantFormat`/`FormatRoute` registry (no ternary variant yet)
+//!   and a shared KV-cache (`larql_kv::KvCache`) in place of the
+//!   bespoke `BitnetKvCache`.
 //!
 //! Net: the legitimate BitNet-specific divergences are the two
 //! sub-norms and the ReLU² FFN over ternary projections.  The
 //! reimplemented KV/sampling is a maintenance cost acknowledged
-//! here, to be folded into the engine once the quantized-activation
-//! kernel path exists.
+//! here. Its blocking precondition — the quantized-activation kernel
+//! — is now met, so folding the decode loop onto the forward-pass
+//! spine + a `KvEngine` impl is live roadmap work (ROADMAP "BitNet
+//! b1.58 integration hardening"), no longer blocked on a missing
+//! kernel. Until a second consumer exists it may stay isolated under
+//! the no-premature-extraction rule; the point is the decision is now
+//! explicit, not deferred to a non-existent dependency.
 //!
 //! ## I2_S layout (dual representation — intentional)
 //!
@@ -102,7 +110,9 @@
 //! Conflating the two scrambles every weight; see the decode-fix PR
 //! and the format spec for the authoritative description.
 
-use larql_compute::cpu::ops::ternary_matvec::{matvec_i2s_f32_into, BitLinearWeight};
+use larql_compute::cpu::ops::ternary_matvec::{
+    matvec_i2s_a8_f32_into, matvec_i2s_a8_into, quantize_activation_i8, BitLinearWeight,
+};
 use ndarray::{Array1, Array2, ArrayView2};
 
 /// One BitLinear-FFN block.  Holds three ternary weight tensors
@@ -194,8 +204,11 @@ impl BitNetFfn {
 
         // 2. gate = ternary(gate.weight) · x_norm
         //    up   = ternary(up.weight)   · x_norm
-        matvec_i2s_f32_into(&self.gate, &x_norm, gate).expect("gate shape");
-        matvec_i2s_f32_into(&self.up, &x_norm, up).expect("up shape");
+        //    Both projections share x_norm — quantise it to int8 once (A8)
+        //    and feed both matvecs, instead of re-quantising per call.
+        let (x_i8, x_scale) = quantize_activation_i8(&x_norm);
+        matvec_i2s_a8_into(&self.gate, &x_i8, x_scale, gate).expect("gate shape");
+        matvec_i2s_a8_into(&self.up, &x_i8, x_scale, up).expect("up shape");
 
         // 3. Squared-ReLU activation (BitNet b1.58 spec) +
         //    element-wise multiply with up.
@@ -209,7 +222,7 @@ impl BitNetFfn {
         rmsnorm_into(hid, &self.ffn_sub_norm, self.eps, &mut hid_norm);
 
         // 5. y = ternary(down.weight) · hid_norm
-        matvec_i2s_f32_into(&self.down, &hid_norm, y).expect("down shape");
+        matvec_i2s_a8_f32_into(&self.down, &hid_norm, y).expect("down shape");
     }
 }
 
@@ -258,6 +271,95 @@ mod tests {
             bytes[byte_idx] |= bits << (2 * slot);
         }
         BitLinearWeight::new(rows, cols, bytes, scales).unwrap()
+    }
+
+    /// Parity gate for the A8 wiring: the production FFN forward (now the
+    /// int8-activation A8 path) must track a full f32-activation reference
+    /// FFN within int8 tolerance. Validates that swapping `matvec_i2s_f32`
+    /// → `matvec_i2s_a8_f32` across the forward didn't shift the numerics
+    /// beyond the intended activation-quantisation error.
+    #[test]
+    fn ffn_a8_forward_matches_f32_reference_within_tolerance() {
+        use larql_compute::cpu::ops::ternary_matvec::matvec_i2s_f32_into;
+
+        fn rand_w(rows: usize, cols: usize, seed: u64) -> BitLinearWeight {
+            let mut s = seed;
+            let mut bytes = vec![0u8; rows * cols / 4];
+            for b in bytes.iter_mut() {
+                let mut bv = 0u8;
+                for slot in 0..4 {
+                    s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    let code = match (s >> 33) % 3 {
+                        0 => 0b00u8,
+                        1 => 0b01,
+                        _ => 0b10,
+                    };
+                    bv |= code << (2 * slot);
+                }
+                *b = bv;
+            }
+            let scales = (0..rows).map(|r| 0.05 + (r % 5) as f32 * 0.01).collect();
+            BitLinearWeight::new(rows, cols, bytes, scales).unwrap()
+        }
+        fn synth(n: usize, seed: u64) -> Vec<f32> {
+            let mut s = seed;
+            (0..n)
+                .map(|_| {
+                    s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    ((s >> 33) as f32) / (u32::MAX as f32) * 2.0 - 1.0
+                })
+                .collect()
+        }
+        fn cosine(a: &[f32], b: &[f32]) -> f32 {
+            let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+            let na = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let nb = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+            dot / (na * nb)
+        }
+
+        let (hidden, inter) = (256usize, 512usize);
+        let ffn = BitNetFfn {
+            gate: rand_w(inter, hidden, 1),
+            up: rand_w(inter, hidden, 2),
+            down: rand_w(hidden, inter, 3),
+            ffn_norm: vec![1.0; hidden],
+            ffn_sub_norm: vec![1.0; inter],
+            eps: 1e-5,
+        };
+        let x = synth(hidden, 42);
+
+        // Production (A8) forward.
+        let mut gate = vec![0.0; inter];
+        let mut up = vec![0.0; inter];
+        let mut hid = vec![0.0; inter];
+        let mut y_a8 = vec![0.0; hidden];
+        ffn.forward_into(&x, &mut gate, &mut up, &mut hid, &mut y_a8);
+
+        // f32-activation reference forward (same math, f32 kernel).
+        let mut x_norm = vec![0.0; hidden];
+        rmsnorm_into(&x, &ffn.ffn_norm, ffn.eps, &mut x_norm);
+        let mut g = vec![0.0; inter];
+        let mut u = vec![0.0; inter];
+        matvec_i2s_f32_into(&ffn.gate, &x_norm, &mut g).unwrap();
+        matvec_i2s_f32_into(&ffn.up, &x_norm, &mut u).unwrap();
+        let hid_f: Vec<f32> = g
+            .iter()
+            .zip(&u)
+            .map(|(gv, uv)| {
+                let r = gv.max(0.0);
+                r * r * uv
+            })
+            .collect();
+        let mut hid_norm = vec![0.0; inter];
+        rmsnorm_into(&hid_f, &ffn.ffn_sub_norm, ffn.eps, &mut hid_norm);
+        let mut y_f32 = vec![0.0; hidden];
+        matvec_i2s_f32_into(&ffn.down, &hid_norm, &mut y_f32).unwrap();
+
+        let cos = cosine(&y_a8, &y_f32);
+        assert!(
+            cos > 0.999,
+            "A8 FFN forward vs f32 reference cosine {cos} < 0.999"
+        );
     }
 
     #[test]
@@ -561,23 +663,28 @@ pub fn predict_bitnet(
             );
         }
 
-        // b. Q/K/V projections via ternary matvec, per token.
+        // b. Q/K/V projections via ternary matvec, per token. Q/K/V share
+        //    x_norm.row(i), so quantise it to int8 once (A8) and reuse.
         for i in 0..seq_len {
-            matvec_i2s_f32_into(
+            let (x_i8, x_scale) = quantize_activation_i8(x_norm.row(i).as_slice().unwrap());
+            matvec_i2s_a8_into(
                 &layer.attn_q,
-                x_norm.row(i).as_slice().unwrap(),
+                &x_i8,
+                x_scale,
                 q.row_mut(i).as_slice_mut().unwrap(),
             )
             .expect("attn_q shape");
-            matvec_i2s_f32_into(
+            matvec_i2s_a8_into(
                 &layer.attn_k,
-                x_norm.row(i).as_slice().unwrap(),
+                &x_i8,
+                x_scale,
                 k.row_mut(i).as_slice_mut().unwrap(),
             )
             .expect("attn_k shape");
-            matvec_i2s_f32_into(
+            matvec_i2s_a8_into(
                 &layer.attn_v,
-                x_norm.row(i).as_slice().unwrap(),
+                &x_i8,
+                x_scale,
                 v.row_mut(i).as_slice_mut().unwrap(),
             )
             .expect("attn_v shape");
@@ -609,7 +716,7 @@ pub fn predict_bitnet(
                 model.eps,
                 attn_pool_norm.row_mut(i).as_slice_mut().unwrap(),
             );
-            matvec_i2s_f32_into(
+            matvec_i2s_a8_f32_into(
                 &layer.attn_o,
                 attn_pool_norm.row(i).as_slice().unwrap(),
                 attn_out.row_mut(i).as_slice_mut().unwrap(),
@@ -707,9 +814,10 @@ fn ffn_forward_after_input_norm(
     debug_assert_eq!(up.len(), inter);
     debug_assert_eq!(hid.len(), inter);
 
-    // gate / up projections.
-    matvec_i2s_f32_into(&ffn.gate, x_norm, gate).expect("gate shape");
-    matvec_i2s_f32_into(&ffn.up, x_norm, up).expect("up shape");
+    // gate / up projections. Both share x_norm — quantise to int8 once (A8).
+    let (x_i8, x_scale) = quantize_activation_i8(x_norm);
+    matvec_i2s_a8_into(&ffn.gate, &x_i8, x_scale, gate).expect("gate shape");
+    matvec_i2s_a8_into(&ffn.up, &x_i8, x_scale, up).expect("up shape");
 
     // Squared-ReLU activation.
     for ((g, u), h) in gate.iter().zip(up.iter()).zip(hid.iter_mut()) {
@@ -722,7 +830,7 @@ fn ffn_forward_after_input_norm(
     rmsnorm_into(hid, &ffn.ffn_sub_norm, eps, &mut hid_norm);
 
     // Down projection.
-    matvec_i2s_f32_into(&ffn.down, &hid_norm, y).expect("down shape");
+    matvec_i2s_a8_f32_into(&ffn.down, &hid_norm, y).expect("down shape");
 }
 
 /// Causal-masked scaled-dot-product attention with GQA support.
@@ -1072,10 +1180,11 @@ pub fn decode_step(model: &BitnetModel, cache: &mut BitnetKvCache, new_token: u3
             &mut x_norm,
         );
 
-        // b. Q/K/V projections.
-        matvec_i2s_f32_into(&layer.attn_q, &x_norm, &mut q).expect("attn_q shape");
-        matvec_i2s_f32_into(&layer.attn_k, &x_norm, &mut k).expect("attn_k shape");
-        matvec_i2s_f32_into(&layer.attn_v, &x_norm, &mut v).expect("attn_v shape");
+        // b. Q/K/V projections. Q/K/V share x_norm — quantise once (A8).
+        let (x_i8, x_scale) = quantize_activation_i8(&x_norm);
+        matvec_i2s_a8_into(&layer.attn_q, &x_i8, x_scale, &mut q).expect("attn_q shape");
+        matvec_i2s_a8_into(&layer.attn_k, &x_i8, x_scale, &mut k).expect("attn_k shape");
+        matvec_i2s_a8_into(&layer.attn_v, &x_i8, x_scale, &mut v).expect("attn_v shape");
 
         // c. RoPE on the new token's Q + K only.  The cached K
         //    already carries RoPE for positions 0..position-1.
@@ -1127,7 +1236,8 @@ pub fn decode_step(model: &BitnetModel, cache: &mut BitnetKvCache, new_token: u3
             model.eps,
             &mut attn_pool_norm,
         );
-        matvec_i2s_f32_into(&layer.attn_o, &attn_pool_norm, &mut attn_out).expect("attn_o shape");
+        matvec_i2s_a8_f32_into(&layer.attn_o, &attn_pool_norm, &mut attn_out)
+            .expect("attn_o shape");
 
         // g. Residual + FFN + residual.
         for (dst, &src) in h.iter_mut().zip(attn_out.iter()) {
@@ -1375,21 +1485,26 @@ fn run_full_forward(
             );
         }
         for i in 0..seq_len {
-            matvec_i2s_f32_into(
+            // Q/K/V share x_norm.row(i) — quantise to int8 once (A8) and reuse.
+            let (x_i8, x_scale) = quantize_activation_i8(x_norm.row(i).as_slice().unwrap());
+            matvec_i2s_a8_into(
                 &layer.attn_q,
-                x_norm.row(i).as_slice().unwrap(),
+                &x_i8,
+                x_scale,
                 q.row_mut(i).as_slice_mut().unwrap(),
             )
             .expect("attn_q shape");
-            matvec_i2s_f32_into(
+            matvec_i2s_a8_into(
                 &layer.attn_k,
-                x_norm.row(i).as_slice().unwrap(),
+                &x_i8,
+                x_scale,
                 k.row_mut(i).as_slice_mut().unwrap(),
             )
             .expect("attn_k shape");
-            matvec_i2s_f32_into(
+            matvec_i2s_a8_into(
                 &layer.attn_v,
-                x_norm.row(i).as_slice().unwrap(),
+                &x_i8,
+                x_scale,
                 v.row_mut(i).as_slice_mut().unwrap(),
             )
             .expect("attn_v shape");
@@ -1425,7 +1540,7 @@ fn run_full_forward(
                 model.eps,
                 attn_pool_norm.row_mut(i).as_slice_mut().unwrap(),
             );
-            matvec_i2s_f32_into(
+            matvec_i2s_a8_f32_into(
                 &layer.attn_o,
                 attn_pool_norm.row(i).as_slice().unwrap(),
                 attn_out.row_mut(i).as_slice_mut().unwrap(),
