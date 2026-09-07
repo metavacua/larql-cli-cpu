@@ -169,6 +169,22 @@ impl StalenessCause {
     }
 }
 
+impl JudgedAttestation {
+    /// Why these bytes are not the bytes this attestation measured, or
+    /// `None` if they are.
+    ///
+    /// The single place the content comparison lives, so the phased
+    /// selection path and [`AttestationStatus::verified_against`] cannot
+    /// drift into disagreeing about what "the right bytes" means.
+    pub fn content_mismatch(&self, bytes: &[u8]) -> Option<StalenessCause> {
+        let found = super::content_digest(bytes);
+        (found != self.binding.content_digest).then(|| StalenessCause::ContentDigest {
+            attested: self.binding.content_digest.clone(),
+            found,
+        })
+    }
+}
+
 /// What the container has to say about an operand's attested fidelity.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AttestationStatus<'a> {
@@ -249,17 +265,9 @@ impl AttestationStatus<'_> {
         let Self::Bound(attestation) = self else {
             return self;
         };
-        let found = super::content_digest(bytes);
-        if found == attestation.binding.content_digest {
-            Self::Verified(attestation)
-        } else {
-            Self::Stale {
-                attestation,
-                cause: StalenessCause::ContentDigest {
-                    attested: attestation.binding.content_digest.clone(),
-                    found,
-                },
-            }
+        match attestation.content_mismatch(bytes) {
+            None => Self::Verified(attestation),
+            Some(cause) => Self::Stale { attestation, cause },
         }
     }
 

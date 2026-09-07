@@ -20,6 +20,7 @@
 
 pub mod accounting;
 pub mod attention_residual;
+pub mod attested_fidelity;
 pub mod backend;
 pub mod continuation;
 pub mod controls;

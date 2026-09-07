@@ -11,6 +11,7 @@
 
 mod accounting;
 mod attention_kv_parity;
+mod attested_fidelity;
 mod attn_res_2a_decode;
 mod attn_res_2b_batch;
 mod attn_res_2b_controls;
