@@ -31,3 +31,4 @@
 //! existed.
 
 pub mod artifact;
+pub mod state_evidence;
