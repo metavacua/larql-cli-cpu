@@ -4,6 +4,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use super::super::actuate::executor::Observed;
+use super::super::actuate::prepare::PreparedExperiment;
 use super::super::compile::hash_bytes;
 use super::super::measure::outcome::VerifiedFacts;
 use super::super::quality::QualityBank;
@@ -46,7 +48,14 @@ pub struct MeasurementArtifact {
     /// The container identity the run executed against, so ingestion can
     /// refuse an artifact produced against a container the snapshot no
     /// longer describes (arm 5) rather than discovering it later.
-    source_digest: String,
+    ///
+    /// The SEMANTIC identity — `SourceIdentity::semantic_digest`, what
+    /// `RepresentationStateId` reads — and deliberately NOT
+    /// `SourceIdentity::artifact`, which is provenance that moves on a
+    /// re-export changing no value. Sealing provenance here would make
+    /// arm 5 refuse artifacts whose container is semantically the one
+    /// authorised, which is a false refusal dressed as rigour.
+    source_semantic_digest: String,
     observation: QualityBank,
     /// Every validity condition the run checked. The executor's own
     /// account of itself: evidence to be re-derived against, never an
@@ -65,7 +74,7 @@ pub struct MeasurementArtifact {
 struct Sealed<'a> {
     key: &'a MeasurementKey,
     procedure: &'a str,
-    source_digest: &'a str,
+    source_semantic_digest: &'a str,
     observation: &'a QualityBank,
     verified: &'a VerifiedFacts,
     execution_note: &'a str,
@@ -82,6 +91,11 @@ pub enum ArtifactRefusal {
     SealBroken { expected: String, observed: String },
     /// The contents could not be canonicalised to seal at all.
     Unsealable { detail: String },
+    /// There is no authorised experiment to bind an observation to.
+    NotAuthorised { detail: String },
+    /// The run restated a DIFFERENT experiment from the one prepared.
+    /// No artifact is produced — not a suspect one, none.
+    SubstitutedExperiment { expected: String, observed: String },
 }
 
 impl fmt::Display for ArtifactRefusal {
@@ -92,6 +106,18 @@ impl fmt::Display for ArtifactRefusal {
                 "this artifact does not hash to the seal it carries — it was sealed as \
                  {expected} and its contents now hash to {observed}, so it changed after \
                  it was made and no longer records the run it claims to"
+            ),
+            Self::NotAuthorised { detail } => write!(
+                f,
+                "there is no authorised experiment to bind this observation to: {detail} \
+                 — an observation without an authorised experiment is not a measurement \
+                 of anything, and sealing one would only make it look like a record"
+            ),
+            Self::SubstitutedExperiment { expected, observed } => write!(
+                f,
+                "the run restated a different experiment from the one prepared — it was \
+                 authorised for {expected} and reports an observation of {observed}, so \
+                 an artifact for either would be a substitution"
             ),
             Self::Unsealable { detail } => write!(
                 f,
@@ -105,21 +131,28 @@ impl fmt::Display for ArtifactRefusal {
 
 impl MeasurementArtifact {
     /// Seal a run's output into an artifact.
-    pub fn sealing(
+    ///
+    /// PRIVATE, and that is the point. A caller who could hand this a
+    /// `MeasurementKey` of their choosing could produce a sealed artifact
+    /// for an experiment nobody authorised — internally consistent, and
+    /// about nothing. [`MeasurementArtifact::from_execution`] is the only
+    /// way in, so an artifact that EXISTS is already bound to one
+    /// authorised experiment.
+    fn sealing(
         key: MeasurementKey,
         procedure: impl Into<String>,
-        source_digest: impl Into<String>,
+        source_semantic_digest: impl Into<String>,
         observation: QualityBank,
         verified: VerifiedFacts,
         execution_note: impl Into<String>,
     ) -> Result<Self, ArtifactRefusal> {
         let procedure = procedure.into();
-        let source_digest = source_digest.into();
+        let source_semantic_digest = source_semantic_digest.into();
         let execution_note = execution_note.into();
         let seal = seal_of(&Sealed {
             key: &key,
             procedure: &procedure,
-            source_digest: &source_digest,
+            source_semantic_digest: &source_semantic_digest,
             observation: &observation,
             verified: &verified,
             execution_note: &execution_note,
@@ -127,12 +160,75 @@ impl MeasurementArtifact {
         Ok(Self {
             key,
             procedure,
-            source_digest,
+            source_semantic_digest,
             observation,
             verified,
             execution_note,
             seal,
         })
+    }
+
+    /// **Bind an observation to the experiment that authorised it.**
+    ///
+    /// The only public constructor. Every field the artifact carries is
+    /// taken from exactly one side, so most of the binding is structural
+    /// rather than checked:
+    ///
+    /// ```text
+    /// procedure, source identity   <- the prepared request, ALWAYS
+    /// observation, verified facts  <- the Observed, ALWAYS
+    /// provenance                   <- the executor's own note
+    /// key                          <- checked to agree, then the request's
+    /// ```
+    ///
+    /// A structural source cannot disagree, so it cannot be got wrong; the
+    /// key is the one thing both sides state, so it is the one thing worth
+    /// checking. When they disagree NO artifact is produced — not a suspect
+    /// one, none — because a sealed artifact is exactly the thing that later
+    /// looks like a record.
+    ///
+    /// # What this does NOT make true
+    ///
+    /// It closes substitution at creation. It does not make a
+    /// `MeasurementArtifact` trusted. After this returns, the artifact
+    /// still only SAYS "I am the observation produced for experiment K";
+    /// whether the authoritative record independently agrees that this
+    /// observation constitutes K is ingestion's question, asked against
+    /// the snapshot rather than against the artifact's own say-so. Keeping
+    /// those apart is why executor restatement and ingestion authority
+    /// stay two steps and not one.
+    pub fn from_execution(
+        prepared: &PreparedExperiment,
+        observed: &Observed,
+    ) -> Result<Self, ArtifactRefusal> {
+        let request = prepared
+            .request()
+            .ok_or_else(|| ArtifactRefusal::NotAuthorised {
+                detail: match prepared {
+                    PreparedExperiment::Exhausted => {
+                        "the optimiser reports nothing left to measure".to_string()
+                    }
+                    PreparedExperiment::NotSelectable { detail } => detail.clone(),
+                    PreparedExperiment::NotPreparable(refusal) => refusal.to_string(),
+                    PreparedExperiment::Ready(_) => unreachable!("Ready yields a request"),
+                },
+            })?;
+
+        if observed.key != *request.key() {
+            return Err(ArtifactRefusal::SubstitutedExperiment {
+                expected: request.key().short().to_string(),
+                observed: observed.key.short().to_string(),
+            });
+        }
+
+        Self::sealing(
+            request.key().clone(),
+            request.procedure(),
+            request.model().semantic_digest(),
+            observed.observation.clone(),
+            observed.verified.clone(),
+            observed.execution_note.clone(),
+        )
     }
 
     /// Does this artifact still hash to the seal it carries?
@@ -144,7 +240,7 @@ impl MeasurementArtifact {
         let observed = seal_of(&Sealed {
             key: &self.key,
             procedure: &self.procedure,
-            source_digest: &self.source_digest,
+            source_semantic_digest: &self.source_semantic_digest,
             observation: &self.observation,
             verified: &self.verified,
             execution_note: &self.execution_note,
@@ -167,8 +263,8 @@ impl MeasurementArtifact {
         &self.procedure
     }
 
-    pub fn source_digest(&self) -> &str {
-        &self.source_digest
+    pub fn source_semantic_digest(&self) -> &str {
+        &self.source_semantic_digest
     }
 
     pub fn observation(&self) -> &QualityBank {

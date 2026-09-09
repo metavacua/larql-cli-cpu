@@ -1,35 +1,61 @@
+use super::super::super::actuate::executor::Observed;
+use super::super::super::actuate::prepare::PreparedExperiment;
 use super::super::super::measure::outcome::VerifiedFacts;
 use super::super::super::measurement::EvidenceScale;
-use super::super::super::state::fixtures;
+use super::super::super::state::fixtures::{self, PricedRecord};
+use super::super::super::state::key::MeasurementKey;
+use super::super::super::state::tests::container;
 use super::{ArtifactRefusal, MeasurementArtifact};
 
+/// A record that can answer AND can be prepared, over a REAL encoded
+/// container — the same fixture stage 5b actuates against, so what is
+/// bound here is the thing that was rendered and not a second idea of
+/// what a record is. The `TempDir` is returned because it must outlive
+/// the container it holds.
+fn prepared_experiment() -> (tempfile::TempDir, PreparedExperiment) {
+    let dir = container::glimmer();
+    let snapshot = PricedRecord::new(dir.path())
+        .with_protocol(fixtures::protocol())
+        .build();
+    let prepared = PreparedExperiment::of(&snapshot);
+    (dir, prepared)
+}
+
+fn authorised_key(prepared: &PreparedExperiment) -> MeasurementKey {
+    prepared
+        .request()
+        .expect("the rung 5 snapshot prepares a ready experiment")
+        .key()
+        .clone()
+}
+
+fn observed_of(key: MeasurementKey, kl_p99: f64) -> Observed {
+    Observed {
+        key,
+        observation: fixtures::authority_reading(kl_p99, 3),
+        verified: VerifiedFacts::default(),
+        execution_note: "ran 8 sequences on cpu".to_string(),
+    }
+}
+
 fn artifact() -> MeasurementArtifact {
-    MeasurementArtifact::sealing(
-        fixtures::key_for(&fixtures::p(), EvidenceScale::Authority),
-        "teacher-forced",
-        "container-digest-abc",
-        fixtures::authority_reading(0.01, 3),
-        VerifiedFacts::default(),
-        "ran 8 sequences on cpu",
-    )
-    .expect("a well formed run seals")
+    let (_dir, prepared) = prepared_experiment();
+    let key = authorised_key(&prepared);
+    MeasurementArtifact::from_execution(&prepared, &observed_of(key, 0.01))
+        .expect("an observation of the authorised experiment binds")
 }
 
 #[test]
-fn a_sealed_artifact_verifies_against_its_own_contents() {
+fn a_bound_artifact_verifies_against_its_own_contents() {
     let sealed = artifact();
     sealed.verify_seal().expect("nothing has changed since it was sealed");
-    // And the seal is over the contents, not a constant: a different run
-    // of the same shape seals differently.
-    let other = MeasurementArtifact::sealing(
-        fixtures::key_for(&fixtures::p(), EvidenceScale::Authority),
-        "teacher-forced",
-        "container-digest-abc",
-        fixtures::authority_reading(0.02, 3),
-        VerifiedFacts::default(),
-        "ran 8 sequences on cpu",
-    )
-    .expect("seals");
+
+    // And the seal is over the contents, not a constant: the same
+    // authorised experiment observed differently seals differently.
+    let (_dir, prepared) = prepared_experiment();
+    let key = authorised_key(&prepared);
+    let other = MeasurementArtifact::from_execution(&prepared, &observed_of(key, 0.02))
+        .expect("binds");
     assert_ne!(
         sealed.seal(),
         other.seal(),
@@ -68,6 +94,57 @@ fn an_artifact_changed_in_round_trip_is_refused_naming_both_seals() {
 }
 
 #[test]
+fn a_well_formed_observation_of_another_experiment_produces_no_artifact() {
+    let (_dir, prepared) = prepared_experiment();
+    // Nothing is wrong with this observation. It is well formed, it has a
+    // real reading, it verifies what a run verifies. It is simply an
+    // observation of a DIFFERENT experiment from the one authorised — which
+    // is exactly the substitution a sealed artifact would later launder
+    // into a record.
+    let elsewhere = fixtures::key_for(&fixtures::s1(), EvidenceScale::Authority);
+    let authorised = authorised_key(&prepared);
+    assert_ne!(elsewhere, authorised, "the fixture must name another experiment");
+
+    let refusal = MeasurementArtifact::from_execution(&prepared, &observed_of(elsewhere, 0.01))
+        .expect_err("an observation of another experiment may not become an artifact");
+
+    let ArtifactRefusal::SubstitutedExperiment { expected, observed } = &refusal else {
+        panic!("expected SubstitutedExperiment, got {refusal:?}");
+    };
+    assert_ne!(expected, observed);
+    let said = refusal.to_string();
+    assert!(
+        said.contains(expected.as_str()) && said.contains(observed.as_str()),
+        "the refusal must name the experiment authorised AND the one observed, \
+         and this one said: {said}"
+    );
+}
+
+#[test]
+fn the_same_observation_binds_once_its_key_is_corrected() {
+    // The companion to the hostile arm, and the reason it proves anything:
+    // the observation above was not rejected for being malformed. Correct
+    // ONLY the key and the identical reading binds.
+    let (_dir, prepared) = prepared_experiment();
+    let rejected = observed_of(
+        fixtures::key_for(&fixtures::s1(), EvidenceScale::Authority),
+        0.01,
+    );
+    assert!(MeasurementArtifact::from_execution(&prepared, &rejected).is_err());
+
+    let corrected = Observed {
+        key: authorised_key(&prepared),
+        ..rejected.clone()
+    };
+    let bound = MeasurementArtifact::from_execution(&prepared, &corrected)
+        .expect("the same observation, correctly keyed, binds");
+
+    assert_eq!(bound.observation(), &rejected.observation);
+    assert_eq!(bound.execution_note(), rejected.execution_note);
+    bound.verify_seal().expect("and seals");
+}
+
+#[test]
 fn the_artifact_carries_no_field_a_runner_could_smuggle_a_verdict_through() {
     let wire = serde_json::to_value(artifact()).expect("serialises");
     let object = wire.as_object().expect("an artifact is an object");
@@ -82,7 +159,7 @@ fn the_artifact_carries_no_field_a_runner_could_smuggle_a_verdict_through() {
             "observation",
             "procedure",
             "seal",
-            "source_digest",
+            "source_semantic_digest",
             "verified",
         ],
         "arm 10 prefers structural impossibility to 'ignored': a verdict, rank, \
@@ -90,4 +167,15 @@ fn the_artifact_carries_no_field_a_runner_could_smuggle_a_verdict_through() {
          assertion is failing because a field was added, the question is whether a \
          runner could put a conclusion in it — not whether to widen the list."
     );
+}
+
+#[test]
+fn the_procedure_and_source_identity_come_from_the_request_not_the_run() {
+    // Structural, and asserted so it stays structural: the executor has no
+    // way to state either, so neither can be substituted by a run.
+    let (_dir, prepared) = prepared_experiment();
+    let request = prepared.request().expect("ready");
+    let bound = artifact();
+    assert_eq!(bound.procedure(), request.procedure());
+    assert_eq!(bound.source_semantic_digest(), request.model().semantic_digest());
 }
