@@ -57,7 +57,8 @@ impl Fixture {
             }
         }
         let surface = TensorSurface::new(entries.into_values()).unwrap();
-        let spec = RepresentSpec::nvfp4();
+        let mut spec = RepresentSpec::nvfp4();
+        spec.protect = spec.protect.layers(1, 1);
         let mut base_map =
             PrecisionMap::from_policy(spec.map_name(), &spec.encoding, &spec.roles, &spec.protect);
         base_map.exceptions.push(Exception {
@@ -70,7 +71,7 @@ impl Fixture {
                 "compile-all",
                 Exception {
                     projection: None,
-                    layers: None,
+                    layers: Some((0, 0)),
                     encoding: Some(spec.encoding.clone()),
                 },
             ),
@@ -78,7 +79,7 @@ impl Fixture {
                 "compile-q",
                 Exception {
                     projection: Some("q_proj".into()),
-                    layers: None,
+                    layers: Some((0, 0)),
                     encoding: Some(spec.encoding.clone()),
                 },
             ),
@@ -137,6 +138,15 @@ impl Fixture {
             actual.established(),
             prepared.request().unwrap().key().state()
         );
+        let compiled: Vec<_> = actual
+            .state()
+            .decisions()
+            .decisions()
+            .iter()
+            .filter(|d| matches!(d.encoding, state::ResolvedEncoding::Compiled(_)))
+            .collect();
+        assert_eq!(compiled.len(), 7);
+        assert!(compiled.iter().all(|d| d.tensor.starts_with("0.")));
         Self {
             dir,
             source,
@@ -159,9 +169,23 @@ impl Fixture {
             key: self.prepared.request().unwrap().key().clone(),
             observation,
             verified: VerifiedFacts {
+                compiled_layers: vec![0],
+                compiled_projections: [
+                    "down_proj",
+                    "gate_proj",
+                    "up_proj",
+                    "k_proj",
+                    "o_proj",
+                    "q_proj",
+                    "v_proj",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+                attribution_checked_layers: vec![0],
+                seal_checked_operands: 7,
+                invariant_neighbour_layer: Some(1),
                 positions: 8,
                 gate_evaluated: self.snapshot.gate().id.clone(),
-                ..Default::default()
             },
             execution_note: "tiny deterministic observation fixture".into(),
         }
@@ -208,9 +232,99 @@ fn refused_without_change(
 }
 
 #[test]
+fn freshly_sealed_incomplete_run_with_correct_positions_and_gate_refuses() {
+    let f = Fixture::new();
+    let mut observed = f.observed(0.01);
+    observed.verified = VerifiedFacts {
+        positions: 8,
+        gate_evaluated: f.snapshot.gate().id.clone(),
+        ..Default::default()
+    };
+    assert!(!observed.verified.complete());
+    let artifact =
+        MeasurementArtifact::from_execution(&f.prepared, &observed, &f.evidence()).unwrap();
+    artifact.verify_seal().unwrap();
+    let refusal = refused_without_change(&f, &mut f.snapshot.clone(), &artifact);
+    let shown = refusal.to_string();
+    for obligation in [
+        "compiled layers",
+        "compiled projections",
+        "attribution",
+        "seal/read",
+        "invariant neighbour",
+    ] {
+        assert!(shown.contains(obligation), "{shown} omitted {obligation}");
+    }
+}
+
+#[test]
+fn each_missing_run_validity_obligation_refuses_transactionally() {
+    let f = Fixture::new();
+    for obligation in [
+        "compiled layers",
+        "compiled projections",
+        "attribution checks covering compiled layers",
+        "seal/read witness",
+        "invariant neighbour",
+        "non-zero positions",
+        "gate",
+        "partial attribution",
+        "all",
+    ] {
+        let mut observed = f.observed(0.01);
+        assert!(observed.verified.complete());
+        let report = &mut observed.verified;
+        match obligation {
+            "compiled layers" => report.compiled_layers.clear(),
+            "compiled projections" => report.compiled_projections.clear(),
+            "attribution checks covering compiled layers" => {
+                report.attribution_checked_layers.clear()
+            }
+            "seal/read witness" => report.seal_checked_operands = 0,
+            "invariant neighbour" => report.invariant_neighbour_layer = None,
+            "non-zero positions" => report.positions = 0,
+            "gate" => report.gate_evaluated.clear(),
+            "partial attribution" => report.compiled_layers.push(1),
+            "all" => *report = VerifiedFacts::default(),
+            _ => unreachable!(),
+        }
+        assert!(!report.complete());
+        let artifact =
+            MeasurementArtifact::from_execution(&f.prepared, &observed, &f.evidence()).unwrap();
+        artifact.verify_seal().unwrap();
+        let refusal = refused_without_change(&f, &mut f.snapshot.clone(), &artifact);
+        let IngestionRefusal::IncompleteRun {
+            missing,
+            observed: actual,
+        } = &refusal
+        else {
+            panic!("{obligation}: {refusal}");
+        };
+        assert_eq!(actual.as_ref(), &observed.verified);
+        if obligation == "all" {
+            assert_eq!(missing.len(), 7);
+        } else {
+            let expected = if obligation == "partial attribution" {
+                "attribution checks covering compiled layers"
+            } else {
+                obligation
+            };
+            assert!(missing.iter().any(|m| m == expected), "{refusal}");
+        }
+        for absent in missing {
+            assert!(refusal.to_string().contains(absent), "{refusal}");
+        }
+        assert!(refusal
+            .to_string()
+            .contains(&format!("{:?}", observed.verified)));
+    }
+}
+
+#[test]
 fn accepted_once_and_identical_duplicate_is_transactionally_idempotent() {
     let f = Fixture::new();
     let a = f.artifact(0.01);
+    assert!(a.verified().complete());
     let mut snapshot = f.snapshot.clone();
     let first = ingest(&mut snapshot, &f.prepared, &a, &f.sources()).unwrap();
     assert!(first.recorded);
@@ -708,6 +822,11 @@ fn every_ingestion_refusal_preserves_its_actionable_authority() {
                 observed,
             } => vec![what.clone(), expected.clone(), observed.clone()],
             IngestionRefusal::Malformed(detail) => vec![detail.clone()],
+            IngestionRefusal::IncompleteRun { missing, observed } => {
+                let mut required = missing.clone();
+                required.push(format!("{observed:?}"));
+                required
+            }
             IngestionRefusal::Conflict(c) => vec![
                 format!("{:?}", c.key),
                 format!("{:?}", c.expected),
@@ -732,6 +851,10 @@ fn every_ingestion_refusal_preserves_its_actionable_authority() {
             observed: "observed-bank".into(),
         },
         IngestionRefusal::Malformed("missing input rows".into()),
+        IngestionRefusal::IncompleteRun {
+            missing: vec!["compiled layers".into(), "seal/read witness".into()],
+            observed: Box::default(),
+        },
         IngestionRefusal::Conflict(Box::new(state::key::MeasurementConflict {
             key: f.observed(0.01).key,
             expected: f.observed(0.01).observation,

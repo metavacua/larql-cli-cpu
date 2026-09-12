@@ -8,7 +8,7 @@ use super::super::{
     candidate_authority::CandidateAuthorityRefusal,
     compile::hash_bytes,
     compiler::read_source_identity,
-    measure::MeasurementProcedure,
+    measure::{outcome::VerifiedFacts, MeasurementProcedure},
     quality::{gate_by_id, QualityBank},
     state::{
         key::{MeasurementConflict, MeasurementKey},
@@ -39,6 +39,11 @@ pub enum IngestionRefusal {
     },
     #[error("measurement artifact is malformed or incomplete: {0}")]
     Malformed(String),
+    #[error("run validity requires a complete VerifiedFacts report; missing obligations: {missing:?}; observed {observed:?}")]
+    IncompleteRun {
+        missing: Vec<String>,
+        observed: Box<VerifiedFacts>,
+    },
     #[error("{0}")]
     Conflict(Box<MeasurementConflict>),
 }
@@ -110,6 +115,7 @@ pub fn validate(
     sources: &IngestionSources<'_>,
 ) -> Result<AcceptedMeasurement, IngestionRefusal> {
     artifact.verify_seal().map_err(IngestionRefusal::Artifact)?;
+    require_complete_run(artifact.verified())?;
     snapshot.check_schema().map_err(invalid)?;
     let request = prepared
         .request()
@@ -276,6 +282,41 @@ pub fn validate(
         source_semantic_digest,
         bank_manifest_sha256,
         artifact_seal: artifact.seal().into(),
+    })
+}
+
+fn require_complete_run(observed: &VerifiedFacts) -> Result<(), IngestionRefusal> {
+    // Preserve the measurement layer's normative predicate. A complete
+    // report is necessary, not independent proof of historical execution.
+    if observed.complete() {
+        return Ok(());
+    }
+    let missing = [
+        (observed.compiled_layers.is_empty(), "compiled layers"),
+        (
+            observed.compiled_projections.is_empty(),
+            "compiled projections",
+        ),
+        (
+            observed.compiled_layers.is_empty()
+                || observed.attribution_checked_layers.len() != observed.compiled_layers.len(),
+            "attribution checks covering compiled layers",
+        ),
+        (observed.seal_checked_operands == 0, "seal/read witness"),
+        (
+            observed.invariant_neighbour_layer.is_none(),
+            "invariant neighbour",
+        ),
+        (observed.positions == 0, "non-zero positions"),
+        (observed.gate_evaluated.is_empty(), "gate"),
+    ]
+    .into_iter()
+    .filter(|(absent, _)| *absent)
+    .map(|(_, obligation)| obligation.to_owned())
+    .collect();
+    Err(IngestionRefusal::IncompleteRun {
+        missing,
+        observed: Box::new(observed.clone()),
     })
 }
 
