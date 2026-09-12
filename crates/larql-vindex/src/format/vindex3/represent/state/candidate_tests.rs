@@ -344,7 +344,7 @@ fn dedup_is_on_the_intended_experiment_and_not_on_the_state() {
         .realize(&applied(&["E24", "K25"]))
         .expect("realize");
     rig.measurements
-        .record(
+        .record_fixture(
             intent(EvidenceScale::Diagnostic).key_for(child.physical_id()),
             observation(),
         )
@@ -399,7 +399,7 @@ fn an_authority_refused_action_is_still_offered_from_another_state() {
         .realize(&applied(&["E24", "M26"]))
         .expect("realize");
     rig.measurements
-        .record(
+        .record_fixture(
             intent(EvidenceScale::Authority).key_for(refused.physical_id()),
             observation(),
         )

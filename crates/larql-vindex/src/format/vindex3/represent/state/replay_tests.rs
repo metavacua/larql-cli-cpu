@@ -272,13 +272,13 @@ fn recorded() -> SearchSnapshot {
 
     let mut measurements = MeasurementRegistry::new();
     measurements
-        .record(
+        .record_fixture(
             intent(EvidenceScale::Authority).key_for(root.physical_id()),
             reading(0.0),
         )
         .expect("record");
     measurements
-        .record(
+        .record_fixture(
             intent(EvidenceScale::Authority).key_for(e24.physical_id()),
             reading(1.2e-3),
         )
