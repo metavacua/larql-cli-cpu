@@ -127,6 +127,20 @@
         "why_it_is_recorded_rather_than_erased": "The confusion is evidence about this codebase. 'The actuation path sees a path' and 'no candidate format exists' are easy to conflate, and `overlay` is overloaded across the represent, server and LQL planes. A future reader searching the same way will make the same mistake, and the correction is more useful to them than a clean-looking history.",
         "what_did_not_change": "The disposition. Arm 4 is still BLOCKED, `establish` still refuses every candidate, and the accepting path is still unreachable. Only the REASON is corrected, from absent authority to incomplete authority \u2014 and the repair got smaller."
       }
+    },
+    "OPT6-N3": {
+      "date": "2026-09-12",
+      "title": "Bank manifest identity does not bind the physical input rows or their execution order.",
+      "evidence": "scripts/kimi_quality_bank_export.py writes token_ids, dimensions and provenance to manifest.json but no seq_*.f32 digests. DeclaredArtifacts::corpus verifies only manifest bytes. TeacherForcedExecutor forwards only sample count, and sequence_embeddings reads seq_0.f32 through seq_(N-1).f32 regardless of EvidenceBank.samples.",
+      "falsifier": "Change a seq_0.f32 byte with manifest and requested bank identity unchanged: manifest-only ingestion would still accept. A non-prefix or reordered sample declaration can also name a different experiment from the one the current procedure executes.",
+      "repair_frozen_before_bank_implementation": "Extend the existing exporter manifest with a versioned payload-authority field and per-sequence file length/SHA-256, computed from actual written files. Independently reread each selected payload during ingestion, verify dimensions and manifest token/sample inventory, and require the exact seq-000..seq-(N-1) prefix the current procedure executes. Refuse legacy unsealed banks and unsupported sample ordering rather than inventing authority. No EvidenceBankId or RepresentationStateId canonicalization/version changes. Newly sealed exports naturally acquire a new manifest digest and bank ID.",
+      "required_controls": [
+        "Changed row byte with unchanged manifest/key refuses",
+        "Correctly sealed rows and matching prefix accept",
+        "Reordered or non-prefix declaration refuses even when its key self-checks",
+        "Missing payload bindings and inconsistent dimensions refuse without scientific mutation"
+      ],
+      "scope": "A small extension of the existing bank export and an independent reader, not a new evidence format or a change to numerical observations."
     }
   },
   "resumption": {
