@@ -282,7 +282,7 @@ pub fn rung5_snapshot() -> SearchSnapshot {
         (s2(), 4.0563e-3, 1309),
     ] {
         measurements
-            .record(
+            .record_fixture(
                 key_for(&s, EvidenceScale::Authority),
                 authority_reading(kl, flips),
             )
@@ -312,7 +312,7 @@ pub fn rung5_with_diagnostic_on_s1() -> SearchSnapshot {
     let base = rung5_snapshot();
     let mut measurements = base.measurements().clone();
     measurements
-        .record(
+        .record_fixture(
             key_for(&s1(), EvidenceScale::Diagnostic),
             authority_reading(3.3532e-3, 1427),
         )

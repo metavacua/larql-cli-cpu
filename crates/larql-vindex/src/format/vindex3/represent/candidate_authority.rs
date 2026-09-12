@@ -198,6 +198,31 @@ pub(crate) fn finish(
 /// Open only the persisted artifact. This path never consults compiler
 /// memory, a locator's state-id key, or a requested PrecisionMap.
 pub fn read_candidate(path: &Path) -> Result<RepresentationState, CandidateAuthorityRefusal> {
+    Ok(read_candidate_evidence(path)?.state)
+}
+
+/// Evidence returned by the same independent read that established the state.
+/// Fields are private and this type cannot be deserialized or caller-constructed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CandidateEvidence {
+    state: RepresentationState,
+    binding_sha256: String,
+}
+
+impl CandidateEvidence {
+    pub fn state(&self) -> &RepresentationState {
+        &self.state
+    }
+    pub fn binding_sha256(&self) -> &str {
+        &self.binding_sha256
+    }
+}
+
+/// Establish both the state and its verified artifact binding in one read.
+/// Ingestion uses the binding to check the artifact captured at execution.
+pub fn read_candidate_evidence(
+    path: &Path,
+) -> Result<CandidateEvidence, CandidateAuthorityRefusal> {
     let sidecar = path.join(CANDIDATE_INDEX_FILE);
     let is_sidecar = sidecar.try_exists().map_err(invalid)?;
     let file = if is_sidecar {
@@ -346,7 +371,10 @@ pub fn read_candidate(path: &Path) -> Result<RepresentationState, CandidateAutho
             recomputed: state.id().clone(),
         });
     }
-    Ok(state)
+    Ok(CandidateEvidence {
+        state,
+        binding_sha256: a.binding_sha256.clone(),
+    })
 }
 
 /// Establish validity first, then compare experiment identity. A valid Y

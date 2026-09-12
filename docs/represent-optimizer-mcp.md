@@ -1738,6 +1738,15 @@ and valid-Y/requested-X refusal. Scientific ingestion and the closed-loop
 witness remain separate transitions; establishing candidate validity does not
 append evidence or grant a promotion.
 
+Transition B now supplies [deterministic ingestion](../crates/larql-vindex/src/format/vindex3/represent/ingest.rs).
+It independently reopens candidate, source and bank authority before granting an
+`AcceptedMeasurement`, then commits a new observation atomically. Identical
+replays are no-ops; conflicting readings return a typed refusal with both
+observations. The [implementation notes](represent/forecasts/opt-6-ingestion-notes.json)
+record the valid-Y/requested-X witness and the additional bank-payload gap found
+during implementation. Legacy unsealed banks and sample orders the current
+executor cannot perform refuse. The closed-loop witness remains Transition C.
+
 Provenance lives on **incoming edges**, not baked into the node:
 
 ```text

@@ -499,7 +499,7 @@ fn an_observation_of_the_state_reaches_every_route_to_it() {
         .realize(&applied(&["E24", "K25"]))
         .expect("realize");
     rig.measurements
-        .record(
+        .record_fixture(
             intent(EvidenceScale::Diagnostic).key_for(shared.physical_id()),
             observation(1.0e-3),
         )
@@ -599,7 +599,7 @@ fn a_measured_parent_contributes_its_whole_standing_not_a_number() {
 
     let mut measurements = MeasurementRegistry::new();
     measurements
-        .record(
+        .record_fixture(
             intent(EvidenceScale::Authority).key_for(parent.physical_id()),
             observation(3.3532e-3),
         )
@@ -631,7 +631,7 @@ fn a_diagnostic_reading_of_the_parent_is_not_its_standing() {
 
     let mut measurements = MeasurementRegistry::new();
     measurements
-        .record(
+        .record_fixture(
             intent(EvidenceScale::Diagnostic).key_for(parent.physical_id()),
             observation(3.3532e-3),
         )

@@ -10,13 +10,14 @@ use super::super::compile::hash_bytes;
 use super::super::measure::outcome::VerifiedFacts;
 use super::super::quality::QualityBank;
 use super::super::state::key::MeasurementKey;
+use super::state_evidence::EstablishedState;
 
 /// **What a run produced, sealed against its own contents.**
 ///
 /// Immutable by construction: every field is private, there is no
-/// setter, and the only way to obtain one is [`MeasurementArtifact::sealing`],
-/// which computes a seal over everything it binds. A caller cannot hold
-/// one and change what it says.
+/// setter. [`MeasurementArtifact::from_execution`] constructs and seals a
+/// record; deserialization restores an untrusted claim that ingestion must
+/// validate. A caller cannot mutate an existing instance in place.
 ///
 /// # What it deliberately cannot hold
 ///
@@ -38,6 +39,7 @@ use super::super::state::key::MeasurementKey;
 /// a valid seal is precisely the condition under which they become
 /// worth asking.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MeasurementArtifact {
     /// The experiment this is an observation OF, as the run restated it.
     key: MeasurementKey,
@@ -56,6 +58,8 @@ pub struct MeasurementArtifact {
     /// arm 5 refuse artifacts whose container is semantically the one
     /// authorised, which is a false refusal dressed as rigour.
     source_semantic_digest: String,
+    /// Independently read artifact binding captured with the observation.
+    candidate_authority_digest: String,
     observation: QualityBank,
     /// Every validity condition the run checked. The executor's own
     /// account of itself: evidence to be re-derived against, never an
@@ -75,6 +79,7 @@ struct Sealed<'a> {
     key: &'a MeasurementKey,
     procedure: &'a str,
     source_semantic_digest: &'a str,
+    candidate_authority_digest: &'a str,
     observation: &'a QualityBank,
     verified: &'a VerifiedFacts,
     execution_note: &'a str,
@@ -132,16 +137,14 @@ impl fmt::Display for ArtifactRefusal {
 impl MeasurementArtifact {
     /// Seal a run's output into an artifact.
     ///
-    /// PRIVATE, and that is the point. A caller who could hand this a
-    /// `MeasurementKey` of their choosing could produce a sealed artifact
-    /// for an experiment nobody authorised — internally consistent, and
-    /// about nothing. [`MeasurementArtifact::from_execution`] is the only
-    /// way in, so an artifact that EXISTS is already bound to one
-    /// authorised experiment.
+    /// Kept private so the public constructor binds the record to its
+    /// prepared request. Deserialized records can still claim any key;
+    /// ingestion independently validates those claims before acceptance.
     fn sealing(
         key: MeasurementKey,
         procedure: impl Into<String>,
         source_semantic_digest: impl Into<String>,
+        candidate_authority_digest: &str,
         observation: QualityBank,
         verified: VerifiedFacts,
         execution_note: impl Into<String>,
@@ -153,6 +156,7 @@ impl MeasurementArtifact {
             key: &key,
             procedure: &procedure,
             source_semantic_digest: &source_semantic_digest,
+            candidate_authority_digest,
             observation: &observation,
             verified: &verified,
             execution_note: &execution_note,
@@ -161,6 +165,7 @@ impl MeasurementArtifact {
             key,
             procedure,
             source_semantic_digest,
+            candidate_authority_digest: candidate_authority_digest.into(),
             observation,
             verified,
             execution_note,
@@ -169,6 +174,9 @@ impl MeasurementArtifact {
     }
 
     /// **Bind an observation to the experiment that authorised it.**
+    ///
+    /// The candidate binding comes from an independent read captured with the run.
+    /// Ingestion must repeat that read; this captured evidence is not final acceptance.
     ///
     /// The only public constructor. Every field the artifact carries is
     /// taken from exactly one side, so most of the binding is structural
@@ -200,6 +208,7 @@ impl MeasurementArtifact {
     pub fn from_execution(
         prepared: &PreparedExperiment,
         observed: &Observed,
+        candidate: &EstablishedState,
     ) -> Result<Self, ArtifactRefusal> {
         let request = prepared
             .request()
@@ -216,8 +225,8 @@ impl MeasurementArtifact {
 
         if observed.key != *request.key() {
             return Err(ArtifactRefusal::SubstitutedExperiment {
-                expected: request.key().short().to_string(),
-                observed: observed.key.short().to_string(),
+                expected: format!("{:?}", request.key()),
+                observed: format!("{:?}", observed.key),
             });
         }
 
@@ -225,6 +234,7 @@ impl MeasurementArtifact {
             request.key().clone(),
             request.procedure(),
             request.model().semantic_digest(),
+            candidate.candidate_authority_digest(),
             observed.observation.clone(),
             observed.verified.clone(),
             observed.execution_note.clone(),
@@ -241,6 +251,7 @@ impl MeasurementArtifact {
             key: &self.key,
             procedure: &self.procedure,
             source_semantic_digest: &self.source_semantic_digest,
+            candidate_authority_digest: &self.candidate_authority_digest,
             observation: &self.observation,
             verified: &self.verified,
             execution_note: &self.execution_note,
@@ -265,6 +276,10 @@ impl MeasurementArtifact {
 
     pub fn source_semantic_digest(&self) -> &str {
         &self.source_semantic_digest
+    }
+
+    pub fn candidate_authority_digest(&self) -> &str {
+        &self.candidate_authority_digest
     }
 
     pub fn observation(&self) -> &QualityBank {

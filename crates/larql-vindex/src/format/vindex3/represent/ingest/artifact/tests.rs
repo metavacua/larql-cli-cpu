@@ -41,21 +41,22 @@ fn observed_of(key: MeasurementKey, kl_p99: f64) -> Observed {
 fn artifact() -> MeasurementArtifact {
     let (_dir, prepared) = prepared_experiment();
     let key = authorised_key(&prepared);
-    MeasurementArtifact::from_execution(&prepared, &observed_of(key, 0.01))
+    from_execution(&prepared, &observed_of(key, 0.01))
         .expect("an observation of the authorised experiment binds")
 }
 
 #[test]
 fn a_bound_artifact_verifies_against_its_own_contents() {
     let sealed = artifact();
-    sealed.verify_seal().expect("nothing has changed since it was sealed");
+    sealed
+        .verify_seal()
+        .expect("nothing has changed since it was sealed");
 
     // And the seal is over the contents, not a constant: the same
     // authorised experiment observed differently seals differently.
     let (_dir, prepared) = prepared_experiment();
     let key = authorised_key(&prepared);
-    let other = MeasurementArtifact::from_execution(&prepared, &observed_of(key, 0.02))
-        .expect("binds");
+    let other = from_execution(&prepared, &observed_of(key, 0.02)).expect("binds");
     assert_ne!(
         sealed.seal(),
         other.seal(),
@@ -103,9 +104,12 @@ fn a_well_formed_observation_of_another_experiment_produces_no_artifact() {
     // into a record.
     let elsewhere = fixtures::key_for(&fixtures::s1(), EvidenceScale::Authority);
     let authorised = authorised_key(&prepared);
-    assert_ne!(elsewhere, authorised, "the fixture must name another experiment");
+    assert_ne!(
+        elsewhere, authorised,
+        "the fixture must name another experiment"
+    );
 
-    let refusal = MeasurementArtifact::from_execution(&prepared, &observed_of(elsewhere, 0.01))
+    let refusal = from_execution(&prepared, &observed_of(elsewhere, 0.01))
         .expect_err("an observation of another experiment may not become an artifact");
 
     let ArtifactRefusal::SubstitutedExperiment { expected, observed } = &refusal else {
@@ -130,13 +134,13 @@ fn the_same_observation_binds_once_its_key_is_corrected() {
         fixtures::key_for(&fixtures::s1(), EvidenceScale::Authority),
         0.01,
     );
-    assert!(MeasurementArtifact::from_execution(&prepared, &rejected).is_err());
+    assert!(from_execution(&prepared, &rejected).is_err());
 
     let corrected = Observed {
         key: authorised_key(&prepared),
         ..rejected.clone()
     };
-    let bound = MeasurementArtifact::from_execution(&prepared, &corrected)
+    let bound = from_execution(&prepared, &corrected)
         .expect("the same observation, correctly keyed, binds");
 
     assert_eq!(bound.observation(), &rejected.observation);
@@ -154,6 +158,7 @@ fn the_artifact_carries_no_field_a_runner_could_smuggle_a_verdict_through() {
     assert_eq!(
         present,
         vec![
+            "candidate_authority_digest",
             "execution_note",
             "key",
             "observation",
@@ -177,5 +182,70 @@ fn the_procedure_and_source_identity_come_from_the_request_not_the_run() {
     let request = prepared.request().expect("ready");
     let bound = artifact();
     assert_eq!(bound.procedure(), request.procedure());
-    assert_eq!(bound.source_semantic_digest(), request.model().semantic_digest());
+    assert_eq!(
+        bound.source_semantic_digest(),
+        request.model().semantic_digest()
+    );
+}
+
+fn from_execution(
+    prepared: &PreparedExperiment,
+    observed: &Observed,
+) -> Result<MeasurementArtifact, ArtifactRefusal> {
+    let fixture = super::super::tests::Fixture::new();
+    MeasurementArtifact::from_execution(prepared, observed, &fixture.evidence())
+}
+
+#[test]
+fn a_fresh_seal_cannot_make_substituted_authority_acceptable() {
+    use super::super::{ingest, IngestionRefusal};
+    let f = super::super::tests::Fixture::new();
+    for field in ["candidate binding", "source", "procedure"] {
+        let mut a = f.artifact(0.01);
+        match field {
+            "candidate binding" => a.candidate_authority_digest = "another artifact".into(),
+            "source" => a.source_semantic_digest = "stale source".into(),
+            _ => a.procedure = "another-procedure/v1".into(),
+        }
+        a.seal = super::seal_of(&super::Sealed {
+            key: &a.key,
+            procedure: &a.procedure,
+            source_semantic_digest: &a.source_semantic_digest,
+            candidate_authority_digest: &a.candidate_authority_digest,
+            observation: &a.observation,
+            verified: &a.verified,
+            execution_note: &a.execution_note,
+        })
+        .unwrap();
+        a.verify_seal().unwrap();
+        let mut snapshot = f.snapshot.clone();
+        let refusal = ingest(&mut snapshot, &f.prepared, &a, &f.sources()).unwrap_err();
+        assert!(
+            matches!(refusal, IngestionRefusal::Authority { .. }),
+            "{field}: {refusal:?}"
+        );
+        assert_eq!(snapshot, f.snapshot);
+        assert_eq!(
+            snapshot.next_experiment().unwrap(),
+            f.snapshot.next_experiment().unwrap()
+        );
+    }
+}
+
+#[test]
+fn unprepared_experiments_cannot_create_measurement_artifacts() {
+    use super::super::super::actuate::request::RequestRefusal;
+    let f = super::super::tests::Fixture::new();
+    for prepared in [
+        PreparedExperiment::Exhausted,
+        PreparedExperiment::NotSelectable {
+            detail: "unpriced".into(),
+        },
+        PreparedExperiment::NotPreparable(RequestRefusal::NoProtocol),
+    ] {
+        let r = MeasurementArtifact::from_execution(&prepared, &f.observed(0.01), &f.evidence())
+            .unwrap_err();
+        assert!(matches!(r, ArtifactRefusal::NotAuthorised { .. }));
+        assert!(r.to_string().contains("no authorised experiment"));
+    }
 }
