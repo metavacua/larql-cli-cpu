@@ -142,6 +142,14 @@
       ],
       "scope": "A small extension of the existing bank export and an independent reader, not a new evidence format or a change to numerical observations."
     },
+    "OPT6-N5": {
+      "date": "2026-09-12",
+      "finding": "Review found ingestion checked only reported positions and gate, bypassing the existing VerifiedFacts::complete contract. The happy-path fixture itself supplied an incomplete report. Independent persisted input authority does not excuse an executor reporting that required run-validity checks were omitted.",
+      "falsifier": "Freshly seal an otherwise valid observation with correct positions/gate but missing compiled scope, attribution checks, seal/read checks or invariant-neighbour evidence. Before repair, ingestion accepts it. After repair, each omission must refuse without changing the complete snapshot or downstream search outputs.",
+      "repair_frozen_before_implementation": "Require VerifiedFacts::complete before scientific mutation. Return a typed actionable refusal naming the missing obligations and preserving the observed report. Populate the positive tiny fixture with a complete report. Keep independent source/candidate/bank verification and reported position/gate cross-checks; completeness is necessary, not independent proof that the historical execution occurred.",
+      "required_controls": "Fresh-sealed positions/gate-only reproducer; individually omit every complete() obligation; partial attribution coverage; all missing obligations named together; complete positive report still accepted once and identical replay idempotent. Extend the exhaustive refusal rendering witness.",
+      "scope": "Enforce the existing measurement validity contract. No execution replay, identity changes or new candidate-scope interpretation. Deterministic comparison of projection/layer report vocabulary against general representation decisions remains a separate strengthening."
+    },
     "OPT6-N4": {
       "date": "2026-09-12",
       "finding": "read_source_identity reconstructs the container semantic claim from index/graph authority; it does not rehash source segment bytes. Ingestion must verify baseline bytes as well as candidate bytes.",
