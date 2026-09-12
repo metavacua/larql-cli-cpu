@@ -141,6 +141,12 @@
         "Missing payload bindings and inconsistent dimensions refuse without scientific mutation"
       ],
       "scope": "A small extension of the existing bank export and an independent reader, not a new evidence format or a change to numerical observations."
+    },
+    "OPT6-N4": {
+      "date": "2026-09-12",
+      "finding": "read_source_identity reconstructs the container semantic claim from index/graph authority; it does not rehash source segment bytes. Ingestion must verify baseline bytes as well as candidate bytes.",
+      "control": "Replace a baseline segment while preserving index/graph declarations and the original candidate hardlinks. The source declaration and candidate reader remain valid; ingestion must refuse the changed baseline bytes and name expected/observed segment hashes.",
+      "repair": "Reuse inspect_container(source, true) for source graph/directory/header coherence and physical segment hashes before acceptance. This adds physical validation without changing SourceSemanticIdentity."
     }
   },
   "resumption": {
