@@ -1745,7 +1745,17 @@ replays are no-ops; conflicting readings return a typed refusal with both
 observations. The [implementation notes](represent/forecasts/opt-6-ingestion-notes.json)
 record the valid-Y/requested-X witness and the additional bank-payload gap found
 during implementation. Legacy unsealed banks and sample orders the current
-executor cannot perform refuse. The closed-loop witness remains Transition C.
+executor cannot perform refuse.
+
+Transition C composes these existing entry points in a [paired witness](../crates/larql-vindex/src/format/vindex3/represent/ingest/loop_tests.rs):
+the same persisted S0 selects A; accepted evidence makes A `AlreadyObserved`
+and the next request becomes the predetermined B. Freshly sealed incomplete
+evidence or a valid alternative candidate supplied for A leaves S0 and selection
+A unchanged. Reopening S1 and replaying A preserves both its single observation
+and selection B. The [forecast](represent/forecasts/represent-loop-1-c.json)
+and [notes](represent/forecasts/represent-loop-1-c-notes.json) bound this to
+control-plane composition with synthetic observations over real persisted
+artifacts, not a numerical execution or K3 performance claim.
 
 Provenance lives on **incoming edges**, not baked into the node:
 
