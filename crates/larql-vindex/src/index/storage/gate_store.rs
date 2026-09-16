@@ -110,11 +110,29 @@ impl Clone for GateStore {
 /// Matrix-vector multiply: view[N, hidden] × vec[hidden] → scores[N].
 /// All compute goes through larql-compute.
 pub(crate) fn gemv(view: &ArrayView2<f32>, vec: &Array1<f32>) -> Array1<f32> {
-    let hidden = vec.len();
-    let x = vec.view().into_shape_with_order((1, hidden)).unwrap();
-    let cpu = larql_compute::CpuBackend;
-    let result = cpu.matmul_transb(x, *view);
-    Array1::from_vec(result.into_raw_vec_and_offset().0)
+    // `gate[N, hidden] . vec[hidden] -> [N]`, expressed as a real
+    // matrix-vector product rather than a 1-row matmul against a
+    // transpose.
+    //
+    // The previous form was `matmul_transb(vec.into_shape((1, hidden)),
+    // gate)`, i.e. `a.dot(&b.t())` with `a` shaped [1, hidden]. ndarray
+    // only dispatches to BLAS when the operand layouts qualify, and that
+    // shape does not reach `sgemv`: it fell to ndarray's own path.
+    // Measured on one layer of a real BitNet 2B browse vindex
+    // (6912 features x 2560 dims, f32 cached):
+    //
+    //   a.dot(&b.t())     15.5 ms/layer    4.6 GB/s
+    //   gate.dot(&vec)     3.3 ms/layer   21.4 GB/s   <- this
+    //   manual row dot     9.8 ms/layer    7.2 GB/s
+    //
+    // 4.7x, from removing the transpose. `describe()` scans 12-30 layers
+    // per call, so this is the dominant term in its latency.
+    //
+    // `Array2::dot(&Array1)` is ndarray's gemv entry point and hits
+    // `cblas_sgemv` for f32 with a standard-layout operand, which the
+    // gate view is (contiguous rows straight out of the mmap or the f16
+    // decode cache).
+    view.dot(vec)
 }
 
 /// Gate scores batch: gate[N, hidden] × x[seq, hidden]^T → [N, seq].
@@ -308,9 +326,21 @@ impl VectorIndex {
         None
     }
 
-    /// Zero-copy gate KNN scoring for the f32 mmap path — no
-    /// allocation, no clone. Returns `None` if not on the f32 mmap
-    /// path; caller falls back to `resolve_gate`.
+    /// Zero-copy gate KNN scoring for the mmap path — no allocation of a
+    /// gate copy. Returns `None` if the layer cannot be scored here;
+    /// caller falls back to `resolve_gate`.
+    ///
+    /// Handles f32 (direct reinterpret of the mmap) *and* f16 (score out of
+    /// the decode cache in place). The f16 arm is the load-bearing one:
+    /// without it every f16 layer fell through to `resolve_gate`, which
+    /// ends in `cache[layer].as_ref().unwrap().clone()` — a full f32 copy
+    /// of the layer's gate matrix on **every query**. At 6912 features ×
+    /// 2560 dims that is ~71 MB cloned per layer, so a 20-layer
+    /// `describe()` spent ~1.4 GB on allocation and memcpy before scoring
+    /// a single feature, and another ~1.4 GB reading it back in `gemv`.
+    /// Measured effect on a real 2B browse container: `describe()` 288 ms
+    /// → see `bench_graph.csv`. The decode itself was already cached; it
+    /// was purely the copy.
     pub(crate) fn gate_knn_mmap_fast(
         &self,
         layer: usize,
@@ -354,6 +384,54 @@ impl VectorIndex {
                     .unwrap();
                 return Some(gemv(&arr, residual));
             }
+        }
+
+        // f16 mmap: score out of the decode cache without copying it.
+        //
+        // Decoding on a miss is unavoidable (it is what the cache is for),
+        // but on a hit the previous path cloned the whole layer purely to
+        // hand an owned `Vec` back to the caller. `gemv` only needs a view,
+        // so take one over the cached buffer while the lock is held.
+        //
+        // The lock is held across `gemv`. That is a deliberate trade: the
+        // alternative is cloning to release it early, which is exactly the
+        // cost being removed here. Contention is per *layer*, and a walk
+        // visits layers in sequence, so concurrent queries serialise only
+        // where they are on the same layer at the same instant.
+        // ponytail: if that shows up under high concurrency, switch
+        // `f16_decode_cache` to `RwLock<Vec<Option<Arc<Vec<f32>>>>>` and
+        // clone the `Arc` (cheap) rather than the data.
+        if self.storage.gate_dtype() == crate::config::dtype::StorageDtype::F16 {
+            let view = self.storage.gate_layer_view(layer)?;
+            if view.slice.num_features == 0 {
+                return None;
+            }
+            let bpf = 2;
+            let byte_offset = view.slice.float_offset * bpf;
+            let byte_end = byte_offset + view.slice.num_features * self.hidden_size * bpf;
+            let mmap: &[u8] = view.bytes.as_ref();
+            if byte_end > mmap.len() {
+                return None;
+            }
+
+            let mut cache = self.gate.f16_decode_cache.lock().unwrap();
+            if cache.len() <= layer {
+                cache.resize(layer + 1, None);
+            }
+            let miss = cache[layer].is_none();
+            if miss {
+                cache[layer] = Some(larql_models::quant::half::decode_f16(
+                    &mmap[byte_offset..byte_end],
+                ));
+            }
+            self.touch_gate_cache_lru(layer, miss, &mut cache);
+            let data = cache[layer].as_ref()?;
+            let arr = ArrayView2::from_shape(
+                (view.slice.num_features, self.hidden_size),
+                data.as_slice(),
+            )
+            .ok()?;
+            return Some(gemv(&arr, residual));
         }
 
         None
