@@ -36,7 +36,14 @@ pub struct GateStore {
     /// Per-layer gate vectors (heap mode).
     pub gate_vectors: Vec<Option<Array2<f32>>>,
     /// Lazy decode cache for f16 gate vectors.
-    pub f16_decode_cache: Mutex<Vec<Option<Vec<f32>>>>,
+    ///
+    /// `Arc` per layer so a reader can take a cheap handle and release the
+    /// mutex *before* scoring. Holding the lock across `gemv` would
+    /// serialise `PatchedVindex::walk`'s rayon-parallel layers against each
+    /// other, which is the whole point of parallelising them; cloning the
+    /// data instead would reintroduce the ~71 MB/layer copy this cache
+    /// exists to avoid. An `Arc` clone is a refcount bump.
+    pub f16_decode_cache: Mutex<Vec<Option<std::sync::Arc<Vec<f32>>>>>,
     /// LRU queue for `f16_decode_cache`. Back is oldest, front is newest.
     pub gate_cache_lru: Mutex<std::collections::VecDeque<usize>>,
     /// Cap on live entries in `f16_decode_cache`. 0 = unlimited.
@@ -223,7 +230,7 @@ impl VectorIndex {
         &self,
         layer: usize,
         just_inserted: bool,
-        cache: &mut [Option<Vec<f32>>],
+        cache: &mut [Option<std::sync::Arc<Vec<f32>>>],
     ) {
         let max = self
             .gate
@@ -304,6 +311,10 @@ impl VectorIndex {
                     }
                 }
                 crate::config::dtype::StorageDtype::F16 => {
+                    // `GateData` owns its buffer, so this arm still copies.
+                    // It is the slow path: `gate_knn_mmap_fast` handles f16
+                    // without copying and is what the scan actually takes.
+                    // Reached only by callers that need an owned matrix.
                     let mut cache = self.gate.f16_decode_cache.lock().unwrap();
                     if cache.len() <= layer {
                         cache.resize(layer + 1, None);
@@ -311,10 +322,12 @@ impl VectorIndex {
                     let miss = cache[layer].is_none();
                     if miss {
                         let raw = &mmap[byte_offset..byte_end];
-                        cache[layer] = Some(larql_models::quant::half::decode_f16(raw));
+                        cache[layer] = Some(std::sync::Arc::new(
+                            larql_models::quant::half::decode_f16(raw),
+                        ));
                     }
                     self.touch_gate_cache_lru(layer, miss, &mut cache);
-                    cache[layer].as_ref().unwrap().clone()
+                    cache[layer].as_ref().unwrap().as_ref().clone()
                 }
             };
             return Some(GateData {
@@ -393,14 +406,12 @@ impl VectorIndex {
         // hand an owned `Vec` back to the caller. `gemv` only needs a view,
         // so take one over the cached buffer while the lock is held.
         //
-        // The lock is held across `gemv`. That is a deliberate trade: the
-        // alternative is cloning to release it early, which is exactly the
-        // cost being removed here. Contention is per *layer*, and a walk
-        // visits layers in sequence, so concurrent queries serialise only
-        // where they are on the same layer at the same instant.
-        // ponytail: if that shows up under high concurrency, switch
-        // `f16_decode_cache` to `RwLock<Vec<Option<Arc<Vec<f32>>>>>` and
-        // clone the `Arc` (cheap) rather than the data.
+        // The lock is released before `gemv`: the cache holds an `Arc` per
+        // layer, so a reader takes a refcount bump and scores outside the
+        // critical section. Holding it across `gemv` would serialise
+        // `PatchedVindex::walk`'s rayon-parallel layers, and cloning the
+        // buffer to release early would reintroduce the ~71 MB/layer copy
+        // this path exists to remove.
         if self.storage.gate_dtype() == crate::config::dtype::StorageDtype::F16 {
             let view = self.storage.gate_layer_view(layer)?;
             if view.slice.num_features == 0 {
@@ -414,18 +425,20 @@ impl VectorIndex {
                 return None;
             }
 
-            let mut cache = self.gate.f16_decode_cache.lock().unwrap();
-            if cache.len() <= layer {
-                cache.resize(layer + 1, None);
-            }
-            let miss = cache[layer].is_none();
-            if miss {
-                cache[layer] = Some(larql_models::quant::half::decode_f16(
-                    &mmap[byte_offset..byte_end],
-                ));
-            }
-            self.touch_gate_cache_lru(layer, miss, &mut cache);
-            let data = cache[layer].as_ref()?;
+            let data = {
+                let mut cache = self.gate.f16_decode_cache.lock().unwrap();
+                if cache.len() <= layer {
+                    cache.resize(layer + 1, None);
+                }
+                let miss = cache[layer].is_none();
+                if miss {
+                    cache[layer] = Some(std::sync::Arc::new(
+                        larql_models::quant::half::decode_f16(&mmap[byte_offset..byte_end]),
+                    ));
+                }
+                self.touch_gate_cache_lru(layer, miss, &mut cache);
+                std::sync::Arc::clone(cache[layer].as_ref()?)
+            };
             let arr = ArrayView2::from_shape(
                 (view.slice.num_features, self.hidden_size),
                 data.as_slice(),
