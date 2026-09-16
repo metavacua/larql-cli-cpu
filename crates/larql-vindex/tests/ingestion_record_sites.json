@@ -225,6 +225,11 @@
     "record"
   ],
   [
+    "larql-server/src/routes/openai/chat/stream.rs",
+    "stream_chat_completion",
+    "record"
+  ],
+  [
     "larql-server/src/routes/openai/chat/v3.rs",
     "respond",
     "record"
@@ -237,6 +242,11 @@
   [
     "larql-server/src/routes/openai/completions.rs",
     "handle_completions",
+    "record"
+  ],
+  [
+    "larql-server/src/routes/openai/completions.rs",
+    "stream_completions",
     "record"
   ],
   [
