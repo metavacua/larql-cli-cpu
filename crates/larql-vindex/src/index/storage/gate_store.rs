@@ -610,4 +610,78 @@ mod gate_cache_lru_tests {
         idx.set_gate_cache_max_layers(0);
         assert_eq!(resident_layers(&idx), 2);
     }
+    #[test]
+    fn f16_fast_path_scores_without_cloning_the_layer() {
+        // The f16 arm of `gate_knn_mmap_fast` is what the gate scan takes on
+        // an f16 container. Before it existed, f16 layers fell through to
+        // `resolve_gate`, which clones the whole decoded layer per query.
+        //
+        // Asserts the arm is reached and correct: the fixture's gate matrix
+        // is a scaled identity, so a query that is 1.0 in every dim scores
+        // every feature at 1.0, and feature 0 is among the top hits.
+        let idx = f16_mmap_index(2, 4, 4);
+        let q = Array1::from_vec(vec![1.0f32; 4]);
+
+        let scores = idx
+            .gate_knn_mmap_fast(0, &q)
+            .expect("f16 mmap layers must be scored by the fast path, not resolve_gate");
+        assert_eq!(scores.len(), 4, "one score per feature");
+        for (i, s) in scores.iter().enumerate() {
+            assert!(
+                (s - 1.0).abs() < 1e-3,
+                "feature {i} scored {s}, expected ~1.0 from the identity fixture"
+            );
+        }
+
+        // Scoring populated the decode cache (the buffer the Arc points at),
+        // so a second call is a cache hit and must agree exactly.
+        assert_eq!(resident_layers(&idx), 1, "scoring must populate the cache");
+        let again = idx.gate_knn_mmap_fast(0, &q).expect("cache hit");
+        assert_eq!(scores, again, "a cache hit must not change the scores");
+    }
+
+    #[test]
+    fn f16_fast_path_agrees_with_the_resolve_gate_slow_path() {
+        // Two routes to the same numbers: the fast path scores in place out
+        // of the Arc'd cache, `resolve_gate` hands back an owned copy that
+        // the caller multiplies itself. They must not disagree -- that would
+        // mean the optimisation changed answers, which is the failure mode
+        // worth a test rather than the speed.
+        let idx = f16_mmap_index(1, 6, 4);
+        let q = Array1::from_vec(vec![0.5f32, 0.25, 0.125, 1.0]);
+
+        let fast = idx.gate_knn_mmap_fast(0, &q).expect("fast path");
+        let gate = idx.resolve_gate(0).expect("slow path");
+        let view = gate.view(idx.hidden_size);
+        let slow = super::gemv(&view, &q);
+
+        assert_eq!(fast.len(), slow.len());
+        for (i, (f, s)) in fast.iter().zip(slow.iter()).enumerate() {
+            assert!(
+                (f - s).abs() < 1e-6,
+                "feature {i}: fast={f} slow={s} -- the paths disagree"
+            );
+        }
+    }
+
+    #[test]
+    fn f16_cache_hands_out_arc_handles_not_copies() {
+        // The cache holds `Arc<Vec<f32>>` specifically so a reader can take a
+        // handle and release the mutex before scoring; holding it across the
+        // multiply would serialise `PatchedVindex::walk`'s parallel layers.
+        // Two handles to the same layer must therefore be the same
+        // allocation, not two copies of it.
+        let idx = f16_mmap_index(1, 4, 4);
+        touch(&idx, 0);
+
+        let (a, b) = {
+            let cache = idx.gate.f16_decode_cache.lock().unwrap();
+            let entry = cache[0].as_ref().expect("layer 0 cached");
+            (std::sync::Arc::clone(entry), std::sync::Arc::clone(entry))
+        };
+        assert!(
+            std::sync::Arc::ptr_eq(&a, &b),
+            "cache handles must alias one buffer, not clone it"
+        );
+    }
 }
