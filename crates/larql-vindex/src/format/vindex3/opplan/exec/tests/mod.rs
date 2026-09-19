@@ -108,6 +108,7 @@ mod kimi_per_expert_prepared;
 mod kquant_projection;
 mod kquant_projection_real;
 mod kv;
+mod linear_rope;
 mod llama3_rope;
 mod observe;
 mod overrides;

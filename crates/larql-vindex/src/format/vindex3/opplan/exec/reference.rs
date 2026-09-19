@@ -23,9 +23,10 @@ use super::backend::{
     WeightSlice,
 };
 use super::kernels::{
-    activate, gather_fused_half_mutated, llama3_frequencies, matvec, mrope_rotate, norm,
-    partial_rotary_frequencies, partial_rotary_slice, rope_rotate, rope_rotate_scaled, sigmoid,
-    softcap, softmax, softmax_with_sink, yarn_frequencies, FusedHalf, GateMutation,
+    activate, gather_fused_half_mutated, linear_frequencies, llama3_frequencies, matvec,
+    mrope_rotate, norm, partial_rotary_frequencies, partial_rotary_slice, rope_rotate,
+    rope_rotate_scaled, sigmoid, softcap, softmax, softmax_with_sink, yarn_frequencies, FusedHalf,
+    GateMutation,
 };
 use super::lowering::LoweringIdentity;
 use crate::error::VindexError;
@@ -196,6 +197,20 @@ impl ReferenceBackend {
                 }
                 for head in k.chunks_exact_mut(head_dim) {
                     rope_rotate_scaled(head, position, &inv_freq, amplitude);
+                }
+            }
+            // Linear, transcribed: every frequency divided by the
+            // factor, unit amplitude — Gemma 3's global layers. Written
+            // as its own arm rather than a divisor on the plain arm, so
+            // a plain layer can never inherit a divisor.
+            PositionPolicy::Linear { theta, factor } => {
+                const UNIT_AMPLITUDE: f32 = 1.0;
+                let inv_freq = linear_frequencies(head_dim, theta, factor);
+                for head in q.chunks_exact_mut(head_dim) {
+                    rope_rotate_scaled(head, position, &inv_freq, UNIT_AMPLITUDE);
+                }
+                for head in k.chunks_exact_mut(head_dim) {
+                    rope_rotate_scaled(head, position, &inv_freq, UNIT_AMPLITUDE);
                 }
             }
             // Llama-3, transcribed: wavelength-band frequencies at unit
