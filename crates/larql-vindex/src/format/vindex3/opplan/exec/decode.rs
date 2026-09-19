@@ -30,8 +30,8 @@ use super::backend::{AttentionStepCall, NormCall, PlanBackend};
 use super::hyper_connection::{self, Bundle, Mutation, SiteReduction};
 use super::kv::{KvState, RowKvState};
 use super::observe::{
-    AttnResBoundaryRecord, AttnResSiteRecord, HcSite, HcSiteRecord, InputSite, NoopObserver,
-    StepEvent, StepObserver,
+    AttnResBoundaryRecord, AttnResSiteRecord, CarrierForm, CarrierWriteRecord, HcSite,
+    HcSiteRecord, InputSite, NoopObserver, StepEvent, StepObserver,
 };
 use super::operands::OperandSource;
 use super::prepared::{
@@ -458,6 +458,9 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
                     });
                 }
                 observer.event(StepEvent::Embedded { position });
+                // The first link of the carrier chain (V3-OBS-1, C6):
+                // what enters layer 0, before any topology wraps it.
+                observer.entering_carrier(position, &h);
                 // The embedding enters a hyper-connected stack replicated
                 // into every stream (`Transformer.forward`'s repeat) —
                 // after its scale and norm, which belong to the lookup.
@@ -523,6 +526,7 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
                 site: HcSite::Attention,
                 position,
                 mutation,
+                layer_scale: None,
             };
             // Phase one of three: before the attention site reads. The
             // reference does NOTHING here; one control moves the
@@ -714,6 +718,7 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
                     site: HcSite::Attention,
                     position,
                     mutation,
+                    layer_scale: None,
                 },
                 observer,
             )?;
@@ -795,6 +800,7 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
                         site: HcSite::Ffn,
                         position,
                         mutation,
+                        layer_scale: state.layer_scale,
                     },
                     observer,
                 )?;
@@ -955,6 +961,11 @@ struct SiteContext {
     site: HcSite,
     position: usize,
     mutation: Mutation,
+    /// The whole-carrier scalar the layer applies AFTER this site's
+    /// write (Gemma 4 `layer_scalar`) — `Some` only at the FFN site of
+    /// a component that declares one, so the write record can carry
+    /// what happens to its `after` before the layer boundary.
+    layer_scale: Option<f32>,
 }
 
 /// Enter one site: produce the `[hidden]` vector the branch consumes.
@@ -1182,11 +1193,34 @@ fn leave_site<B: PlanBackend + ?Sized>(
                 prefix_after,
             });
         }
+        // The write happened whether or not the reference reduced here:
+        // layer 0's attention site writes with no record, and the event
+        // is what says so.
+        observer.event(StepEvent::CarrierWrite {
+            layer: context.layer,
+            site: context.site,
+            carrier: CarrierForm::History,
+        });
         return Ok(());
     }
     match (carrier, reduction) {
         (Carrier::Single(h), None) => {
             backend.residual_add(h, &delta);
+            // V3-OBS-1: the write, borrowed where it landed. Values
+            // first, then the structural event that closes it.
+            observer.carrier_write(CarrierWriteRecord {
+                layer: context.layer,
+                site: context.site,
+                position: context.position,
+                delta: &delta,
+                after: h.as_slice(),
+                layer_scale: context.layer_scale,
+            });
+            observer.event(StepEvent::CarrierWrite {
+                layer: context.layer,
+                site: context.site,
+                carrier: CarrierForm::Single,
+            });
             Ok(())
         }
         (Carrier::Bundle(x), Some(reduction)) => {
@@ -1201,6 +1235,11 @@ fn leave_site<B: PlanBackend + ?Sized>(
                 bundle_out: &next,
             });
             *x = next;
+            observer.event(StepEvent::CarrierWrite {
+                layer: context.layer,
+                site: context.site,
+                carrier: CarrierForm::Bundle,
+            });
             Ok(())
         }
         (Carrier::Bundle(x), None) => {
@@ -1209,6 +1248,13 @@ fn leave_site<B: PlanBackend + ?Sized>(
             // ran the topology would do.
             debug_assert_eq!(context.mutation, Mutation::BypassComposition);
             backend.residual_add(x.stream_mut(0), &delta);
+            // Still a write: the control drops the RECORD (no split
+            // exists), never the fact that the carrier moved.
+            observer.event(StepEvent::CarrierWrite {
+                layer: context.layer,
+                site: context.site,
+                carrier: CarrierForm::Bundle,
+            });
             Ok(())
         }
         // A history carrier reaches this match only if its entry was

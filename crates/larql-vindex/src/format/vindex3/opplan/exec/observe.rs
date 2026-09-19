@@ -8,11 +8,12 @@
 //! unobserved paths stay bit-identical, so an observer can never
 //! change arithmetic or execution order.
 //!
-//! Deliberately coarse at this rung: layer and sublayer boundaries and
-//! the head's logits — structure, not tensors. Finer taps (operand
-//! reads, attention state, residual values) are later detail levels
-//! and must arrive the same way: more events on the one executor,
-//! never a second traversal.
+//! The structural events are deliberately coarse: layer and sublayer
+//! boundaries and the head's logits. Finer taps arrive the same way —
+//! more events and borrowed records on the one executor, never a
+//! second traversal: operand inputs (sensitivity), the topology site
+//! records (waves 19 and K3-ATTNRES-1), and the carrier writes
+//! themselves (V3-OBS-1, `docs/v3-obs-1-carrier-observation.md`).
 //!
 //! [`DecodeSession::step_observed`]: super::decode::DecodeSession::step_observed
 //! [`step`]: super::decode::DecodeSession::step
@@ -20,7 +21,13 @@
 use super::hyper_connection::{Bundle, SinkhornSplit};
 
 /// One decode step's observation events, in execution order.
+///
+/// Non-exhaustive on purpose: finer taps arrive as new variants
+/// (routing, operand reads, representation resolution, refusals), and
+/// a consumer in another crate that renders what it knows must keep
+/// compiling when the executor learns to say more.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum StepEvent {
     /// The token was embedded at this absolute position.
     Embedded { position: usize },
@@ -31,6 +38,61 @@ pub enum StepEvent {
     FfnDone { layer: usize },
     /// The output head priced the vocabulary for this position.
     Logits { vocab: usize },
+    /// A sublayer's output was written into the residual carrier
+    /// (V3-OBS-1) — the write itself, as distinct from the sublayer's
+    /// completion: `AttentionDone` and `FfnDone` are boundaries and fire
+    /// on every layer, whereas this fires once per write the layer's
+    /// program actually performs (a mixer-only layer writes once). On
+    /// every carrier form; the values precede it, on
+    /// [`StepObserver::carrier_write`] for a single stream or on the
+    /// form's own site record for a bundle or a history.
+    CarrierWrite {
+        layer: usize,
+        site: SublayerSite,
+        carrier: CarrierForm,
+    },
+}
+
+/// The form the residual carrier takes at a write (V3-OBS-1, property
+/// C3). Named on the structural event so a structure-only consumer can
+/// count writes per form, and so no consumer infers the topology from
+/// which value record happened to arrive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CarrierForm {
+    /// One `[hidden]` vector; the write is a residual add.
+    Single,
+    /// A hyper-connected bundle; the write is the site's expansion.
+    Bundle,
+    /// An attention-residual prefix plus its snapshot history; the write
+    /// is `History::write`, which adds OR replaces.
+    History,
+}
+
+/// One single-stream carrier write, borrowed at the write (V3-OBS-1).
+///
+/// `delta` is the branch output AS ADDED — after the sublayer's
+/// post-norm and residual-delta scale where the plan has them — and
+/// `after` is the carrier once the add has landed. `before` is not
+/// carried: the add is in place, and copying the carrier first would
+/// cost the unobserved path what observation must not. A consumer
+/// chains instead — a write's `before` is the previous write's `after`
+/// (times `layer_scale` where the previous write carried one), and the
+/// first link is [`StepObserver::entering_carrier`].
+#[derive(Debug, Clone, Copy)]
+pub struct CarrierWriteRecord<'a> {
+    pub layer: usize,
+    pub site: SublayerSite,
+    pub position: usize,
+    pub delta: &'a [f32],
+    pub after: &'a [f32],
+    /// The per-layer scalar the executor multiplies the WHOLE carrier by
+    /// after this write and before the layer boundary (Gemma 4
+    /// `layer_scalar`), on the FFN site of a component that declares
+    /// one; `None` where the program has no such scale. Carried so the
+    /// layer output `layer_scale * after` is reconstructable and the
+    /// batch path's `post_layer`, captured after the scale, is
+    /// comparable.
+    pub layer_scale: Option<f32>,
 }
 
 /// Where in a layer an activation was taken.
@@ -68,7 +130,7 @@ pub enum InputSite {
 /// belonging to one of them would have had to be duplicated for the
 /// other. `HcSite` remains as an alias so wave 19's call sites read as
 /// they did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SublayerSite {
     Attention,
     Ffn,
@@ -184,6 +246,19 @@ pub trait StepObserver {
     ///
     /// [`event`]: Self::event
     fn operand_input(&mut self, _layer: usize, _site: InputSite, _values: &[f32]) {}
+
+    /// Observe the `[hidden]` vector entering layer 0 — the embedding
+    /// after its scale and norm, before any topology replicates or
+    /// wraps it (V3-OBS-1, property C6): the first link of the carrier
+    /// chain. Fired once per step, after `Embedded`. Default: ignore.
+    fn entering_carrier(&mut self, _position: usize, _values: &[f32]) {}
+
+    /// Observe one single-stream carrier write (V3-OBS-1). Fired once per
+    /// write the program performs on a single-stream component,
+    /// immediately after the add and before the `CarrierWrite` event.
+    /// Bundle and history writes deliver their values through their own
+    /// site records instead. Default: ignore.
+    fn carrier_write(&mut self, _record: CarrierWriteRecord<'_>) {}
 
     /// Observe one hyper-connection site's intermediate state. Fired
     /// only on a hyper-connected component, once per site per layer per

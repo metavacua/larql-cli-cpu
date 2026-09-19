@@ -743,8 +743,9 @@ fn an_observed_session_step_is_bit_identical_and_records_boundaries() {
         let b = observed.step_observed(token, &mut recorder).unwrap();
         assert_eq!(a, b, "observation changed the arithmetic");
     }
-    // Per position: embed + (attention, ffn) per layer + logits.
-    let per_position = 1 + 2 * runtime.plan().layers.len() + 1;
+    // Per position: embed + (write, attention, write, ffn) per layer +
+    // logits — the two carrier writes are V3-OBS-1's events.
+    let per_position = 1 + 4 * runtime.plan().layers.len() + 1;
     assert_eq!(recorder.events.len(), G_TOKENS.len() * per_position);
     assert!(matches!(
         recorder.events[0],
