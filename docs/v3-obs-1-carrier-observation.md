@@ -510,7 +510,7 @@ Four states, in increasing strength. A claim is quoted at its state and no highe
 | Bundle carrier writes, one site record per write | STRUCTURALLY WITNESSED (synthetic hyper-connection plan) |
 | History carrier writes, layer 0 attention writes without a record | STRUCTURALLY WITNESSED (synthetic attention-residual plan) |
 | Layer scale rides on the FFN write; chain must apply it; batch `post_layer` is post-scale | STRUCTURALLY WITNESSED (Gemma 4 miniature) |
-| Kimi-Linear-48B: 54 writes per token, single stream, KDA/MLA/MoE sites | FORECAST — never executed on this path today |
+| Kimi-Linear-48B: 54 writes per token, single stream, KDA/MLA/MoE sites | FORECAST — two declared refusals, both container facts: `.s6` refuses at preparation (MLA latent norm carries no `kv_a_norm_eps`); `.lift2` prepares (87.75 GiB mapped on demand, 0 resident, 3.3 GiB allocated, 2.95 s, peak RSS 6.2 GB) and refuses at the first step because its persisted surface predates the family judgement that Kimi's KDA gate is softplus (`kda_gate_form` absent, and the executor reads only the persisted conclusion). Needs a re-encode with the current build. |
 | Gemma 3 4B: 68 writes per token; P1–P3; batch/decode | REAL-SUBJECT WITNESSED on both CPU backends (production and reference). Cross-backend: structure identical; values at aligned-realization precision (7.3e-5 worst) with Q8 capped, at Q8 precision (1.5e-1 worst) under the default policy. |
 | Gemma 3 12B: 96 writes per token; P1–P3; batch/decode | REAL-SUBJECT WITNESSED on the production CPU backend (768 = 96 × 8). Reference arm NOT RUN. |
 | Qwen3-4B / Qwen3-0.6B: 72 / 56 writes per token | FORECAST |

@@ -157,6 +157,25 @@ fn wall_per_token<B: PlanBackend>(
     clock.elapsed() / u32::try_from(tokens.len()).unwrap()
 }
 
+/// The executor's own residency census, printed so a large image's run
+/// records what was mapped and what was actually resident — evidence
+/// about the execution, never an acceptance criterion of this rung.
+fn print_residency(name: &str, ops: &PreparedOperands, when: &str) {
+    let mapped = ops.mapped_residency();
+    let census = ops.allocation_census();
+    println!(
+        "[{name}] residency {when}: {} mapped regions, {:.2} GiB mapped, {:.2} GiB resident; \
+         {} allocations, {:.2} GiB allocated",
+        mapped.regions,
+        mapped.mapped_bytes as f64 / GIB,
+        mapped.resident_bytes as f64 / GIB,
+        census.allocations,
+        census.bytes as f64 / GIB
+    );
+}
+
+const GIB: f64 = 1_073_741_824.0;
+
 /// One backend's complete evidence: the chain it produced, the logits
 /// at every position, and the realizations it pinned.
 struct Arm {
@@ -181,6 +200,7 @@ fn witness_on<B: PlanBackend>(
     let clock = Instant::now();
     let ops = PreparedOperands::load(plan, store, backend, ExecutionSlice::Full).unwrap();
     println!("[{name}] operands prepared once in {:?}", clock.elapsed());
+    print_residency(name, &ops, "after preparation");
     let provenance = ExecutionProvenance::of(&ops);
     for class in &provenance.realizations {
         println!(
@@ -241,6 +261,7 @@ fn witness_on<B: PlanBackend>(
     if trials > 0 {
         capture_cost(name, plan, &ops, backend, tokens, trials, expected);
     }
+    print_residency(name, &ops, "after the witnesses");
     Arm {
         name: name.to_string(),
         witness,
