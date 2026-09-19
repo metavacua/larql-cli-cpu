@@ -429,15 +429,46 @@ declares it has not been judged for that operation. A declared refusal, surfaced
 driver, not a defect in the tap. The production arm passed P1–P3 and batch/decode again
 on the way.
 
-**Gemma 3 4B IT, real container: NOT RUN — refused before execution.** This build's
-system-graph parser rejects `~/chris-models/gemma3-4b-it.vindex3` with
-`unknown variant 'linear'` for a position kind: the container declares the linear rope
-factor as its own position policy, which is #436's second item, and the graph schema on
-main does not carry it. The container is schema 6 and was encoded by a build that has
-#436 work this working tree does not. The Gemma witness therefore waits on that work
-landing; the forecast (68 writes per token) stays frozen above and is not to be revised
-when it runs. This is the middle failure plane, the tensor-address dialect, not a
-declaration failure and not an execution failure.
+**Gemma 3 4B IT, real container, both CPU backends (run after PR #483 merged, on
+`origin/main` + this rung, in an isolated worktree).** 34 layers, every one with an FFN
+program. Prompt: token ids 1..=8.
+
+| Property | production | reference |
+|---|---|---|
+| P1 | PASS, bit-identical logits at 8 positions | PASS |
+| P2 | 544 of 544 exact | 544 of 544 exact |
+| P3 | 544 = 68 per token × 8, **the frozen forecast** | same |
+| Batch/decode | PASS, bit-identical | PASS, bit-identical |
+
+The reference backend executes Gemma 3 (it refused OLMo2), so the cross-backend witness
+ran too. Default production policy pinned 103 × `Requantise(FusedQ8)`, 68 ×
+`Direct(FusedBf16)`, 68 × `Decode(BlasF32)`, 1 gather; reference 239 × `Decode(ScalarF32)`.
+
+| Cross-backend | default policy (Q8 manufactured) | Q8 capped (`LARQL_CPU_MAX_FORMAT=bf16`) |
+|---|---|---|
+| Structure | identical: 1104 events, 544 writes | identical |
+| Relative RMS by depth | L0 5.2e-3 · L5 1.0e-2 · L10 1.3e-1 · L15 1.2e-1 · L25 6.1e-2 · L33 1.3e-1 | L0 1.6e-6 · L5 1.7e-6 · L10 3.6e-5 · L15 4.6e-5 · L25 1.9e-5 · L33 3.7e-5 |
+| Worst layer | max abs 5.4e3, rel RMS 1.5e-1 | max abs 1.6, rel RMS 7.3e-5 |
+| Final logits | max abs 2.58, rel RMS 8.3e-2 | max abs 1.4e-3, rel RMS 6.0e-5 |
+
+Read as on Granite: the default-policy gap is the declared Q8 requantisation, and it is
+about five times larger here at the carrier level (worst 1.5e-1 against Granite's
+2.4e-2; logits 8.3e-2 against 3.4e-2), which is consistent with Gemma 3's known
+outlier-channel magnitudes (carrier max abs in the thousands) but is recorded as an
+observation, not as a quality claim: no reference logits against HF were compared here.
+With realizations aligned the residual is 7.3e-5, an order of magnitude above Granite's
+8e-6 and still well below the 1e-3 tripwire; whether Gemma's magnitude regime accounts
+for that extra order is not established by this run.
+
+The contract did not change to admit Gemma. This is evidence promotion only.
+
+**Gemma 3 12B IT, real container, production CPU backend.** 48 layers, every one with an
+FFN program; production pinned 241 × `Requantise(FusedQ8)`, 96 × `Direct(FusedBf16)`,
+1 gather (no f32 BLAS form at this width). P1 PASS (bit-identical logits at 8 positions);
+P2 PASS (768 of 768 exact); P3 PASS (768 = 96 per token × 8, the frozen forecast);
+batch/decode PASS. The reference arm was not run on the 12B. This is the model behind
+the sealed sg_invariants witness, so its tap is now real-subject witnessed ahead of that
+programme's rung 0.
 
 ## Run provenance (added after the cross-backend finding)
 
@@ -480,7 +511,8 @@ Four states, in increasing strength. A claim is quoted at its state and no highe
 | History carrier writes, layer 0 attention writes without a record | STRUCTURALLY WITNESSED (synthetic attention-residual plan) |
 | Layer scale rides on the FFN write; chain must apply it; batch `post_layer` is post-scale | STRUCTURALLY WITNESSED (Gemma 4 miniature) |
 | Kimi-Linear-48B: 54 writes per token, single stream, KDA/MLA/MoE sites | FORECAST — never executed on this path today |
-| Gemma 3 4B / 12B: 68 / 96 writes per token | FORECAST — refused by this build's graph parser; waits on PR #483 |
+| Gemma 3 4B: 68 writes per token; P1–P3; batch/decode | REAL-SUBJECT WITNESSED on both CPU backends (production and reference). Cross-backend: structure identical; values at aligned-realization precision (7.3e-5 worst) with Q8 capped, at Q8 precision (1.5e-1 worst) under the default policy. |
+| Gemma 3 12B: 96 writes per token; P1–P3; batch/decode | REAL-SUBJECT WITNESSED on the production CPU backend (768 = 96 × 8). Reference arm NOT RUN. |
 | Qwen3-4B / Qwen3-0.6B: 72 / 56 writes per token | FORECAST |
 | Run provenance record (pinned forms, arm, basis) exists and fingerprints canonically | STRUCTURALLY WITNESSED (unit tests on the golden plan: same backend → same fingerprint, two backends → different, every field moves it); printed on every real-container run. Persistence in a run envelope NOT CLAIMED — V3-STREAM-1. |
 | P5 observer cost on Granite, median +0.15 ms per token | MEASURED ONCE, NOT CHARACTERISED — quiet-window re-run owed; not quotable |
