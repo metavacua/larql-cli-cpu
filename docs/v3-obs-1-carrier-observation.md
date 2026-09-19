@@ -478,6 +478,16 @@ The single P5 pair (noop 407 ms per token, stats +8.6 ms) is one trial and not a
 claim. **The observation contract needed no change to describe a recurrent, latent-
 attention, routed-expert stack.** The Q8 default-policy arm was not run.
 
+**Kimi container identities (SHA-256 of `index.json` / `system_graph.json`), recorded
+before `.lift2` was deleted on 2026-09-20 at Chris's direction; `.s6` is kept as the
+latent-norm refusal fixture.**
+
+| Container | index.json | system_graph.json | `kda_gate_form` | `mla.kv_a_norm_eps` | Fate |
+|---|---|---|---|---|---|
+| `.lift2` | `ddd9cad3e4603d12…` | `1b4c0fc41da8e83d…` | absent | 1e-06 | refused at first step (gate form absent); DELETED |
+| `.s6` | `ddd9cad3e4603d12…` | `a33b81a92da58237…` | absent | absent | refused at preparation (no latent-norm epsilon); KEPT as fixture |
+| `.s7` | `ddd9cad3e4603d12…` | `1fe02abad2f3bcdc…` | {"form": "softplus"} | 1e-06 | witnessed; the container of record |
+
 **Gemma 3 12B IT, real container, production CPU backend.** 48 layers, every one with an
 FFN program; production pinned 241 × `Requantise(FusedQ8)`, 96 × `Direct(FusedBf16)`,
 1 gather (no f32 BLAS form at this width). P1 PASS (bit-identical logits at 8 positions);
