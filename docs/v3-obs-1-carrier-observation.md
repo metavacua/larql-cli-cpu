@@ -462,6 +462,22 @@ for that extra order is not established by this run.
 
 The contract did not change to admit Gemma. This is evidence promotion only.
 
+**Kimi-Linear-48B-A3B-Instruct, real container `.s7` (re-encoded 2026-09-20 so the
+surface carries `kda_gate_form: softplus`), production CPU backend, held at bf16
+(`LARQL_CPU_MAX_FORMAT=bf16`) so the ontology question is not confounded by the Q8
+policy.** 27 layers: 20 KDA and 7 MLA attention sites, a 256-expert MoE FFN on every
+layer, a single-stream carrier. P1 PASS (bit-identical logits at 8 positions); P2 PASS
+(432 of 432 writes reconstruct bit-for-bit); P3 PASS (432 = 54 per token × 8, the frozen
+forecast, `FfnDone` 27 per token); batch/decode PASS (bit-identical carrier states at
+every layer and position). Pinned forms: 105 × `Direct(FusedBf16)`, 85 ×
+`Decode(BlasF32)`, 19968 × `MappedStored { Bf16, Demand }` (the expert bank), 1 gather.
+Residency, recorded as evidence and not as acceptance: 87.75 GiB mapped, 0 resident and
+3.31 GiB allocated after preparation (8.5 s); 10.56 GiB resident after the witnesses,
+which is the experts the routed tokens touched; peak RSS 16.9 GB on a 128 GiB machine.
+The single P5 pair (noop 407 ms per token, stats +8.6 ms) is one trial and not a cost
+claim. **The observation contract needed no change to describe a recurrent, latent-
+attention, routed-expert stack.** The Q8 default-policy arm was not run.
+
 **Gemma 3 12B IT, real container, production CPU backend.** 48 layers, every one with an
 FFN program; production pinned 241 × `Requantise(FusedQ8)`, 96 × `Direct(FusedBf16)`,
 1 gather (no f32 BLAS form at this width). P1 PASS (bit-identical logits at 8 positions);
@@ -510,7 +526,7 @@ Four states, in increasing strength. A claim is quoted at its state and no highe
 | Bundle carrier writes, one site record per write | STRUCTURALLY WITNESSED (synthetic hyper-connection plan) |
 | History carrier writes, layer 0 attention writes without a record | STRUCTURALLY WITNESSED (synthetic attention-residual plan) |
 | Layer scale rides on the FFN write; chain must apply it; batch `post_layer` is post-scale | STRUCTURALLY WITNESSED (Gemma 4 miniature) |
-| Kimi-Linear-48B: 54 writes per token, single stream, KDA/MLA/MoE sites | FORECAST — two declared refusals, both container facts: `.s6` refuses at preparation (MLA latent norm carries no `kv_a_norm_eps`); `.lift2` prepares (87.75 GiB mapped on demand, 0 resident, 3.3 GiB allocated, 2.95 s, peak RSS 6.2 GB) and refuses at the first step because its persisted surface predates the family judgement that Kimi's KDA gate is softplus (`kda_gate_form` absent, and the executor reads only the persisted conclusion). Needs a re-encode with the current build. |
+| Kimi-Linear-48B: 54 writes per token, single stream, KDA/MLA/MoE sites; P1–P3; batch/decode | REAL-SUBJECT WITNESSED on the production CPU backend (bf16 cap) on the `.s7` container, 432 = 54 × 8. The `.s6` and `.lift2` refusals stand as container facts (no MLA latent-norm epsilon; surface predates the softplus judgement). Reference arm and Q8 arm NOT RUN. |
 | Gemma 3 4B: 68 writes per token; P1–P3; batch/decode | REAL-SUBJECT WITNESSED on both CPU backends (production and reference). Cross-backend: structure identical; values at aligned-realization precision (7.3e-5 worst) with Q8 capped, at Q8 precision (1.5e-1 worst) under the default policy. |
 | Gemma 3 12B: 96 writes per token; P1–P3; batch/decode | REAL-SUBJECT WITNESSED on the production CPU backend (768 = 96 × 8). Reference arm NOT RUN. |
 | Qwen3-4B / Qwen3-0.6B: 72 / 56 writes per token | FORECAST |
