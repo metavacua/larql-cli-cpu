@@ -325,6 +325,25 @@ fn rope_scaling_defaults_and_config_read() {
     let a = DefaultsArch(cfg);
     assert_eq!(a.rope_scaling_type(), Some("linear"));
     assert_eq!(a.rope_scaling_factor(), 8.0);
+    // The read lives in the trait default: a family with no override
+    // divides every layer's positions by the declared factor, as HF's
+    // `_compute_linear_scaling_rope_parameters` does. This used to be a
+    // hardcoded `1.0`, which served every non-Gemma linear-scaled
+    // checkpoint unscaled.
+    assert_eq!(a.linear_rope_scaling(), Some(8.0));
+    assert_eq!(a.rope_position_divisor_for_layer(0), 8.0);
+    assert_eq!(a.rope_position_divisor_for_layer(3), 8.0);
+    assert_eq!(
+        a.declared_rope_scaling(),
+        DeclaredRopeScaling::Linear { factor: 8.0 }
+    );
+    assert_eq!(
+        a.position_policy_for_layer(0),
+        PositionPolicy::Linear {
+            theta: a.rope_base_for_layer(0),
+            factor: 8.0
+        }
+    );
 }
 
 /// `openai/gpt-oss-20b`'s block verbatim. The scaling type is the only
