@@ -17,6 +17,7 @@
 //! diverged logits, or bit-equality above proves nothing.
 
 mod opener;
+mod record;
 
 use std::path::Path;
 

@@ -46,6 +46,7 @@ mod generate;
 mod runtime;
 mod session;
 
+pub mod record;
 #[cfg(test)]
 mod tests;
 
@@ -84,6 +85,11 @@ pub use larql_vindex::format::vindex3::opplan::exec::observe_stats::{
 // comparable across runs whose execution fingerprints match.
 pub use larql_vindex::format::vindex3::opplan::exec::provenance::{
     ExecutionProvenance, RealizationClass, RunProvenance,
+};
+// V3-STREAM-1: the lossless run record and the lossy live tap.
+pub use record::{
+    Carrier, DropLedger, EventKind, LiveTap, Receipt, RecordError, RecordedEvent, RunIdentity,
+    RunRecord, RunRecorder, Site, RECORD_SCHEMA,
 };
 // The batch-execution taps (V3-LQL-3B): plane events streamed from the
 // one traversal, consumed by residual capture and retrieval keys.
