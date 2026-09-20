@@ -245,3 +245,88 @@ fn observe_arms_the_lens_and_records_one_readout_per_armed_site() {
     let err = run(Vindex3Command::Observe(a)).unwrap_err().to_string();
     assert!(err.contains("--lens-tokens"), "{err}");
 }
+
+/// The summary and the lens table are built as lines before printing, so
+/// what a researcher reads is asserted here rather than trusted.
+#[test]
+fn the_summary_and_lens_lines_say_what_the_record_says() {
+    use super::super::observe::{lens_lines, summary_lines, Outcome};
+    use larql_inference::vindex3::{open_component, OpenPolicy};
+    let (_dir, container) = encoded_fixture();
+    let record_path = container.parent().unwrap().join("lines.jsonl");
+    let mut a = args(&container, &record_path);
+    a.lens_tokens = Some("1,2".to_string());
+    a.generate = 1;
+    run(Vindex3Command::Observe(a)).unwrap();
+    let record = RunRecord::read_jsonl(&record_path).unwrap();
+    let last = record.events.iter().map(|e| e.position).max().unwrap();
+
+    let lens = lens_lines(&record, last, None);
+    let (layers, _) = layers_and_hidden(&record);
+    assert_eq!(
+        lens.len(),
+        layers + 1,
+        "a header and one line per armed layer"
+    );
+    assert!(lens[0].contains(&format!("{} head passes", record.receipt.head_passes)));
+    assert!(lens[0].contains(&format!("position {last}")));
+    assert!(lens[1].starts_with("    L  0 Ffn  1: "), "{}", lens[1]);
+    assert!(lens[1].contains("  2: ") && lens[1].contains(" #") && lens[1].contains("  top "));
+    assert!(
+        lens_lines(&record, last + 1, None).is_empty(),
+        "no readouts at a position that never ran"
+    );
+    // A record without a lens renders no lens lines at all.
+    let plain_path = container.parent().unwrap().join("plain.jsonl");
+    run(Vindex3Command::Observe(args(&container, &plain_path))).unwrap();
+    let plain = RunRecord::read_jsonl(&plain_path).unwrap();
+    assert!(lens_lines(&plain, 2, None).is_empty());
+
+    let opened = open_component(&container, "target", OpenPolicy::default()).unwrap();
+    let mut a = args(&container, &record_path);
+    a.lens_tokens = Some("1,2".to_string());
+    a.generate = 1;
+    a.top_k = 2;
+    let outcome = Outcome {
+        record: record.clone(),
+        generated: vec![7],
+        final_logits: vec![0.1, 0.9, 0.5],
+        record_bytes: 123,
+        stepping: std::time::Duration::from_millis(40),
+    };
+    let lines = summary_lines(&a, &opened, &[1, 2, 3], &outcome, None);
+    assert!(lines[0].starts_with("observe "), "{}", lines[0]);
+    assert_eq!(lines[1], "  prompt ids: 1,2,3");
+    assert_eq!(lines[2], "  generated ids: 7");
+    assert!(
+        lines[3].contains("123 bytes") && lines[3].contains("over 4 positions"),
+        "{}",
+        lines[3]
+    );
+    assert!(
+        lines[4].contains("over 4 positions") && lines[4].contains("10ms per position"),
+        "{}",
+        lines[4]
+    );
+    assert!(lines[5].ends_with(&record.provenance_fingerprint));
+    assert!(lines[6].ends_with(&record.receipt.log_sha256));
+    assert!(
+        lines.iter().any(|l| l.contains("head passes")),
+        "the lens table is in the summary"
+    );
+    let top = lines
+        .iter()
+        .position(|l| l.starts_with("  final position, top 2:"))
+        .unwrap();
+    assert!(
+        lines[top + 1].trim_start().starts_with("1  logp"),
+        "{}",
+        lines[top + 1]
+    );
+    assert!(
+        lines[top + 2].trim_start().starts_with("2  logp"),
+        "{}",
+        lines[top + 2]
+    );
+    assert_eq!(lines.len(), top + 3);
+}

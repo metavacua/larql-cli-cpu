@@ -251,3 +251,56 @@ fn a_token_outside_the_vocabulary_is_a_recorded_failure_that_stops_the_lens() {
     assert!(lens.readouts.is_empty());
     assert_eq!(lens.head_passes, 1, "it stopped after the first refusal");
 }
+
+/// A record holds the lens through `LensReader`, not its concrete type:
+/// the trait object must read, price, report and name its tokens exactly
+/// as the lens does.
+#[test]
+fn the_reader_trait_object_reads_prices_and_reports_like_the_lens() {
+    use crate::format::vindex3::opplan::exec::observe::CarrierWriteRecord;
+    use crate::format::vindex3::opplan::exec::observe_lens::LensReader;
+    let (_c, plan, store) = golden_fixture();
+    let backend = ReferenceBackend::new();
+    let ops = PreparedOperands::load(&plan, &store, &backend, ExecutionSlice::Full).unwrap();
+    let mut reader: Box<dyn LensReader> = Box::new(LogitLens::new(
+        &ops,
+        &backend,
+        LensSites::every_ffn(),
+        TOKENS.to_vec(),
+        1,
+    ));
+    assert_eq!(reader.tokens(), &TOKENS);
+    assert_eq!(reader.head_passes(), 0);
+    assert!(reader.failure().is_none());
+    let hidden = ops.hidden();
+    let after: Vec<f32> = (0..hidden).map(|i| 0.01 * i as f32).collect();
+    let delta = vec![0.0; hidden];
+    let record = CarrierWriteRecord {
+        layer: 0,
+        site: SublayerSite::Ffn,
+        position: 0,
+        delta: &delta,
+        after: &after,
+        layer_scale: None,
+    };
+    let readout = reader.read(record).expect("an armed FFN site reads");
+    assert_eq!(
+        (readout.layer, readout.site, readout.position),
+        (0, SublayerSite::Ffn, 0)
+    );
+    assert_eq!(readout.tokens.len(), TOKENS.len());
+    assert_eq!(readout.top.len(), 1);
+    assert_eq!(reader.head_passes(), 1);
+    // An unarmed site reads nothing and costs nothing.
+    let attention = CarrierWriteRecord {
+        site: SublayerSite::Attention,
+        ..record
+    };
+    assert!(reader.read(attention).is_none());
+    assert_eq!(reader.head_passes(), 1);
+    // The same carrier through the head directly is the same distribution.
+    let direct = ops.head_logits(&backend, &after).unwrap().unwrap();
+    let (tokens, _) = readout_of(&direct, &TOKENS, 0).unwrap();
+    assert_eq!(tokens, readout.tokens);
+    assert!(reader.failure().is_none());
+}
