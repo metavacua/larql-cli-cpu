@@ -5,6 +5,7 @@ mod decode;
 mod exec_resume;
 mod generate;
 mod lowerings;
+mod observe;
 mod realizations;
 mod sizes;
 
