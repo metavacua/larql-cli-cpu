@@ -189,3 +189,20 @@ fn one_row_per_write_lands_on_a_real_plan_and_events_are_counted_not_kept() {
     assert_eq!(taken.len(), writes_per_step * G_TOKENS.len());
     assert!(observer.rows.is_empty());
 }
+
+/// The seeded basis is a reproducible artifact: two runs with one
+/// (hidden, dims, seed) share a coordinate system by construction, and
+/// that only holds across builds if the generator cannot drift. Its
+/// content hash for one triple is pinned here, so any change to the
+/// generator — even one that keeps the basis orthonormal, such as
+/// shifting the draw's offset — is a deliberate contract change with a
+/// pin to update, never a silent re-projection of every record.
+const PINNED_SEEDED_HASH: &str = "956019731c8ff12d7193d4a35039aa13770d79b0e191a05789f6bc30927fcada";
+const PINNED_FIRST_VALUE_BITS: u32 = 1031304468;
+
+#[test]
+fn the_seeded_basis_is_pinned_across_builds() {
+    let basis = FixedBasis::seeded(HIDDEN, DIMS, SEED).unwrap();
+    assert_eq!(basis.identity().hash_hex, PINNED_SEEDED_HASH);
+    assert_eq!(basis.rows()[0][0].to_bits(), PINNED_FIRST_VALUE_BITS);
+}
