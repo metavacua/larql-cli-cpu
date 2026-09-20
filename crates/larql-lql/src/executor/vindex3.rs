@@ -565,7 +565,7 @@ impl Session {
     /// gate pins that tracing never changes arithmetic, and the LQL
     /// gate pins that the reported token equals INFER's.
     pub(crate) fn exec_v3_trace(&self, prompt: &str) -> Result<Vec<String>, LqlError> {
-        use larql_inference::vindex3::{RecordingObserver, StepEvent};
+        use larql_inference::vindex3::{CarrierForm, RecordingObserver, StepEvent, SublayerSite};
         let Backend::Vindex3 {
             runtime,
             tokenizer,
@@ -603,9 +603,29 @@ impl Session {
                         out.push(format!("  layer {layer}: attention"))
                     }
                     StepEvent::FfnDone { layer } => out.push(format!("  layer {layer}: ffn")),
+                    StepEvent::CarrierWrite {
+                        layer,
+                        site,
+                        carrier,
+                    } => {
+                        let site = match site {
+                            SublayerSite::Attention => "attention",
+                            SublayerSite::Ffn => "ffn",
+                        };
+                        let carrier = match carrier {
+                            CarrierForm::Single => "single",
+                            CarrierForm::Bundle => "bundle",
+                            CarrierForm::History => "history",
+                        };
+                        out.push(format!("  layer {layer}: {site} write ({carrier} carrier)"))
+                    }
                     StepEvent::Logits { vocab } => {
                         out.push(format!("  output_head (vocab {vocab})"))
                     }
+                    // The executor may learn new events before TRACE
+                    // learns to print them; an unprinted event is not
+                    // an error.
+                    _ => {}
                 }
             }
         }

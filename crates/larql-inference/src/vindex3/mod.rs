@@ -72,7 +72,18 @@ pub use larql_vindex::format::vindex3::opplan::exec::kv::{
 // The observation seam (LQL-2 TRACE): subscribers to the canonical
 // executor's step boundaries — one execution path, many consumers.
 pub use larql_vindex::format::vindex3::opplan::exec::observe::{
-    RecordingObserver, StepEvent, StepObserver,
+    CarrierForm, CarrierWriteRecord, RecordingObserver, StepEvent, StepObserver, SublayerSite,
+};
+// V3-OBS-1's cheap consumer of the carrier tap, and the basis identity
+// every projected coordinate carries.
+pub use larql_vindex::format::vindex3::opplan::exec::observe_stats::{
+    BasisIdentity, FixedBasis, HeadProbe, StatsObserver, WriteStats,
+};
+// What a run RAN — pinned realizations, the process arithmetic arm, the
+// basis — for a runner to embed in its envelope; values are only
+// comparable across runs whose execution fingerprints match.
+pub use larql_vindex::format::vindex3::opplan::exec::provenance::{
+    ExecutionProvenance, RealizationClass, RunProvenance,
 };
 // The batch-execution taps (V3-LQL-3B): plane events streamed from the
 // one traversal, consumed by residual capture and retrieval keys.

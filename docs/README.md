@@ -14,6 +14,7 @@ distributed).
 | [format.md](format.md) | LARQL graph format specification (v0.1.0) |
 | [vindex3-format.md](vindex3-format.md) | VINDEX3 model-system container format — the living spec (plan/encode/verify semantics), companion to the [3.0 Candidate Specification](../crates/larql-vindex/docs/vindex3-format-spec.md) |
 | [vindex3-runtime.md](vindex3-runtime.md) | VINDEX3 runtime stack — `Vindex3Runtime`, `LogitsSession`, the KV seam, V3 serving over `/v1/completions`, `/v1/chat/completions`, `/v1/responses` |
+| [v3-obs-1-carrier-observation.md](v3-obs-1-carrier-observation.md) | Frozen executor-side carrier observation rung for the VINDEX3 Observatory contract: `leave_site` tap, parity/reconstruction properties, witness map, and capture-cost protocol |
 | [vindex3-experiments.md](vindex3-experiments.md) | Pre-registered VINDEX3 experimental programme (the V2-0..V2-4 gates) |
 | [vindex3-ontology-drill.md](vindex3-ontology-drill.md) | The four-architecture ontology drill (candidate §17.4) — run 2026-08-30, findings F1–F16 |
 | [lyrw-v2.md](lyrw-v2.md) | LYRW v2 — the K3 routed-layer physical-layout gate (storage half of K3) |
