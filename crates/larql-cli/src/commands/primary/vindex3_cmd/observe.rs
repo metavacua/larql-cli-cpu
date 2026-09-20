@@ -14,10 +14,12 @@
 //! and a summary — never a second traversal and never a logit lens.
 
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::Args;
-use larql_inference::vindex3::{OpenedComponent, RunIdentity, RunRecord, RunRecorder};
+use larql_inference::vindex3::{
+    EventKind, LensSites, LogitLens, OpenedComponent, RunIdentity, RunRecord, RunRecorder,
+};
 use larql_vindex::format::vindex3::opplan::exec::backend::PlanBackend;
 use larql_vindex::format::vindex3::opplan::exec::decode::DecodeSession;
 use larql_vindex::format::vindex3::opplan::exec::kv::RowKvState;
@@ -35,6 +37,7 @@ type BoxErr = Box<dyn std::error::Error>;
 const DEFAULT_BASIS_DIMS: usize = 3;
 const DEFAULT_BASIS_SEED: u64 = 0x5EED;
 const DEFAULT_TOP_K: usize = 10;
+const DEFAULT_LENS_TOP_K: usize = 3;
 /// The provider name recorded on a basis loaded from `--basis-rows`.
 const SUPPLIED_ROWS_PROVIDER: &str = "cli-supplied-rows";
 
@@ -97,6 +100,25 @@ pub struct ObserveArgs {
     /// How many final-position candidates to print.
     #[arg(long, default_value_t = DEFAULT_TOP_K)]
     pub top_k: usize,
+
+    /// Arm the true logit lens (V3-LENS-1) for these token ids: at every
+    /// armed site the image's own final norm and head read the layer
+    /// output, and each token's log-probability and rank go on the
+    /// record. One full head pass per armed site per position.
+    #[arg(long)]
+    pub lens_tokens: Option<String>,
+
+    /// Which layers the lens reads: `all`, `every:<k>`, or a list.
+    #[arg(long, default_value = "all", requires = "lens_tokens")]
+    pub lens_layers: String,
+
+    /// Read the attention site too, not only the FFN site.
+    #[arg(long, requires = "lens_tokens")]
+    pub lens_attention: bool,
+
+    /// How many top ids each readout keeps.
+    #[arg(long, default_value_t = DEFAULT_LENS_TOP_K, requires = "lens_tokens")]
+    pub lens_top_k: usize,
 }
 
 pub fn run(args: ObserveArgs) -> Result<(), BoxErr> {
@@ -119,11 +141,14 @@ pub fn run(args: ObserveArgs) -> Result<(), BoxErr> {
 }
 
 /// The record plus what the summary needs from the run itself.
-struct Outcome {
-    record: RunRecord,
-    generated: Vec<u32>,
-    final_logits: Vec<f32>,
-    record_bytes: u64,
+pub(super) struct Outcome {
+    pub(super) record: RunRecord,
+    pub(super) generated: Vec<u32>,
+    pub(super) final_logits: Vec<f32>,
+    pub(super) record_bytes: u64,
+    /// Wall time of the stepping loop alone — preparation excluded — so
+    /// a lens's price is visible against the same run without one.
+    pub(super) stepping: Duration,
 }
 
 struct Observe<'a> {
@@ -151,7 +176,19 @@ impl BackendVisitor for Observe<'_> {
             self.tokens,
         );
         let mut recorder = RunRecorder::for_image(identity, &ops, Some(stats));
+        if let Some(list) = &self.args.lens_tokens {
+            let tokens = parse_ids(list).map_err(|e| format!("--lens-tokens: {e}"))?;
+            let sites = LensSites {
+                layers: LensSites::parse_layers(&self.args.lens_layers)
+                    .map_err(|e| format!("--lens-layers: {e}"))?,
+                attention: self.args.lens_attention,
+                ffn: true,
+            };
+            let lens = LogitLens::new(&ops, backend, sites, tokens, self.args.lens_top_k);
+            recorder = recorder.with_lens(Box::new(lens));
+        }
 
+        let clock = Instant::now();
         let mut kv = RowKvState::default();
         let mut session = DecodeSession::over_prepared(plan, &ops, backend, &mut kv)?;
         let mut last = None;
@@ -167,6 +204,7 @@ impl BackendVisitor for Observe<'_> {
             generated.push(next);
             last = session.step_observed(next, &mut recorder)?.logits;
         }
+        let stepping = clock.elapsed();
         let final_logits = last.ok_or("the component carries no output head")?;
         recorder.complete();
         let record = recorder.finish();
@@ -177,6 +215,7 @@ impl BackendVisitor for Observe<'_> {
             generated,
             final_logits,
             record_bytes,
+            stepping,
         })
     }
 }
@@ -288,38 +327,40 @@ fn top_k(logits: &[f32], k: usize) -> Vec<(u32, f64)> {
     indexed
 }
 
-fn print_summary(
+/// The summary as lines, built before anything is printed so a test can
+/// read what a researcher will read.
+pub(super) fn summary_lines(
     args: &ObserveArgs,
     opened: &OpenedComponent,
     tokens: &[u32],
     outcome: &Outcome,
     tokenizer: Option<&tokenizers::Tokenizer>,
-) {
+) -> Vec<String> {
     let record = &outcome.record;
     let positions = tokens.len() + outcome.generated.len();
     let writes = record
         .events
         .iter()
-        .filter(|e| {
-            matches!(
-                e.event,
-                larql_inference::vindex3::EventKind::CarrierWrite { .. }
-            )
-        })
+        .filter(|e| matches!(e.event, EventKind::CarrierWrite { .. }))
         .count();
-    println!(
-        "observe {} ({}) component {} backend {:?}",
-        opened.model_name, opened.family, args.component, args.backend
-    );
-    println!("  prompt ids: {}", join(tokens));
+    let mut lines = vec![
+        format!(
+            "observe {} ({}) component {} backend {:?}",
+            opened.model_name, opened.family, args.component, args.backend
+        ),
+        format!("  prompt ids: {}", join(tokens)),
+    ];
     if !outcome.generated.is_empty() {
         let text = tokenizer
             .and_then(|t| t.decode(&outcome.generated, false).ok())
             .map(|s| format!(" {s:?}"))
             .unwrap_or_default();
-        println!("  generated ids: {}{text}", join(&outcome.generated));
+        lines.push(format!(
+            "  generated ids: {}{text}",
+            join(&outcome.generated)
+        ));
     }
-    println!(
+    lines.push(format!(
         "  record: {} ({} bytes), {} events over {} positions, {} carrier writes ({} per position), complete {}",
         args.record.display(),
         outcome.record_bytes,
@@ -328,20 +369,101 @@ fn print_summary(
         writes,
         writes.checked_div(positions).unwrap_or(0),
         record.receipt.complete
-    );
-    println!(
+    ));
+    lines.push(format!(
+        "  stepping: {:?} over {positions} positions ({:?} per position)",
+        outcome.stepping,
+        outcome.stepping / u32::try_from(positions.max(1)).unwrap_or(1)
+    ));
+    lines.push(format!(
         "  provenance fingerprint: {}",
         record.provenance_fingerprint
-    );
-    println!("  log sha256: {}", record.receipt.log_sha256);
-    println!("  final position, top {}:", args.top_k);
+    ));
+    lines.push(format!("  log sha256: {}", record.receipt.log_sha256));
+    lines.extend(lens_lines(record, positions.saturating_sub(1), tokenizer));
+    lines.push(format!("  final position, top {}:", args.top_k));
     for (id, logprob) in top_k(&outcome.final_logits, args.top_k) {
-        let text = tokenizer
-            .and_then(|t| t.decode(&[id], false).ok())
-            .map(|s| format!(" {s:?}"))
-            .unwrap_or_default();
-        println!("    {id:>8}  logp {logprob:+.4}{text}");
+        lines.push(format!(
+            "    {id:>8}  logp {logprob:+.4}{}",
+            decoded(id, tokenizer)
+        ));
     }
+    lines
+}
+
+fn print_summary(
+    args: &ObserveArgs,
+    opened: &OpenedComponent,
+    tokens: &[u32],
+    outcome: &Outcome,
+    tokenizer: Option<&tokenizers::Tokenizer>,
+) {
+    for line in summary_lines(args, opened, tokens, outcome, tokenizer) {
+        println!("{line}");
+    }
+}
+
+/// The lens's readouts at `position`, one line per armed site: each
+/// declared token's log-probability and rank, then the top id. Empty
+/// when no lens ran.
+pub(super) fn lens_lines(
+    record: &RunRecord,
+    position: usize,
+    tokenizer: Option<&tokenizers::Tokenizer>,
+) -> Vec<String> {
+    let rows: Vec<&larql_inference::vindex3::RecordedEvent> = record
+        .events
+        .iter()
+        .filter(|e| e.position == position && matches!(e.event, EventKind::Readout { .. }))
+        .collect();
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = Vec::with_capacity(rows.len() + 2);
+    if let Some(failure) = &record.receipt.lens_failure {
+        lines.push(format!("  lens FAILED: {failure}"));
+    }
+    lines.push(format!(
+        "  lens: {} head passes; position {position} by depth (token: logp rank; then top-1):",
+        record.receipt.head_passes
+    ));
+    for row in rows {
+        let EventKind::Readout {
+            layer,
+            site,
+            tokens,
+            top,
+            ..
+        } = &row.event
+        else {
+            continue;
+        };
+        let standings: Vec<String> = tokens
+            .iter()
+            .map(|t| format!("{}: {:+.3} #{}", label(t.id, tokenizer), t.logprob, t.rank))
+            .collect();
+        let best = top
+            .first()
+            .map(|t| format!("  top {}", label(t.id, tokenizer)))
+            .unwrap_or_default();
+        lines.push(format!(
+            "    L{layer:>3} {site:?}  {}{best}",
+            standings.join("  ")
+        ));
+    }
+    lines
+}
+
+/// `id` with its decoded text when a tokenizer can supply one.
+fn label(id: u32, tokenizer: Option<&tokenizers::Tokenizer>) -> String {
+    format!("{id}{}", decoded(id, tokenizer))
+}
+
+fn decoded(id: u32, tokenizer: Option<&tokenizers::Tokenizer>) -> String {
+    tokenizer
+        .and_then(|t| t.decode(&[id], false).ok())
+        .map(|text| format!(" {text:?}"))
+        .unwrap_or_default()
 }
 
 fn join(ids: &[u32]) -> String {

@@ -26,6 +26,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use larql_vindex::format::vindex3::opplan::exec::observe::{
     CarrierForm, CarrierWriteRecord, StepEvent, StepObserver, SublayerSite,
 };
+use larql_vindex::format::vindex3::opplan::exec::observe_lens::{LensReader, LENS_METHOD};
 use larql_vindex::format::vindex3::opplan::exec::observe_stats::StatsObserver;
 use larql_vindex::format::vindex3::opplan::exec::prepared::PreparedOperands;
 use larql_vindex::format::vindex3::opplan::exec::provenance::{ExecutionProvenance, RunProvenance};
@@ -137,11 +138,36 @@ pub enum EventKind {
     Logits {
         vocab: usize,
     },
+    /// What the model's own head says at an armed site (V3-LENS-1):
+    /// the image's final norm and output head applied to the layer
+    /// output, then a full log-softmax. One head pass per readout.
+    Readout {
+        layer: usize,
+        site: Site,
+        method: String,
+        tokens: Vec<TokenStanding>,
+        top: Vec<TopStanding>,
+    },
     /// An executor event this schema has no spelling for yet. Recorded
     /// with the executor's debug form so nothing is lost.
     Unknown {
         debug: String,
     },
+}
+
+/// One declared token's standing in a readout.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TokenStanding {
+    pub id: u32,
+    pub logprob: f64,
+    pub rank: usize,
+}
+
+/// One of the top ids in a readout.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TopStanding {
+    pub id: u32,
+    pub logprob: f64,
 }
 
 /// One event with its run-scoped identity.
@@ -218,6 +244,12 @@ pub struct Receipt {
     pub complete: bool,
     /// The live tap's loss, if a tap was attached; zero otherwise.
     pub live_dropped: u64,
+    /// Head passes the lens performed — its price — zero without a lens.
+    #[serde(default)]
+    pub head_passes: u64,
+    /// The lens's first failure, if it had one; the readouts stop there.
+    #[serde(default)]
+    pub lens_failure: Option<String>,
 }
 
 /// A finished record: header, events, receipt.
@@ -232,10 +264,11 @@ pub struct RunRecord {
 }
 
 /// The lossless consumer.
-pub struct RunRecorder {
+pub struct RunRecorder<'a> {
     identity: RunIdentity,
     provenance: RunProvenance,
     stats: Option<StatsObserver>,
+    lens: Option<Box<dyn LensReader + 'a>>,
     armed: Instant,
     position: usize,
     events: Vec<RecordedEvent>,
@@ -243,7 +276,7 @@ pub struct RunRecorder {
     complete: bool,
 }
 
-impl RunRecorder {
+impl<'a> RunRecorder<'a> {
     /// Arm a recorder with an explicit provenance.
     pub fn arm(
         identity: RunIdentity,
@@ -254,6 +287,7 @@ impl RunRecorder {
             identity,
             provenance,
             stats,
+            lens: None,
             armed: Instant::now(),
             position: 0,
             events: Vec::new(),
@@ -272,6 +306,13 @@ impl RunRecorder {
     ) -> Self {
         let provenance = RunProvenance::new(ExecutionProvenance::of(image), stats.as_ref());
         Self::arm(identity, provenance, stats)
+    }
+
+    /// Arm a logit lens (V3-LENS-1): its readouts become events in the
+    /// same sequence, and its head passes go on the receipt.
+    pub fn with_lens(mut self, lens: Box<dyn LensReader + 'a>) -> Self {
+        self.lens = Some(lens);
+        self
     }
 
     /// Attach the live tap. Events already recorded are not replayed
@@ -316,6 +357,15 @@ impl RunRecorder {
     pub fn finish(self) -> RunRecord {
         let lines = event_lines(&self.events);
         let live_dropped = self.live.as_ref().map(|t| t.ledger.dropped).unwrap_or(0);
+        let head_passes = self
+            .lens
+            .as_ref()
+            .map(|l| u64::try_from(l.head_passes()).expect("count fits"))
+            .unwrap_or(0);
+        let lens_failure = self
+            .lens
+            .as_ref()
+            .and_then(|l| l.failure().map(ToString::to_string));
         let fingerprint = self.provenance.fingerprint();
         RunRecord {
             identity: self.identity,
@@ -328,13 +378,15 @@ impl RunRecorder {
                 provenance_fingerprint: fingerprint,
                 complete: self.complete,
                 live_dropped,
+                head_passes,
+                lens_failure,
             },
             events: self.events,
         }
     }
 }
 
-impl StepObserver for RunRecorder {
+impl StepObserver for RunRecorder<'_> {
     fn event(&mut self, event: StepEvent) {
         let kind = match event {
             StepEvent::Embedded { position } => {
@@ -368,23 +420,47 @@ impl StepObserver for RunRecorder {
     }
 
     fn carrier_write(&mut self, record: CarrierWriteRecord<'_>) {
-        let Some(stats) = &mut self.stats else {
-            return;
+        if let Some(stats) = &mut self.stats {
+            stats.carrier_write(record);
+            let row = stats
+                .rows
+                .pop()
+                .expect("the stats observer appends one row per write");
+            self.push(EventKind::CarrierStats {
+                layer: row.layer,
+                site: row.site.into(),
+                norm: row.norm,
+                delta_norm: row.delta_norm,
+                layer_scale: row.layer_scale,
+                projection: row.projection,
+                probe: row.probe,
+            });
+        }
+        let readout = match &mut self.lens {
+            Some(lens) => lens.read(record),
+            None => None,
         };
-        stats.carrier_write(record);
-        let row = stats
-            .rows
-            .pop()
-            .expect("the stats observer appends one row per write");
-        self.push(EventKind::CarrierStats {
-            layer: row.layer,
-            site: row.site.into(),
-            norm: row.norm,
-            delta_norm: row.delta_norm,
-            layer_scale: row.layer_scale,
-            projection: row.projection,
-            probe: row.probe,
-        });
+        if let Some(readout) = readout {
+            self.push(EventKind::Readout {
+                layer: readout.layer,
+                site: readout.site.into(),
+                method: LENS_METHOD.to_string(),
+                tokens: readout
+                    .tokens
+                    .into_iter()
+                    .map(|t| TokenStanding {
+                        id: t.id,
+                        logprob: t.logprob,
+                        rank: t.rank,
+                    })
+                    .collect(),
+                top: readout
+                    .top
+                    .into_iter()
+                    .map(|(id, logprob)| TopStanding { id, logprob })
+                    .collect(),
+            });
+        }
     }
 }
 

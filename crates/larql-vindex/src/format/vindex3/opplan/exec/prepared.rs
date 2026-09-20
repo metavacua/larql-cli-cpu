@@ -2704,6 +2704,55 @@ impl PreparedOperands {
     }
 
     /// Hidden width, read from the plan's embedding op.
+    /// The exit's arithmetic on one `[hidden]` carrier: the prepared
+    /// final norm, then [`Self::head_over_normed`]. `None` when the image
+    /// carries no output head (a layer-range slice).
+    ///
+    /// V3-LENS-1's one head path: the decode exit calls this, a logit
+    /// lens calls this on an intermediate carrier, and there is no
+    /// second spelling of "the head" for the two to disagree on.
+    pub fn head_logits<B: PlanBackend + ?Sized>(
+        &self,
+        backend: &B,
+        carrier: &[f32],
+    ) -> Result<Option<Vec<f32>>, VindexError> {
+        if self.output().is_none() {
+            return Ok(None);
+        }
+        let normed;
+        let final_hidden: &[f32] = match self.final_norm() {
+            Some(norm) => {
+                normed = norm.apply(backend, carrier);
+                &normed
+            }
+            None => carrier,
+        };
+        self.head_over_normed(backend, final_hidden)
+    }
+
+    /// The prepared output head over an ALREADY final-normed vector, with
+    /// the head's multiplier and softcap; `None` when the image carries
+    /// no output head. The batch exit norms a plane row by row and then
+    /// calls this per row; the decode exit and the lens reach it through
+    /// [`Self::head_logits`].
+    pub fn head_over_normed<B: PlanBackend + ?Sized>(
+        &self,
+        backend: &B,
+        final_hidden: &[f32],
+    ) -> Result<Option<Vec<f32>>, VindexError> {
+        match self.output() {
+            Some((output, weight)) => Ok(Some(backend.output_head(
+                weight.slice(),
+                output.projection.shape[0],
+                self.hidden(),
+                final_hidden,
+                output.multiplier,
+                output.softcapping,
+            )?)),
+            None => Ok(None),
+        }
+    }
+
     pub fn hidden(&self) -> usize {
         self.hidden
     }

@@ -23,7 +23,8 @@ use larql_vindex::format::vindex3::opplan::exec::reference::ReferenceBackend;
 use larql_vindex::format::vindex3::opplan::{plan_component_ops, ComponentOpPlan};
 
 use crate::vindex3::record::{
-    hash_lines, EventKind, RecordError, RunIdentity, RunRecord, RunRecorder, RECORD_SCHEMA,
+    hash_lines, EventKind, RecordError, RecordedEvent, RunIdentity, RunRecord, RunRecorder,
+    RECORD_SCHEMA,
 };
 
 const COMPONENT: &str = "target";
@@ -435,4 +436,123 @@ fn s8_real_container_record_writes_and_replays() {
         bytes,
         record.provenance_fingerprint
     );
+}
+
+// ── V3-LENS-1 on the record ──────────────────────────────────────────
+
+#[test]
+fn lens_readouts_are_recorded_in_sequence_priced_on_the_receipt_and_replay_equal() {
+    use crate::vindex3::{LensLayers, LensSites, LogitLens};
+    let f = fixture();
+    let backend = ProductionBackend::new();
+    let ops = PreparedOperands::load(&f.plan, &f.store, &backend, ExecutionSlice::Full).unwrap();
+    let plain = run(&f.plan, &ops, &backend, &mut NoopObserver);
+    let sites = LensSites {
+        layers: LensLayers::All,
+        attention: false,
+        ffn: true,
+    };
+    let lens = LogitLens::new(&ops, &backend, sites, vec![3, 17], 2);
+    let mut recorder =
+        RunRecorder::for_image(identity(), &ops, Some(stats())).with_lens(Box::new(lens));
+    let recorded = run(&f.plan, &ops, &backend, &mut recorder);
+    assert_eq!(plain, recorded, "the lens on the record changed the logits");
+    let readouts: Vec<&RecordedEvent> = recorder
+        .events()
+        .iter()
+        .filter(|e| matches!(e.event, EventKind::Readout { .. }))
+        .collect();
+    assert_eq!(
+        readouts.len(),
+        G_LAYERS * G_TOKENS.len(),
+        "one readout per armed site"
+    );
+    // A readout follows its write's stats and precedes the structural write.
+    let first = recorder
+        .events()
+        .iter()
+        .position(|e| matches!(e.event, EventKind::Readout { .. }))
+        .unwrap();
+    assert!(matches!(
+        recorder.events()[first - 1].event,
+        EventKind::CarrierStats { .. }
+    ));
+    assert!(matches!(
+        recorder.events()[first + 1].event,
+        EventKind::CarrierWrite { .. }
+    ));
+    for r in &readouts {
+        let EventKind::Readout {
+            site,
+            method,
+            tokens,
+            top,
+            ..
+        } = &r.event
+        else {
+            unreachable!()
+        };
+        assert!(matches!(site, crate::vindex3::Site::Ffn));
+        assert_eq!(method, crate::vindex3::LENS_METHOD);
+        assert_eq!(tokens.iter().map(|t| t.id).collect::<Vec<_>>(), vec![3, 17]);
+        assert!(tokens.iter().all(|t| t.logprob <= 0.0 && t.rank >= 1));
+        assert_eq!(top.len(), 2);
+    }
+    // The last layer's readout of the greedy argmax has rank 1: the lens
+    // at the exit is the executor's own distribution.
+    let last = readouts.last().unwrap();
+    let EventKind::Readout { top, .. } = &last.event else {
+        unreachable!()
+    };
+    let argmax = plain
+        .last()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+        .unwrap()
+        .0 as u32;
+    assert_eq!(top[0].id, argmax);
+
+    recorder.complete();
+    let total = recorder.events().len();
+    let record = recorder.finish();
+    assert_eq!(
+        record.receipt.head_passes as usize,
+        G_LAYERS * G_TOKENS.len()
+    );
+    assert_eq!(record.receipt.lens_failure, None);
+    assert_eq!(record.events.len(), total);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lens.jsonl");
+    record.write_jsonl(&path).unwrap();
+    assert_record_eq(&RunRecord::read_jsonl(&path).unwrap(), &record);
+}
+
+#[test]
+fn a_failing_lens_is_named_on_the_receipt_and_the_record_is_still_complete() {
+    use crate::vindex3::{LensSites, LogitLens};
+    let f = fixture();
+    let backend = ReferenceBackend::new();
+    let ops = PreparedOperands::load(&f.plan, &f.store, &backend, ExecutionSlice::Full).unwrap();
+    let lens = LogitLens::new(&ops, &backend, LensSites::every_ffn(), vec![u32::MAX], 0);
+    let mut recorder = RunRecorder::for_image(identity(), &ops, None).with_lens(Box::new(lens));
+    run(&f.plan, &ops, &backend, &mut recorder);
+    recorder.complete();
+    let record = recorder.finish();
+    assert_eq!(
+        record.receipt.head_passes, 1,
+        "it stopped after the first refusal"
+    );
+    assert!(record
+        .receipt
+        .lens_failure
+        .as_deref()
+        .unwrap()
+        .contains("outside the head's vocabulary"));
+    assert!(!record
+        .events
+        .iter()
+        .any(|e| matches!(e.event, EventKind::Readout { .. })));
+    assert!(record.receipt.complete);
 }

@@ -89,7 +89,11 @@ pub use larql_vindex::format::vindex3::opplan::exec::provenance::{
 // V3-STREAM-1: the lossless run record and the lossy live tap.
 pub use record::{
     Carrier, DropLedger, EventKind, LiveTap, Receipt, RecordError, RecordedEvent, RunIdentity,
-    RunRecord, RunRecorder, Site, RECORD_SCHEMA,
+    RunRecord, RunRecorder, Site, TokenStanding, TopStanding, RECORD_SCHEMA,
+};
+// V3-LENS-1: the true logit lens through the executor's own head.
+pub use larql_vindex::format::vindex3::opplan::exec::observe_lens::{
+    readout_of, LensLayers, LensReader, LensSites, LogitLens, Readout, TokenReadout, LENS_METHOD,
 };
 // The batch-execution taps (V3-LQL-3B): plane events streamed from the
 // one traversal, consumed by residual capture and retrieval keys.
