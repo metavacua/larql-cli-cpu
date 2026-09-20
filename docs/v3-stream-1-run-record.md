@@ -35,7 +35,7 @@ contaminating the record.
 | Structural events (`StepEvent`, non-exhaustive, owned) and borrowed taps (`carrier_write`, `entering_carrier`) | `larql-vindex … exec/observe.rs` |
 | Stats rows computed at the tap (`StatsObserver`, `WriteStats`, `BasisIdentity`) | `larql-vindex … exec/observe_stats.rs` |
 | `ExecutionProvenance::of(&PreparedOperands)`, `RunProvenance`, canonical fingerprints, JSON | `larql-vindex … exec/provenance.rs` |
-| The peer contract's envelope: `run_id`, run-scoped `sequence`, run-relative `timestamp_ns`, schema; loss ledger outside the queue; receipt hashes the log, the log never includes its own digest | `docs/vindex3-observation-contract.md` §4, §9, §12 |
+| The peer contract's envelope: `run_id`, run-scoped `sequence`, run-relative `timestamp_ns`, schema; loss ledger outside the queue; receipt hashes the log, the log never includes its own digest | the Observatory session's observation-contract draft (`vindex3-observation-contract.md`, in that session's working tree and not yet committed) §4, §9, §12 |
 | `larql-inference` already depends on `serde_json`; `tempfile` is a dev-dependency | `crates/larql-inference/Cargo.toml` |
 
 The batch prefill (`execute_streaming`) fires plane events, not step events, and is
