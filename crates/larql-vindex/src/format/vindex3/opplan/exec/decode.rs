@@ -903,23 +903,9 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
         #[cfg(test)]
         let witness_exit = exit.hidden.clone();
         let logits = match exit.hidden {
-            Some(exit_hidden) => {
-                let final_hidden = match ops.final_norm() {
-                    Some(norm) => norm.apply(self.backend, &exit_hidden),
-                    None => exit_hidden,
-                };
-                match ops.output() {
-                    Some((op, weight)) => Some(self.backend.output_head(
-                        weight.slice(),
-                        op.projection.shape[0],
-                        hidden,
-                        &final_hidden,
-                        op.multiplier,
-                        op.softcapping,
-                    )?),
-                    None => None,
-                }
-            }
+            // The one head path (V3-LENS-1): the same function a logit lens
+            // calls on an intermediate carrier.
+            Some(exit_hidden) => ops.head_logits(self.backend, &exit_hidden)?,
             None => {
                 if ops.final_norm().is_some() || ops.output().is_some() {
                     return Err(VindexError::Parse(

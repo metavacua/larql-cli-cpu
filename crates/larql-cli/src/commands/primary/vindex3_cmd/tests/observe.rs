@@ -41,6 +41,10 @@ fn args(container: &std::path::Path, record: &std::path::Path) -> ObserveArgs {
         basis_rows: None,
         basis_id: "supplied".to_string(),
         top_k: 3,
+        lens_tokens: None,
+        lens_layers: "all".to_string(),
+        lens_attention: false,
+        lens_top_k: 2,
     }
 }
 
@@ -188,4 +192,56 @@ fn observe_refuses_a_missing_prompt_bad_ids_and_a_prompt_without_a_tokenizer() {
     let err = run(Vindex3Command::Observe(a)).unwrap_err().to_string();
     assert!(err.contains("exclusive"), "{err}");
     assert!(!record_path.exists(), "no record is written on a refusal");
+}
+
+#[test]
+fn observe_arms_the_lens_and_records_one_readout_per_armed_site() {
+    let (_dir, container) = encoded_fixture();
+    let record_path = container.parent().unwrap().join("lens.jsonl");
+    let mut a = args(&container, &record_path);
+    a.lens_tokens = Some("1,2".to_string());
+    a.generate = 1;
+    run(Vindex3Command::Observe(a)).unwrap();
+    let record = RunRecord::read_jsonl(&record_path).unwrap();
+    let (layers, _) = layers_and_hidden(&record);
+    let readouts: Vec<_> = record
+        .events
+        .iter()
+        .filter(|e| matches!(e.event, EventKind::Readout { .. }))
+        .collect();
+    assert_eq!(readouts.len(), layers * 4, "every FFN site, four positions");
+    assert_eq!(record.receipt.head_passes as usize, layers * 4);
+    assert_eq!(record.receipt.lens_failure, None);
+    for r in &readouts {
+        let EventKind::Readout { tokens, top, .. } = &r.event else {
+            unreachable!()
+        };
+        assert_eq!(tokens.iter().map(|t| t.id).collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!(top.len(), 2);
+    }
+
+    // Attention sites too, on a layer list.
+    let second = container.parent().unwrap().join("lens2.jsonl");
+    let mut a = args(&container, &second);
+    a.lens_tokens = Some("1".to_string());
+    a.lens_layers = "0".to_string();
+    a.lens_attention = true;
+    run(Vindex3Command::Observe(a)).unwrap();
+    let record = RunRecord::read_jsonl(&second).unwrap();
+    assert_eq!(
+        record.receipt.head_passes,
+        2 * 3,
+        "both sites of layer 0, three positions"
+    );
+
+    // A bad layer spec or a bad token list is refused by name.
+    let mut a = args(&container, &record_path);
+    a.lens_tokens = Some("1".to_string());
+    a.lens_layers = "every:0".to_string();
+    let err = run(Vindex3Command::Observe(a)).unwrap_err().to_string();
+    assert!(err.contains("--lens-layers"), "{err}");
+    let mut a = args(&container, &record_path);
+    a.lens_tokens = Some("x".to_string());
+    let err = run(Vindex3Command::Observe(a)).unwrap_err().to_string();
+    assert!(err.contains("--lens-tokens"), "{err}");
 }

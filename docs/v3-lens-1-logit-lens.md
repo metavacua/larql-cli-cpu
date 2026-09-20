@@ -120,6 +120,61 @@ Gemma 3 and is what this reading will be compared against, not assumed.
 
 ---
 
+## Amendments (recorded from the witnesses and the runs)
+
+- **2026-09-20, LF2's magnitude.** The forecast said a full-depth lens on Gemma would cost
+  "several times" the forward. Measured: on Granite 4.2 3B the lens on all 40 FFN sites
+  turned 183.5 ms per position into 1305.7 ms, about 28 ms per head pass, 7.1× the
+  forward; on Gemma 3 4B it turned 134.0 ms into 4132.0 ms, about 118 ms per head pass,
+  **30.8×** the forward. The direction was right, the size was not: one Gemma head pass
+  costs roughly as much as the entire forward at production speed, so 34 of them cost 30
+  forwards. H4's declared, priced sites are not a nicety on this model; they are the
+  only way to use the lens at all on long prompts.
+
+## Results (recorded 2026-09-20, after the forecasts were frozen)
+
+Implementation: `PreparedOperands::head_logits` and `head_over_normed` (the one head
+path; the decode exit and all four batch exits call them), `opplan/exec/observe_lens.rs`
+(`LensSites`, `readout_of`, `LogitLens`, `LensReader`), `EventKind::Readout` on the run
+record with `head_passes` and `lens_failure` on the receipt, and `--lens-tokens`,
+`--lens-layers`, `--lens-attention`, `--lens-top-k` on `vindex3 observe`, which now also
+prints the stepping wall time.
+
+| Property | Result |
+|---|---|
+| LP1 parity, lens armed on every site | PASS on the reference and production backends |
+| LP2 anchor | PASS — the last FFN site's lens is the executor's logits bit for bit on both backends, and through the Gemma 4 miniature's layer scale (H2) |
+| LP3 the exit is the function | PASS — decode-vs-batch, observed-vs-unobserved, HC, attention-residual and Gemma 4 gates all bit-identical after the refactor (134 tests) |
+| LP4 proper distribution | PASS — mass within 1e-9 at every depth; argmax has rank 1; ties rank by strictly-greater |
+| LP5 cost | MEASURED, above; single runs, not characterised |
+| LP6 on the record | PASS — readouts sequenced between a write's stats and its structural event, priced on the receipt, replay equal; a failing lens is named on the receipt and the record stays complete |
+| LP7 first reading | RECORDED, below |
+
+**LP7 — Gemma 3 4B IT, `The capital of France is`, final prompt position, lens on every
+FFN site for ` Paris` (9079) and ` France` (7001), production CPU, default policy
+(Q8-requantised head).** Selected depths; the full table is in the record
+(`gemma3-4b-france-lens`, 1446 events, 204 head passes, fingerprint `4f8b37e7…`).
+
+| Layer | ` Paris` logp / rank | ` France` logp / rank | top-1 |
+|---|---|---|---|
+| 0 | −48.98 / 14055 | −60.57 / 59343 | 否 |
+| 8 | −10.95 / 9070 | −10.31 / 4478 | ` cities` |
+| 16 | −10.66 / 4834 | −9.69 / 846 | ` cities` |
+| 20 | −9.34 / 846 | −8.59 / 421 | ` ________` |
+| 22 | −6.45 / 52 | −8.76 / 225 | ` what` |
+| 23 | −3.81 / 10 | −9.11 / 234 | ` what` |
+| **24** | **−0.36 / 1** | −4.99 / 8 | ` Paris` |
+| 25 | −0.004 / 1 | −7.02 / 3 | ` Paris` |
+| 26–31 | ≤ −0.002 / 1 | −8.8 … −10.0 / 3–5 | ` Paris` |
+| 33 (exit) | −0.223 / 1 | −7.39 / 34 | ` Paris` |
+
+Read against the ADDRESS-BUILD prior (entity binding decisive at L24–L28): ` Paris`
+becomes the head's answer at layer 24, one layer after entering the top ten, and is
+near-certain by 26; ` France` is most readable in the teens and twenties and is never
+the answer. This is one prompt on one model through a Q8-realised head, recorded as a
+comparison with that prior, not as a replication of it. The exit row equals the
+executor's own top-3 (` Paris` −0.2227) by construction.
+
 ## Out of scope
 
 Per-head attention observation (its own rung), interventions, tuned or learned lenses

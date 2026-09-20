@@ -111,6 +111,7 @@ mod kimi_per_expert_prepared;
 mod kquant_projection;
 mod kquant_projection_real;
 mod kv;
+mod lens;
 mod linear_rope;
 mod llama3_rope;
 mod observe;

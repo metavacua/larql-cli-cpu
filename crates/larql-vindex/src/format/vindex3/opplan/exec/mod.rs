@@ -49,6 +49,7 @@ pub mod mamba2;
 pub mod mla;
 pub mod narrow;
 pub mod observe;
+pub mod observe_lens;
 pub mod observe_stats;
 pub mod operands;
 pub mod prefetch;
@@ -916,7 +917,7 @@ fn traverse<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
                 Some(norm) => norm.apply(backend, last),
                 None => last.clone(),
             };
-            let logits = output_logits(ops, backend, hidden, &final_hidden)?;
+            let logits = ops.head_over_normed(backend, &final_hidden)?;
             (FinalState::Hidden(final_hidden), logits)
         }
         // The attention-residual exit: the same reduction a site runs,
@@ -945,7 +946,7 @@ fn traverse<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
                         Some(norm) => norm.apply(backend, &reduced),
                         None => reduced,
                     };
-                    let logits = output_logits(ops, backend, hidden, &final_hidden)?;
+                    let logits = ops.head_over_normed(backend, &final_hidden)?;
                     (FinalState::Hidden(final_hidden), logits)
                 }
                 Some(_) => {
@@ -954,7 +955,7 @@ fn traverse<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
                         Some(norm) => norm.apply(backend, &prefix),
                         None => prefix,
                     };
-                    let logits = output_logits(ops, backend, hidden, &final_hidden)?;
+                    let logits = ops.head_over_normed(backend, &final_hidden)?;
                     (FinalState::Hidden(final_hidden), logits)
                 }
                 None => {
@@ -985,7 +986,7 @@ fn traverse<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
                         Some(norm) => norm.apply(backend, &reduced),
                         None => reduced,
                     };
-                    let logits = output_logits(ops, backend, hidden, &final_hidden)?;
+                    let logits = ops.head_over_normed(backend, &final_hidden)?;
                     (FinalState::Hidden(final_hidden), logits)
                 }
                 _ => {
@@ -1002,30 +1003,6 @@ fn traverse<B: PlanBackend + ?Sized, K: KvState + ?Sized>(
         }
     };
     Ok(FinalOutput { exit, logits })
-}
-
-/// The output head over the final-normed vector, when the image carries
-/// one.
-fn output_logits<B: PlanBackend + ?Sized>(
-    ops: &PreparedOperands,
-    backend: &B,
-    hidden: usize,
-    final_hidden: &[f32],
-) -> Result<Option<Vec<f32>>, VindexError> {
-    match ops.output() {
-        Some((output, weight)) => {
-            let vocab = output.projection.shape[0];
-            Ok(Some(backend.output_head(
-                weight.slice(),
-                vocab,
-                hidden,
-                final_hidden,
-                output.multiplier,
-                output.softcapping,
-            )?))
-        }
-        None => Ok(None),
-    }
 }
 
 /// Scale a sublayer's own output before its residual add, when the plan
