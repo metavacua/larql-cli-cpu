@@ -18,6 +18,7 @@ distributed).
 | [vindex3-observation-contract.md](vindex3-observation-contract.md) | Draft observation contract — canonical taps, event identity, bounded capture, loss accounting, transport, privacy and receipts |
 | [head-obs-1-per-head-observation.md](head-obs-1-per-head-observation.md) | HEAD-OBS-1 — pre-registered per-head observation rung: head-sum / source / parity / accounting laws, emergence and precursor witnesses on the INSTRUMENT-1 bank, no causal labels |
 | [instrument-1-calibration.md](instrument-1-calibration.md) | INSTRUMENT-1 — pre-registered calibration of `vindex3 observe` readers, Anatomist DLA/lens and Observatory against the sealed EDGE-1 bank on Gemma 3 4B (12B replay); case set, readers, questions and forecasts frozen |
+| [instrument-1b-lens.md](instrument-1b-lens.md) | INSTRUMENT-1b — pre-registered: the V3-LENS-1 lens pointed at the emergence write on the INSTRUMENT-1a cases (no new selection); rank/top-1 before, at and after L23 (L35 on 12B) |
 | [v3-obs-1-carrier-observation.md](v3-obs-1-carrier-observation.md) | Frozen executor-side carrier observation rung for the VINDEX3 Observatory contract: `leave_site` tap, parity/reconstruction properties, witness map, and capture-cost protocol |
 | [vindex3-experiments.md](vindex3-experiments.md) | Pre-registered VINDEX3 experimental programme (the V2-0..V2-4 gates) |
 | [vindex3-ontology-drill.md](vindex3-ontology-drill.md) | The four-architecture ontology drill (candidate §17.4) — run 2026-08-30, findings F1–F16 |
