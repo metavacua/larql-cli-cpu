@@ -370,7 +370,7 @@ Artifacts carry every attempted bracket, the exact ids and acceptance flags.
 | Granite 4.2 3B, read-only borrowed tap | 13 | .9462 / .9516 s | .9498 s | .58% | **+.09%** | 20,800 | — |
 | Granite 4.2 3B, HP3 reconstruction | 13 | .9193 / .9137 s | 2.8640 s | .60% | **+212.49%** | 20,800 | 3.26e-7 |
 
-Exact artifacts: `bench/head-obs-1/hp5-gemma.json` and
+Exact artifacts: the driver's hp5-gemma.json artifact (kept with the driver in a local forensic commit, not published) and
 the driver's hp5-granite.json artifact (kept with the driver in a local forensic commit, not published). The first candidate merely consumes every borrowed
 field with no copy or projection; on both subjects its cost is indistinguishable from
 run-to-run noise. The second performs the shipped `HeadStats` reconstruction at every
