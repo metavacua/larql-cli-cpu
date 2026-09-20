@@ -556,3 +556,147 @@ fn a_failing_lens_is_named_on_the_receipt_and_the_record_is_still_complete() {
         .any(|e| matches!(e.event, EventKind::Readout { .. })));
     assert!(record.receipt.complete);
 }
+
+/// V3-HEAD-OBS-1, HP6: with a head reader armed, the record carries one
+/// `HeadSum` and one `HeadWrite` per head beneath every attention write,
+/// the structural `HeadsObserved` event, counts on the receipt, an
+/// uncovered layer named once, and the whole record reads back equal.
+#[test]
+fn hp6_an_observed_run_records_its_head_rows_and_counts_them_on_the_receipt() {
+    use larql_vindex::format::vindex3::fixtures::{G_LAYERS, G_Q_HEADS};
+    use larql_vindex::format::vindex3::opplan::exec::observe::StepEvent;
+    use larql_vindex::format::vindex3::opplan::exec::observe_heads::HeadStats;
+
+    let f = fixture();
+    let backend = ProductionBackend::new();
+    let ops = PreparedOperands::load(&f.plan, &f.store, &backend, ExecutionSlice::Full).unwrap();
+    let heads = HeadStats::new(
+        &ops,
+        &f.plan,
+        &backend,
+        Some(FixedBasis::seeded(G_HIDDEN, DIMS, SEED).unwrap()),
+        2,
+    );
+    let mut recorder =
+        RunRecorder::for_image(identity(), &ops, Some(stats())).with_heads(Box::new(heads));
+    run(&f.plan, &ops, &backend, &mut recorder);
+    recorder.complete();
+    let written = recorder.finish();
+
+    let writes = G_TOKENS.len() * G_LAYERS;
+    let sums = written
+        .events
+        .iter()
+        .filter(|e| matches!(e.event, EventKind::HeadSum { .. }))
+        .count();
+    let rows = written
+        .events
+        .iter()
+        .filter(|e| matches!(e.event, EventKind::HeadWrite { .. }))
+        .count();
+    let observed = written
+        .events
+        .iter()
+        .filter(|e| matches!(e.event, EventKind::HeadsObserved { .. }))
+        .count();
+    assert_eq!(sums, writes, "one head-sum per attention write");
+    assert_eq!(
+        rows,
+        writes * G_Q_HEADS,
+        "one row per head per attention write"
+    );
+    assert_eq!(observed, writes);
+    for e in &written.events {
+        match &e.event {
+            EventKind::HeadSum {
+                method,
+                residual,
+                heads,
+                ..
+            } => {
+                assert_eq!(method, "head-sum-through-post-norm/v1");
+                assert!(*residual <= 1e-5, "residual {residual}");
+                assert_eq!(*heads, G_Q_HEADS);
+            }
+            EventKind::HeadWrite {
+                projection,
+                sources,
+                sink,
+                norm,
+                ..
+            } => {
+                assert_eq!(projection.len(), DIMS);
+                assert!(!sources.is_empty() && sources.len() <= 2);
+                assert_eq!(*sink, 0.0);
+                assert!(norm.is_finite());
+            }
+            _ => {}
+        }
+    }
+    // Order beneath the write: HeadsObserved, then HeadSum and the rows,
+    // then the write's stats and its structural event.
+    let first_sum = written
+        .events
+        .iter()
+        .position(|e| matches!(e.event, EventKind::HeadSum { .. }))
+        .unwrap();
+    assert!(matches!(
+        written.events[first_sum - 1].event,
+        EventKind::HeadsObserved { .. }
+    ));
+    assert!(
+        matches!(
+            written.events[first_sum + G_Q_HEADS + 1].event,
+            EventKind::CarrierStats { .. }
+        ),
+        "{:?}",
+        written.events[first_sum.saturating_sub(2)..first_sum + G_Q_HEADS + 2]
+            .iter()
+            .map(|e| format!("{:?}", e.event)
+                .chars()
+                .take(60)
+                .collect::<String>())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        written.receipt.head_records,
+        u64::try_from(writes * G_Q_HEADS).unwrap()
+    );
+    assert!(written.receipt.head_layers_uncovered.is_empty());
+    assert_eq!(written.receipt.head_failure, None);
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("heads.jsonl");
+    written.write_jsonl(&path).unwrap();
+    let read = RunRecord::read_jsonl(&path).unwrap();
+    assert_record_eq(&read, &written);
+    assert_eq!(read.receipt, written.receipt);
+
+    // An unarmed recorder asks for nothing and counts nothing.
+    let mut plain = RunRecorder::for_image(identity(), &ops, None);
+    assert!(!plain.wants_attention_heads());
+    run(&f.plan, &ops, &backend, &mut plain);
+    let plain = plain.finish();
+    assert_eq!(plain.receipt.head_records, 0);
+    assert!(!plain.events.iter().any(|e| matches!(
+        e.event,
+        EventKind::HeadSum { .. } | EventKind::HeadsObserved { .. }
+    )));
+
+    // An uncovered layer, as the executor would name it on a mixed plan,
+    // reaches the receipt once however often it fires.
+    let mut mixed = RunRecorder::for_image(identity(), &ops, None);
+    mixed.event(StepEvent::HeadsUncovered { layer: 1 });
+    mixed.event(StepEvent::HeadsUncovered { layer: 1 });
+    mixed.event(StepEvent::HeadsUncovered { layer: 0 });
+    let mixed = mixed.finish();
+    assert_eq!(mixed.receipt.head_layers_uncovered, vec![0, 1]);
+    assert_eq!(
+        mixed
+            .events
+            .iter()
+            .filter(|e| matches!(e.event, EventKind::HeadsUncovered { .. }))
+            .count(),
+        3
+    );
+}

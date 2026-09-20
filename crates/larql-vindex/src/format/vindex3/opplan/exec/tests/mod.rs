@@ -106,6 +106,7 @@ mod generate_baseline;
 mod generate_metal;
 mod generate_real;
 mod golden;
+mod head_observation;
 mod kernels;
 mod kimi_per_expert_prepared;
 mod kquant_projection;

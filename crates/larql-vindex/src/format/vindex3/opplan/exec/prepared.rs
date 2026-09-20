@@ -50,7 +50,7 @@ use super::accounting::{
     declared_resident_for, expectations, reconcile, BlockGeometry, Bound, Expectation, Observed,
     Reconciliation, ResidencyBudget, ResourceLedger,
 };
-use super::backend::{MatrixClass, NormCall, PlanBackend, WeightFormat, WeightSlice};
+use super::backend::{MatrixClass, NormCall, PlanBackend, ProjectCall, WeightFormat, WeightSlice};
 use super::experts::FfnOperands;
 use super::hyper_connection::{HeadWeights, SiteWeights, HC_HEAD_SCALE_LEN, HC_SCALE_LEN};
 use super::kda::KdaOutputGateWeights;
@@ -67,6 +67,7 @@ use crate::error::VindexError;
 use crate::format::vindex3::opplan::planned::{Operation, PlannedOperand};
 use crate::format::vindex3::represent::codec::{CodecRegistry, RepresentationExtent};
 use crate::format::vindex3::represent::nvfp4_pack::CodecIdentity;
+use larql_models::config::NormType;
 
 use super::super::conv_qkv::ConvQkvOp;
 use super::super::{
@@ -191,6 +192,27 @@ impl PreparedNorm {
             weight_offset: self.op.weight_offset,
             eps: self.op.eps,
         })
+    }
+
+    /// The norm's kind, so a consumer decomposing a write through it can
+    /// refuse a kind whose linearisation it does not know.
+    pub(super) fn kind(&self) -> NormType {
+        self.op.kind
+    }
+
+    /// The learned weight, before the offset.
+    pub(super) fn weight(&self) -> &[f32] {
+        &self.weight
+    }
+
+    /// The offset added to the weight (`1.0` on a Gemma-style `(1 + w)`
+    /// norm, `0.0` otherwise).
+    pub(super) fn weight_offset(&self) -> f32 {
+        self.op.weight_offset
+    }
+
+    pub(super) fn eps(&self) -> f64 {
+        self.op.eps
     }
 }
 
@@ -2751,6 +2773,93 @@ impl PreparedOperands {
             )?)),
             None => Ok(None),
         }
+    }
+
+    /// V3-HEAD-OBS-1, property A4: one query head's share of the output
+    /// projection, `W_o[:, h·d..(h+1)·d] · x`, computed by the SAME
+    /// projection kernel and the same pinned realisation the executor's
+    /// `o_proj` uses — the head's slice of the input is placed in a
+    /// zero vector of the projection's full input width and the whole
+    /// projection runs, so a consumer never carries a second `W_o`. The
+    /// O bias is NOT added: it is a once-only term the consumer adds
+    /// after summing heads (see [`Self::attention_output_bias`]).
+    /// Refuses a layer outside the executed range, a layer whose
+    /// attention has no softmax heads, or an `x` of the wrong width.
+    pub fn head_projection<B: PlanBackend + ?Sized>(
+        &self,
+        backend: &B,
+        layer: usize,
+        head: usize,
+        head_dim: usize,
+        num_q_heads: usize,
+        x: &[f32],
+    ) -> Result<Vec<f32>, VindexError> {
+        let prepared = self.prepared_layer(layer)?;
+        let PreparedAttention::Softmax(ops) = &prepared.attention else {
+            return Err(VindexError::Parse(format!(
+                "layer {layer}'s attention has no softmax heads to project"
+            )));
+        };
+        if x.len() != head_dim {
+            return Err(VindexError::Parse(format!(
+                "head projection expects a {head_dim}-wide head input, got {}",
+                x.len()
+            )));
+        }
+        if head >= num_q_heads {
+            return Err(VindexError::Parse(format!(
+                "head {head} is outside this layer's {num_q_heads} query heads"
+            )));
+        }
+        let q_rows = num_q_heads * head_dim;
+        let mut padded = vec![0.0f32; q_rows];
+        padded[head * head_dim..(head + 1) * head_dim].copy_from_slice(x);
+        backend.project(ProjectCall {
+            weight: ops.w_o.slice(),
+            out_dim: self.hidden,
+            in_dim: q_rows,
+            x: &padded,
+        })
+    }
+
+    /// The attention output projection's bias for a layer, if the plan
+    /// declares one — the once-only term of the head-sum law.
+    pub fn attention_output_bias(&self, layer: usize) -> Result<Option<&[f32]>, VindexError> {
+        let prepared = self.prepared_layer(layer)?;
+        let PreparedAttention::Softmax(ops) = &prepared.attention else {
+            return Ok(None);
+        };
+        Ok(ops.biases.as_ref().map(|b| b[3].as_slice()))
+    }
+
+    /// The post-attention norm a layer applies to its attention output
+    /// before the residual write, if it has one.
+    pub(super) fn post_attention_norm(
+        &self,
+        layer: usize,
+    ) -> Result<Option<&PreparedNorm>, VindexError> {
+        Ok(self.prepared_layer(layer)?.post_attention.as_ref())
+    }
+
+    /// Whether a layer's attention is a softmax family this image taps.
+    pub fn attention_has_heads(&self, layer: usize) -> Result<bool, VindexError> {
+        Ok(matches!(
+            self.prepared_layer(layer)?.attention,
+            PreparedAttention::Softmax(_)
+        ))
+    }
+
+    fn prepared_layer(&self, layer: usize) -> Result<&PreparedLayer, VindexError> {
+        let first = self.first_layer;
+        layer
+            .checked_sub(first)
+            .and_then(|offset| self.layers.get(offset))
+            .ok_or_else(|| {
+                VindexError::Parse(format!(
+                    "layer {layer} is outside this image's executed layers {first}..{}",
+                    first + self.layers.len()
+                ))
+            })
     }
 
     pub fn hidden(&self) -> usize {

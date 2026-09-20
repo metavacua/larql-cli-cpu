@@ -45,6 +45,8 @@ fn args(container: &std::path::Path, record: &std::path::Path) -> ObserveArgs {
         lens_layers: "all".to_string(),
         lens_attention: false,
         lens_top_k: 2,
+        heads: false,
+        heads_top_k: 5,
     }
 }
 
@@ -329,4 +331,65 @@ fn the_summary_and_lens_lines_say_what_the_record_says() {
         lines[top + 2]
     );
     assert_eq!(lines.len(), top + 3);
+}
+
+/// V3-HEAD-OBS-1 through the verb: `--heads` puts one head-sum and one
+/// row per query head beneath every attention write, the receipt counts
+/// the records and names no uncovered layer on an all-softmax plan, and
+/// every head-sum residual is within the freeze's tolerance.
+#[test]
+fn observe_records_head_rows_and_counts_them_on_the_receipt() {
+    let (_dir, container) = encoded_fixture();
+    let record_path = container.parent().unwrap().join("heads.jsonl");
+    let mut a = args(&container, &record_path);
+    a.heads = true;
+    a.heads_top_k = 2;
+    run(Vindex3Command::Observe(a)).unwrap();
+    let record = RunRecord::read_jsonl(&record_path).unwrap();
+    let observed: Vec<usize> = record
+        .events
+        .iter()
+        .filter_map(|e| match e.event {
+            EventKind::HeadsObserved { heads, .. } => Some(heads),
+            _ => None,
+        })
+        .collect();
+    let (layers, _) = layers_and_hidden(&record);
+    assert_eq!(
+        observed.len(),
+        layers * 3,
+        "one per attention write per position"
+    );
+    let rows = record
+        .events
+        .iter()
+        .filter(|e| matches!(e.event, EventKind::HeadWrite { .. }))
+        .count();
+    assert_eq!(rows, observed.iter().sum::<usize>());
+    assert_eq!(record.receipt.head_records, u64::try_from(rows).unwrap());
+    assert!(record.receipt.head_layers_uncovered.is_empty());
+    assert_eq!(record.receipt.head_failure, None);
+    for e in &record.events {
+        match &e.event {
+            EventKind::HeadSum { residual, .. } => assert!(*residual <= 1e-5, "{residual}"),
+            EventKind::HeadWrite {
+                sources,
+                projection,
+                ..
+            } => {
+                assert!(sources.len() <= 2 && !sources.is_empty());
+                assert_eq!(projection.len(), DIMS);
+            }
+            _ => {}
+        }
+    }
+    // Without the flag the record carries none of it.
+    let plain_path = container.parent().unwrap().join("no-heads.jsonl");
+    run(Vindex3Command::Observe(args(&container, &plain_path))).unwrap();
+    let plain = RunRecord::read_jsonl(&plain_path).unwrap();
+    assert_eq!(plain.receipt.head_records, 0);
+    assert!(!plain.events.iter().any(|e| matches!(
+        e.event,
+        EventKind::HeadSum { .. } | EventKind::HeadsObserved { .. }
+    )));
 }

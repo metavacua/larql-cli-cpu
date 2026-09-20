@@ -92,6 +92,9 @@ pub use record::{
     RunRecord, RunRecorder, Site, TokenStanding, TopStanding, RECORD_SCHEMA,
 };
 // V3-LENS-1: the true logit lens through the executor's own head.
+pub use larql_vindex::format::vindex3::opplan::exec::observe_heads::{
+    HeadReader, HeadRow, HeadStats, HeadWrite, HEAD_SUM_METHOD,
+};
 pub use larql_vindex::format::vindex3::opplan::exec::observe_lens::{
     readout_of, LensLayers, LensReader, LensSites, LogitLens, Readout, TokenReadout, LENS_METHOD,
 };
