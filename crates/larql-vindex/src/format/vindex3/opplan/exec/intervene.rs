@@ -69,13 +69,25 @@ pub enum VectorProvenance {
         position: usize,
         sha256: String,
     },
+    /// V3-INTERVENE-2: the vector is a query head's `ctx_h` captured
+    /// from another run at a `(layer, head, position)` address — J7's
+    /// head form of [`Self::Captured`].
+    CapturedHead {
+        run_id: String,
+        layer: usize,
+        head: usize,
+        position: usize,
+        sha256: String,
+    },
 }
 
 impl VectorProvenance {
     /// The hash the provenance claims for its bytes.
     pub fn sha256(&self) -> &str {
         match self {
-            Self::Literal { sha256 } | Self::Captured { sha256, .. } => sha256,
+            Self::Literal { sha256 }
+            | Self::Captured { sha256, .. }
+            | Self::CapturedHead { sha256, .. } => sha256,
         }
     }
 }
@@ -271,6 +283,9 @@ pub struct Firing {
 pub struct InterventionStepOutput {
     pub logits: Option<Vec<f32>>,
     pub firings: Vec<Firing>,
+    /// V3-INTERVENE-2: which declared head interventions applied on this
+    /// step. Empty when [`super::intervene_heads::HeadInterventionPlan::none`] was threaded.
+    pub head_firings: Vec<super::intervene_heads::HeadFiring>,
 }
 
 /// An address that was declared and never reached by the run.

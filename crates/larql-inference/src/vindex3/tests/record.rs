@@ -23,7 +23,7 @@ use larql_vindex::format::vindex3::opplan::exec::reference::ReferenceBackend;
 use larql_vindex::format::vindex3::opplan::{plan_component_ops, ComponentOpPlan};
 
 use crate::vindex3::record::{
-    hash_lines, EventKind, RecordError, RecordedEvent, RunIdentity, RunRecord, RunRecorder,
+    hash_lines, EventKind, RecordError, RecordedEvent, RunIdentity, RunRecord, RunRecorder, Site,
     RECORD_SCHEMA,
 };
 
@@ -729,11 +729,12 @@ fn ip6_an_intervened_record_carries_its_declaration_firings_and_refusal() {
     let step_all = |plan: &InterventionPlan, recorder: &mut RunRecorder| -> usize {
         let mut kv = RowKvState::default();
         let mut session = DecodeSession::over_prepared(&f.plan, &ops, &backend, &mut kv).unwrap();
+        let heads = larql_vindex::format::vindex3::opplan::exec::intervene_heads::HeadInterventionPlan::none();
         G_TOKENS
             .iter()
             .map(|&t| {
                 session
-                    .step_intervened(t, recorder, plan)
+                    .step_intervened(t, recorder, plan, &heads)
                     .unwrap()
                     .firings
                     .len()
@@ -843,4 +844,98 @@ fn ip6_an_intervened_record_carries_its_declaration_firings_and_refusal() {
     assert_eq!(baseline.receipt.interventions_declared, 0);
     assert_eq!(baseline.receipt.interventions_applied, 0);
     assert_eq!(baseline.receipt.intervention_refusal, None);
+}
+
+/// V3-INTERVENE-2, J5/JP3: zeroing one head's `ctx_h` on a plan WITH a
+/// post-attention norm and a gate produces a measurable shortcut gap —
+/// the subtractive shortcut (`delta_base − c′_h`) is not the model's own
+/// counterfactual, computed from this SAME run's pre-intervention head
+/// records, never a second run.
+#[test]
+fn jp3_zeroing_a_head_on_a_gated_post_norm_plan_produces_a_measurable_shortcut_gap() {
+    use larql_vindex::format::vindex3::opplan::exec::intervene_heads::{
+        HeadAddress, HeadIntervention, HeadInterventionPlan,
+    };
+    use larql_vindex::format::vindex3::opplan::exec::observe_heads::HeadStats;
+
+    let f = fixture();
+    let backend = ProductionBackend::new();
+    let ops = PreparedOperands::load(&f.plan, &f.store, &backend, ExecutionSlice::Full).unwrap();
+    let layer = 0;
+    let head = 0;
+    let position = 3;
+    let declared = HeadInterventionPlan::none()
+        .with(HeadIntervention::zero(
+            HeadAddress::new(layer, head, [position]).unwrap(),
+        ))
+        .unwrap();
+
+    let heads = HeadStats::new(&ops, &f.plan, &backend, None, 3).retaining_children();
+    let mut recorder = RunRecorder::for_image(identity(), &ops, None)
+        .with_heads(Box::new(heads))
+        .with_head_interventions(&declared);
+    let mut kv = RowKvState::default();
+    let mut session = DecodeSession::over_prepared(&f.plan, &ops, &backend, &mut kv).unwrap();
+    for &t in G_TOKENS.iter() {
+        session
+            .step_intervened(
+                t,
+                &mut recorder,
+                &larql_vindex::format::vindex3::opplan::exec::intervene::InterventionPlan::none(),
+                &declared,
+            )
+            .unwrap();
+    }
+    recorder.complete();
+    let record = recorder.finish();
+
+    assert!(record.identity.head_intervention_sha256.is_some());
+    assert_eq!(record.receipt.head_interventions_declared, 1);
+    assert_eq!(record.receipt.head_interventions_applied, 1);
+
+    let gap = record
+        .events
+        .iter()
+        .find_map(|e| match &e.event {
+            EventKind::HeadInterventionGap {
+                layer: l,
+                head: h,
+                gap,
+            } if *l == layer && *h == head => Some(*gap),
+            _ => None,
+        })
+        .expect("the zero firing's gap is on the record");
+    assert!(
+        gap.is_finite() && gap >= 0.0,
+        "gap {gap} is not a valid relative norm"
+    );
+    assert!(
+        gap > 1e-6,
+        "gap {gap} is suspiciously small for a gated post-norm layer; the shortcut and the \
+         real counterfactual should visibly differ"
+    );
+
+    // The event precedes the write it explains, same as HeadSum/HeadWrite.
+    let gap_idx = record
+        .events
+        .iter()
+        .position(|e| matches!(e.event, EventKind::HeadInterventionGap { .. }))
+        .unwrap();
+    let write_idx = record
+        .events
+        .iter()
+        .position(|e| {
+            matches!(
+                &e.event,
+                EventKind::CarrierWrite {
+                    site: Site::Attention,
+                    ..
+                }
+            ) && e.position == position
+        })
+        .unwrap();
+    assert!(
+        gap_idx < write_idx,
+        "the gap precedes the write it explains"
+    );
 }

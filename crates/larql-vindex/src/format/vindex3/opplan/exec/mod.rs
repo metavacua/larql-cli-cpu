@@ -34,6 +34,7 @@ pub mod fidelity_carriage;
 pub mod gated_delta;
 pub mod hyper_connection;
 pub mod intervene;
+pub mod intervene_heads;
 pub mod kda;
 #[cfg(all(feature = "gpu", target_os = "macos"))]
 pub mod kda_metal;

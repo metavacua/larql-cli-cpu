@@ -29,6 +29,7 @@ use super::attention_residual::{self, BoundaryPhase};
 use super::backend::{AttentionStepCall, NormCall, PlanBackend};
 use super::hyper_connection::{self, Bundle, Mutation, SiteReduction};
 use super::intervene::{Firing, Intervention, InterventionPlan, InterventionStepOutput};
+use super::intervene_heads::{HeadFiring, HeadInterventionPlan};
 use super::kv::{KvState, RowKvState};
 use super::observe::{
     AttnResBoundaryRecord, AttnResSiteRecord, CarrierForm, CarrierWriteRecord, HcSite,
@@ -165,6 +166,9 @@ pub(super) struct StepRun {
     /// Every intervention that fired on this step, in execution order
     /// (V3-INTERVENE-1). Empty on the production step.
     pub(super) firings: Vec<Firing>,
+    /// Every head intervention that fired on this step, in execution
+    /// order (V3-INTERVENE-2). Empty on the production step.
+    pub(super) head_firings: Vec<HeadFiring>,
     /// The `[hidden]` vector the exit reduced to, before the final norm.
     #[cfg(test)]
     pub(super) exit: Option<Vec<f32>>,
@@ -400,22 +404,27 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
             observer,
             Mutation::None,
             &InterventionPlan::none(),
+            &HeadInterventionPlan::none(),
         )?;
         Ok(StepOutput { logits: run.logits })
     }
 
-    /// The step with interventions armed (V3-INTERVENE-1). The plan is
+    /// The step with interventions armed (V3-INTERVENE-1 carrier
+    /// addresses, V3-INTERVENE-2 head addresses — declared beside each
+    /// other, since one declaration file may name both). Both plans are
     /// admitted against this image before the token executes: an address
-    /// off the executed layers, a site the layer never writes, a carrier
-    /// that is not `Single`, or a vector of the wrong width refuses here.
-    /// The returned firings say which declared interventions applied on
-    /// this step; a declared address the run never reaches is the
-    /// caller's to report from `InterventionPlan::unreached`.
+    /// off the executed layers, a site or head the layer never writes, a
+    /// carrier that is not `Single`, or a vector of the wrong width
+    /// refuses here. The returned firings say which declared
+    /// interventions applied on this step; a declared address the run
+    /// never reaches is the caller's to report from
+    /// `InterventionPlan::unreached` / `HeadInterventionPlan::unreached`.
     pub fn step_intervened(
         &mut self,
         token: u32,
         observer: &mut dyn StepObserver,
         interventions: &InterventionPlan,
+        head_interventions: &HeadInterventionPlan,
     ) -> Result<InterventionStepOutput, VindexError> {
         if observer.wants_attention_heads() && !self.backend.serves_attention_heads() {
             return Err(VindexError::Parse(format!(
@@ -424,11 +433,25 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
                 self.backend.name()
             )));
         }
+        if !head_interventions.is_none() && !self.backend.serves_head_intervention() {
+            return Err(VindexError::Parse(format!(
+                "per-head attention intervention is not served by the {} backend",
+                self.backend.name()
+            )));
+        }
         interventions.admit(self.plan, self.ops.get())?;
-        let run = self.run(Entry::Token(token), observer, Mutation::None, interventions)?;
+        head_interventions.admit(self.plan, self.ops.get())?;
+        let run = self.run(
+            Entry::Token(token),
+            observer,
+            Mutation::None,
+            interventions,
+            head_interventions,
+        )?;
         Ok(InterventionStepOutput {
             logits: run.logits,
             firings: run.firings,
+            head_firings: run.head_firings,
         })
     }
 
@@ -447,6 +470,7 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
             observer,
             mutation,
             &InterventionPlan::none(),
+            &HeadInterventionPlan::none(),
         )
     }
 
@@ -465,6 +489,7 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
             observer,
             mutation,
             &InterventionPlan::none(),
+            &HeadInterventionPlan::none(),
         )
     }
 
@@ -475,9 +500,11 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
         observer: &mut dyn StepObserver,
         mutation: Mutation,
         interventions: &InterventionPlan,
+        head_interventions: &HeadInterventionPlan,
     ) -> Result<StepRun, VindexError> {
         let ops = self.ops.get();
         let mut firings: Vec<Firing> = Vec::new();
+        let mut head_firings: Vec<HeadFiring> = Vec::new();
         let hidden = ops.hidden();
         let topology = ops.hyper_connection();
         // The ONE declared fact the attention-residual schedule needs:
@@ -762,7 +789,57 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
                     // inside the kernel; the structural event closes it
                     // before the write so a reader of the write knows
                     // the heads preceded it.
-                    let out = if observer.wants_attention_heads() {
+                    //
+                    // V3-INTERVENE-2: when a head intervention addresses
+                    // THIS layer, the step routes through the intervened
+                    // form instead — the tap (if armed) still fires on
+                    // the uninintervened `ctx_h` first (J3); declaring
+                    // nothing at this layer costs nothing (J4/JF1).
+                    let out = if head_interventions.touches_layer(index) {
+                        let heads = step.op.num_q_heads;
+                        let wants_heads = observer.wants_attention_heads();
+                        let mut fired_heads: Vec<HeadFiring> = Vec::new();
+                        let mut head_intervene = |head: usize, ctx_h: &mut [f32]| {
+                            if let Some(intervention) = head_interventions.at(index, head, position)
+                            {
+                                intervention.apply(ctx_h);
+                                fired_heads.push(HeadFiring {
+                                    layer: index,
+                                    head,
+                                    position,
+                                    kind: intervention.kind(),
+                                });
+                            }
+                        };
+                        let out = if wants_heads {
+                            self.backend.attention_step_intervened(
+                                step,
+                                Some(&mut |record| observer.attention_head(index, record)),
+                                &mut head_intervene,
+                            )?
+                        } else {
+                            self.backend.attention_step_intervened(
+                                step,
+                                None,
+                                &mut head_intervene,
+                            )?
+                        };
+                        if wants_heads {
+                            observer.event(StepEvent::HeadsObserved {
+                                layer: index,
+                                heads,
+                            });
+                        }
+                        for fired in &fired_heads {
+                            observer.event(StepEvent::HeadIntervened {
+                                layer: fired.layer,
+                                head: fired.head,
+                                kind: fired.kind,
+                            });
+                        }
+                        head_firings.extend(fired_heads);
+                        out
+                    } else if observer.wants_attention_heads() {
                         let heads = step.op.num_q_heads;
                         let out = self.backend.attention_step_observed(step, &mut |record| {
                             observer.attention_head(index, record)
@@ -1032,6 +1109,7 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
         Ok(StepRun {
             logits,
             firings,
+            head_firings,
             #[cfg(test)]
             exit: witness_exit,
             #[cfg(test)]

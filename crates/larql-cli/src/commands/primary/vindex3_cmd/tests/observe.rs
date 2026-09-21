@@ -50,6 +50,8 @@ fn args(container: &std::path::Path, record: &std::path::Path) -> ObserveArgs {
         intervene: None,
         capture: None,
         capture_out: None,
+        capture_heads: None,
+        capture_heads_out: None,
     }
 }
 
@@ -299,6 +301,7 @@ fn the_summary_and_lens_lines_say_what_the_record_says() {
         record_bytes: 123,
         stepping: std::time::Duration::from_millis(40),
         applied: 0,
+        head_applied: 0,
     };
     let lines = summary_lines(&a, &opened, &[1, 2, 3], &outcome, None);
     assert!(lines[0].starts_with("observe "), "{}", lines[0]);
