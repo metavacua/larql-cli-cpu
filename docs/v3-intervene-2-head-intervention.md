@@ -226,9 +226,9 @@ Every run shares one `provenance_fingerprint` (`4f8b37e72a92fd0b9a21486bc6228b7c
 same execution substrate, only the declaration differs); each run's own `log_sha256` differs
 (the computation genuinely differs per arm even though the final tokens do not). Raw records
 (2898–2899 events × 17 runs, `/tmp/jp6-denmark/records/*.jsonl`) are reproducible byte-for-byte
-from `127ed390` + these declarations + this container and are not committed (project practice;
-`docs/gw-vindex3-walk-phase1.md`-style raw dumps stay local). The sealed HEAD-1 rows for this
-exact pair (`captures/b14h1_full_meta.json` in `chris-experiments`) at block 14:
+from `127ed390` + these declarations + this container and are not committed — raw per-run
+dumps stay local, as elsewhere in this project. The sealed HEAD-1 rows for this exact pair
+(`captures/b14h1_full_meta.json` in `chris-experiments`) at block 14:
 
 | condition | sealed `gen` | pattern |
 |---|---|---|
