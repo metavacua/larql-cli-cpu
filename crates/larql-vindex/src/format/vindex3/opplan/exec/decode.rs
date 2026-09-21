@@ -381,6 +381,16 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
         token: u32,
         observer: &mut dyn StepObserver,
     ) -> Result<StepOutput, VindexError> {
+        // V3-HEAD-OBS-1, property A8: a request for heads against a
+        // backend that cannot serve them refuses before the token
+        // executes, never after a partial capture.
+        if observer.wants_attention_heads() && !self.backend.serves_attention_heads() {
+            return Err(VindexError::Parse(format!(
+                "per-head attention observation is not served by the {} backend; observe \
+                 without heads or run on a backend that declares them",
+                self.backend.name()
+            )));
+        }
         let run = self.run(Entry::Token(token), observer, Mutation::None)?;
         Ok(StepOutput { logits: run.logits })
     }
@@ -691,16 +701,44 @@ impl<'a, B: PlanBackend> DecodeSession<'a, B> {
                         hidden,
                     );
                     let _site = super::cpu::ledger::in_site(super::cpu::ledger::Site::Attention);
-                    let out = self.backend.attention_step(AttentionStepCall {
+                    let step = AttentionStepCall {
                         op: call,
                         position,
                         keys: self.kv.state().keys(index),
                         values: self.kv.state().values(index),
-                    })?;
+                    };
+                    // V3-HEAD-OBS-1: the same step, with the per-head tap
+                    // armed when the observer asked for it. The tap fires
+                    // inside the kernel; the structural event closes it
+                    // before the write so a reader of the write knows
+                    // the heads preceded it.
+                    let out = if observer.wants_attention_heads() {
+                        let heads = step.op.num_q_heads;
+                        let out = self.backend.attention_step_observed(step, &mut |record| {
+                            observer.attention_head(index, record)
+                        })?;
+                        observer.event(StepEvent::HeadsObserved {
+                            layer: index,
+                            heads,
+                        });
+                        out
+                    } else {
+                        self.backend.attention_step(step)?
+                    };
                     self.kv.state_mut().append(index, out.key, out.value);
                     out.output
                 }
             };
+            // V3-HEAD-OBS-1, property A6: a layer without softmax heads is
+            // named as uncovered on this step, never refused as a plan.
+            if observer.wants_attention_heads()
+                && !matches!(
+                    state.attention,
+                    super::prepared::PreparedAttention::Softmax(_)
+                )
+            {
+                observer.event(StepEvent::HeadsUncovered { layer: index });
+            }
             drop(_attention_stage);
             let mut attn_out = match &state.post_attention {
                 Some(norm) => norm.apply(self.backend, &raw_attn),

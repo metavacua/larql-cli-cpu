@@ -26,6 +26,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use larql_vindex::format::vindex3::opplan::exec::observe::{
     CarrierForm, CarrierWriteRecord, StepEvent, StepObserver, SublayerSite,
 };
+use larql_vindex::format::vindex3::opplan::exec::observe_heads::{HeadReader, HEAD_SUM_METHOD};
 use larql_vindex::format::vindex3::opplan::exec::observe_lens::{LensReader, LENS_METHOD};
 use larql_vindex::format::vindex3::opplan::exec::observe_stats::StatsObserver;
 use larql_vindex::format::vindex3::opplan::exec::prepared::PreparedOperands;
@@ -148,11 +149,53 @@ pub enum EventKind {
         tokens: Vec<TokenStanding>,
         top: Vec<TopStanding>,
     },
+    /// V3-HEAD-OBS-1: this layer's attention emitted one head record per
+    /// query head on this step, before its write (structural).
+    HeadsObserved {
+        layer: usize,
+        heads: usize,
+    },
+    /// V3-HEAD-OBS-1: this layer's attention has no softmax heads, so the
+    /// write above it has no head decomposition; the receipt names the
+    /// layer as uncovered.
+    HeadsUncovered {
+        layer: usize,
+    },
+    /// V3-HEAD-OBS-1, stats level: one query head's child of the
+    /// attention write — `‖c′_h‖`, its projection on the run's basis, the
+    /// KV head, the top source positions with their weights, and the
+    /// sink mass. Keyed beneath the site's own write, which stays
+    /// authoritative.
+    HeadWrite {
+        layer: usize,
+        head: usize,
+        kv_head: usize,
+        norm: f64,
+        projection: Vec<f32>,
+        sources: Vec<SourceStanding>,
+        sink: f32,
+    },
+    /// V3-HEAD-OBS-1: the head-sum law's measured residual at one
+    /// attention write, `‖Σ_h c′_h + bias′ − delta‖ / ‖delta‖`, by the
+    /// named method.
+    HeadSum {
+        layer: usize,
+        method: String,
+        heads: usize,
+        residual: f64,
+    },
     /// An executor event this schema has no spelling for yet. Recorded
     /// with the executor's debug form so nothing is lost.
     Unknown {
         debug: String,
     },
+}
+
+/// One source position's attention weight in a [`EventKind::HeadWrite`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourceStanding {
+    pub position: usize,
+    pub weight: f32,
 }
 
 /// One declared token's standing in a readout.
@@ -250,6 +293,19 @@ pub struct Receipt {
     /// The lens's first failure, if it had one; the readouts stop there.
     #[serde(default)]
     pub lens_failure: Option<String>,
+    /// V3-HEAD-OBS-1: how many head records the executor handed the head
+    /// reader; zero when none was armed.
+    #[serde(default)]
+    pub head_records: u64,
+    /// V3-HEAD-OBS-1: the executed layers whose attention has no softmax
+    /// heads, named once each, ascending; empty when heads were not
+    /// armed or every layer was covered.
+    #[serde(default)]
+    pub head_layers_uncovered: Vec<usize>,
+    /// V3-HEAD-OBS-1: why the head reader stopped, if it did; the record
+    /// stays complete without its rows from that point.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_failure: Option<String>,
 }
 
 /// A finished record: header, events, receipt.
@@ -269,6 +325,11 @@ pub struct RunRecorder<'a> {
     provenance: RunProvenance,
     stats: Option<StatsObserver>,
     lens: Option<Box<dyn LensReader + 'a>>,
+    /// V3-HEAD-OBS-1: the head reader, when armed; the recorder asks the
+    /// executor for heads exactly when one is attached.
+    heads: Option<Box<dyn HeadReader + 'a>>,
+    /// Layers the executor named as uncovered, ascending, once each.
+    uncovered: Vec<usize>,
     armed: Instant,
     position: usize,
     events: Vec<RecordedEvent>,
@@ -288,6 +349,8 @@ impl<'a> RunRecorder<'a> {
             provenance,
             stats,
             lens: None,
+            heads: None,
+            uncovered: Vec::new(),
             armed: Instant::now(),
             position: 0,
             events: Vec::new(),
@@ -312,6 +375,16 @@ impl<'a> RunRecorder<'a> {
     /// same sequence, and its head passes go on the receipt.
     pub fn with_lens(mut self, lens: Box<dyn LensReader + 'a>) -> Self {
         self.lens = Some(lens);
+        self
+    }
+
+    /// Arm a head reader (V3-HEAD-OBS-1): the recorder then asks the
+    /// executor for per-head records, hands them to the reader, and at
+    /// every attention write records the reader's stats-level rows and
+    /// the head-sum residual as events in the same sequence; the count,
+    /// the uncovered layers and any failure go on the receipt.
+    pub fn with_heads(mut self, heads: Box<dyn HeadReader + 'a>) -> Self {
+        self.heads = Some(heads);
         self
     }
 
@@ -366,6 +439,16 @@ impl<'a> RunRecorder<'a> {
             .lens
             .as_ref()
             .and_then(|l| l.failure().map(ToString::to_string));
+        let head_records = self
+            .heads
+            .as_ref()
+            .map(|h| u64::try_from(h.records()).expect("count fits"))
+            .unwrap_or(0);
+        let head_failure = self
+            .heads
+            .as_ref()
+            .and_then(|h| h.failure().map(ToString::to_string));
+        let head_layers_uncovered = self.uncovered.clone();
         let fingerprint = self.provenance.fingerprint();
         RunRecord {
             identity: self.identity,
@@ -380,6 +463,9 @@ impl<'a> RunRecorder<'a> {
                 live_dropped,
                 head_passes,
                 lens_failure,
+                head_records,
+                head_layers_uncovered,
+                head_failure,
             },
             events: self.events,
         }
@@ -396,6 +482,13 @@ impl StepObserver for RunRecorder<'_> {
             StepEvent::AttentionDone { layer } => EventKind::AttentionDone { layer },
             StepEvent::FfnDone { layer } => EventKind::FfnDone { layer },
             StepEvent::Logits { vocab } => EventKind::Logits { vocab },
+            StepEvent::HeadsObserved { layer, heads } => EventKind::HeadsObserved { layer, heads },
+            StepEvent::HeadsUncovered { layer } => {
+                if let Err(at) = self.uncovered.binary_search(&layer) {
+                    self.uncovered.insert(at, layer);
+                }
+                EventKind::HeadsUncovered { layer }
+            }
             StepEvent::CarrierWrite {
                 layer,
                 site,
@@ -419,7 +512,50 @@ impl StepObserver for RunRecorder<'_> {
         });
     }
 
+    fn wants_attention_heads(&self) -> bool {
+        self.heads.is_some()
+    }
+
+    fn attention_head(
+        &mut self,
+        layer: usize,
+        record: larql_vindex::format::vindex3::opplan::exec::observe::AttentionHeadRecord<'_>,
+    ) {
+        if let Some(heads) = &mut self.heads {
+            heads.attention_head(layer, record);
+        }
+    }
+
     fn carrier_write(&mut self, record: CarrierWriteRecord<'_>) {
+        // V3-HEAD-OBS-1: the write's head decomposition, keyed beneath the
+        // write and recorded before its stats and structural event.
+        let head_write = match &mut self.heads {
+            Some(heads) => heads.finish_write(&record),
+            None => None,
+        };
+        if let Some(write) = head_write {
+            self.push(EventKind::HeadSum {
+                layer: write.layer,
+                method: HEAD_SUM_METHOD.to_string(),
+                heads: write.rows.len(),
+                residual: write.residual,
+            });
+            for row in write.rows {
+                self.push(EventKind::HeadWrite {
+                    layer: write.layer,
+                    head: row.head,
+                    kv_head: row.kv_head,
+                    norm: row.norm,
+                    projection: row.projection,
+                    sources: row
+                        .sources
+                        .into_iter()
+                        .map(|(position, weight)| SourceStanding { position, weight })
+                        .collect(),
+                    sink: row.sink,
+                });
+            }
+        }
         if let Some(stats) = &mut self.stats {
             stats.carrier_write(record);
             let row = stats

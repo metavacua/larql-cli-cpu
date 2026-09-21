@@ -51,6 +51,16 @@ pub enum StepEvent {
         site: SublayerSite,
         carrier: CarrierForm,
     },
+    /// V3-HEAD-OBS-1: this layer's attention emitted one head record per
+    /// query head on this step, before its write. Fires only when the
+    /// observer asked for heads.
+    HeadsObserved { layer: usize, heads: usize },
+    /// V3-HEAD-OBS-1: this layer's attention has no softmax heads (a
+    /// state-space or linear-attention family, or a softmax family this
+    /// rung does not tap), so the write above it has no head
+    /// decomposition. Fires only when the observer asked for heads; the
+    /// receipt names the layer as uncovered.
+    HeadsUncovered { layer: usize },
 }
 
 /// The form the residual carrier takes at a write (V3-OBS-1, property
@@ -278,6 +288,98 @@ pub trait StepObserver {
     /// schedule that wave 19's two-point site seam cannot express.
     /// Default: ignore.
     fn attention_residual_boundary(&mut self, _record: AttnResBoundaryRecord<'_>) {}
+
+    /// V3-HEAD-OBS-1: ask for one [`AttentionHeadRecord`] per query head
+    /// at every softmax attention write. Off by default; an observer
+    /// that asks on a backend that cannot serve heads is refused before
+    /// the first token executes, never handed a partial capture.
+    fn wants_attention_heads(&self) -> bool {
+        false
+    }
+
+    /// One query head's distribution and mixed value, borrowed from
+    /// inside the kernel between aggregation and the output gate. Fires
+    /// only when [`Self::wants_attention_heads`] is true, once per head,
+    /// before the layer's `HeadsObserved` event and its attention write.
+    fn attention_head(&mut self, _layer: usize, _record: AttentionHeadRecord<'_>) {}
+}
+
+/// One query head at one attention write (V3-HEAD-OBS-1, property A2):
+/// what the kernel actually computed, borrowed where it computed it.
+pub struct AttentionHeadRecord<'a> {
+    pub position: usize,
+    /// The query head.
+    pub head: usize,
+    /// The KV head it was bound to: `head / (num_q_heads / num_kv_heads)`.
+    pub kv_head: usize,
+    /// The first source position this head could read: zero on a full
+    /// span, `position + 1 − window` on a sliding span past its window.
+    /// Positions before it are ABSENT from `weights`, never zero.
+    pub source_start: usize,
+    /// The distribution over `source_start..=position`, after the score
+    /// scale, the softcap and the sink where the plan declares them.
+    pub weights: &'a [f32],
+    /// The mass the sink took, so `weights.sum() + sink == 1`; zero on a
+    /// plan without sinks.
+    pub sink: f32,
+    /// `ctx_h = Σ_t weights[t] · v_h[t]`: the head's mixed value before the
+    /// output gate, before `o_proj`, before the post-attention norm and
+    /// before any layer scale. `head_dim` wide.
+    pub values: &'a [f32],
+    /// The activated output gate for this head's slice, where the plan
+    /// declares one — what multiplies `values` before `o_proj`. `None`
+    /// where the plan declares no gate.
+    pub gate: Option<&'a [f32]>,
+    /// The KV head's value rows at the attended sources, `head_dim` wide
+    /// each, indexed by `t − source_start`, so a per-source split
+    /// `Σ_t weights[t] · source_values[t]` is computable from the record
+    /// alone (property A3). Same length as `weights`.
+    pub source_values: &'a [&'a [f32]],
+}
+
+/// Build and fire one [`AttentionHeadRecord`] per query head — ONE place,
+/// called by every backend's kernel between aggregation and the gate
+/// multiply (V3-HEAD-OBS-1, property A1), so no backend spells the record
+/// differently. `concat` is the pre-gate aggregation, `kept` the per-head
+/// distributions in head order, `activated_gate` the activated gate over
+/// `concat`'s layout where the plan declares one.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn fire_head_records<'k>(
+    tap: &mut dyn FnMut(AttentionHeadRecord<'_>),
+    position: usize,
+    num_q_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    source_start: usize,
+    has_sinks: bool,
+    concat: &[f32],
+    kept: &[Vec<f32>],
+    activated_gate: Option<&[f32]>,
+    value_of: impl Fn(usize) -> &'k [f32],
+) {
+    let group = num_q_heads / num_kv_heads;
+    for (head, weights) in kept.iter().enumerate() {
+        let kv_head = head / group;
+        let sink = if has_sinks {
+            1.0 - weights.iter().sum::<f32>()
+        } else {
+            0.0
+        };
+        let source_values: Vec<&[f32]> = (source_start..=position)
+            .map(|t| &value_of(t)[kv_head * head_dim..(kv_head + 1) * head_dim])
+            .collect();
+        tap(AttentionHeadRecord {
+            position,
+            head,
+            kv_head,
+            source_start,
+            weights,
+            sink,
+            values: &concat[head * head_dim..(head + 1) * head_dim],
+            gate: activated_gate.map(|g| &g[head * head_dim..(head + 1) * head_dim]),
+            source_values: &source_values,
+        });
+    }
 }
 
 /// The default subscriber: observes nothing. [`DecodeSession::step`]

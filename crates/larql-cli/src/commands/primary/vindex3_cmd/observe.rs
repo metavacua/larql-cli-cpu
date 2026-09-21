@@ -18,7 +18,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::Args;
 use larql_inference::vindex3::{
-    EventKind, LensSites, LogitLens, OpenedComponent, RunIdentity, RunRecord, RunRecorder,
+    EventKind, HeadStats, LensSites, LogitLens, OpenedComponent, RunIdentity, RunRecord,
+    RunRecorder,
 };
 use larql_vindex::format::vindex3::opplan::exec::backend::PlanBackend;
 use larql_vindex::format::vindex3::opplan::exec::decode::DecodeSession;
@@ -38,6 +39,8 @@ const DEFAULT_BASIS_DIMS: usize = 3;
 const DEFAULT_BASIS_SEED: u64 = 0x5EED;
 const DEFAULT_TOP_K: usize = 10;
 const DEFAULT_LENS_TOP_K: usize = 3;
+/// How many source positions a head row keeps unless told otherwise.
+const DEFAULT_HEADS_TOP_K: usize = 5;
 /// The provider name recorded on a basis loaded from `--basis-rows`.
 const SUPPLIED_ROWS_PROVIDER: &str = "cli-supplied-rows";
 
@@ -119,6 +122,18 @@ pub struct ObserveArgs {
     /// How many top ids each readout keeps.
     #[arg(long, default_value_t = DEFAULT_LENS_TOP_K, requires = "lens_tokens")]
     pub lens_top_k: usize,
+
+    /// Arm per-head attention observation (V3-HEAD-OBS-1): at every
+    /// softmax attention write the record gains one row per query head
+    /// (its contribution's norm, basis projection, KV head, top source
+    /// positions and sink mass) and the head-sum residual; uncovered
+    /// layers and the record count go on the receipt.
+    #[arg(long)]
+    pub heads: bool,
+
+    /// How many source positions each head row keeps.
+    #[arg(long, default_value_t = DEFAULT_HEADS_TOP_K, requires = "heads")]
+    pub heads_top_k: usize,
 }
 
 pub fn run(args: ObserveArgs) -> Result<(), BoxErr> {
@@ -186,6 +201,14 @@ impl BackendVisitor for Observe<'_> {
             };
             let lens = LogitLens::new(&ops, backend, sites, tokens, self.args.lens_top_k);
             recorder = recorder.with_lens(Box::new(lens));
+        }
+        if self.args.heads {
+            // V3-HEAD-OBS-1: the head reader projects on the same basis
+            // the stats observer uses, so a head's coordinates and the
+            // carrier's share one coordinate system by construction.
+            let basis = basis_for(self.args, hidden)?;
+            let heads = HeadStats::new(&ops, plan, backend, Some(basis), self.args.heads_top_k);
+            recorder = recorder.with_heads(Box::new(heads));
         }
 
         let clock = Instant::now();
@@ -380,6 +403,32 @@ pub(super) fn summary_lines(
         record.provenance_fingerprint
     ));
     lines.push(format!("  log sha256: {}", record.receipt.log_sha256));
+    if args.heads {
+        let worst = record
+            .events
+            .iter()
+            .filter_map(|e| match &e.event {
+                EventKind::HeadSum { residual, .. } => Some(*residual),
+                _ => None,
+            })
+            .fold(0.0f64, f64::max);
+        lines.push(format!(
+            "  heads: {} records, {} uncovered layer(s){}, worst head-sum residual {worst:.3e}{}",
+            record.receipt.head_records,
+            record.receipt.head_layers_uncovered.len(),
+            if record.receipt.head_layers_uncovered.is_empty() {
+                String::new()
+            } else {
+                format!(" {:?}", record.receipt.head_layers_uncovered)
+            },
+            record
+                .receipt
+                .head_failure
+                .as_ref()
+                .map(|f| format!(", reader FAILED: {f}"))
+                .unwrap_or_default()
+        ));
+    }
     lines.extend(lens_lines(record, positions.saturating_sub(1), tokenizer));
     lines.push(format!("  final position, top {}:", args.top_k));
     for (id, logprob) in top_k(&outcome.final_logits, args.top_k) {

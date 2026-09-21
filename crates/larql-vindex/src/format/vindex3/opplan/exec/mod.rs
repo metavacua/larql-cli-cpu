@@ -49,6 +49,7 @@ pub mod mamba2;
 pub mod mla;
 pub mod narrow;
 pub mod observe;
+pub mod observe_heads;
 pub mod observe_lens;
 pub mod observe_stats;
 pub mod operands;

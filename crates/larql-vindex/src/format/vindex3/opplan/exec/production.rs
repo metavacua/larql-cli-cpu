@@ -49,6 +49,7 @@ use super::kernels::{
     gather_fused_half, mrope_rotate_scaled, rope_rotate, rope_rotate_scaled, sigmoid, FusedHalf,
 };
 use super::lowering::LoweringIdentity;
+use super::observe::AttentionHeadRecord;
 use super::prefetch;
 use super::realization::{
     class_of, common_selection, cpu_projection_candidates, realization_residency, RealizationForm,
@@ -630,20 +631,13 @@ pub(super) fn add_expert_bias(x: &mut [f32], bias: Option<&[f32]>, expert: usize
 /// device backends (the device deliberately runs production glue so a
 /// divergence is attributable to device matmul arithmetic alone); the
 /// gate and output projections stay with each backend's own matmuls.
-pub(super) fn aggregate_heads<'k>(
-    call: &AttentionCall<'_>,
-    position: usize,
-    query: &[f32],
-    key_of: impl Fn(usize) -> &'k [f32],
-    value_of: impl Fn(usize) -> &'k [f32],
-) -> Vec<f32> {
-    let head_dim = call.head_dim;
-    let q_rows = call.num_q_heads * head_dim;
-    let group = call.num_q_heads / call.num_kv_heads;
-    // Exhaustive over the span vocabulary on purpose: a `_` arm would let
-    // the next span kind mean "whole prefix" without anyone deciding that,
-    // which is the defect `layer_types` already suffered once.
-    let start = match (call.span, call.window) {
+/// The first source position a query at `position` may attend to under
+/// the call's span — ONE place, shared by the kernel and the head tap.
+/// Exhaustive over the span vocabulary on purpose: a `_` arm would let
+/// the next span kind mean "whole prefix" without anyone deciding that,
+/// which is the defect `layer_types` already suffered once.
+pub(super) fn source_start(call: &AttentionCall<'_>, position: usize) -> usize {
+    match (call.span, call.window) {
         (AttentionSpan::Sliding, Some(window)) => (position + 1).saturating_sub(window),
         // A sliding layer with no declared window has no bound to apply.
         (AttentionSpan::Sliding, None) | (AttentionSpan::Full, _) => 0,
@@ -652,7 +646,35 @@ pub(super) fn aggregate_heads<'k>(
         // perception component today; when one does, it needs the
         // component's own geometry here rather than this fallthrough.
         (AttentionSpan::Windowed, _) => 0,
-    };
+    }
+}
+
+pub(super) fn aggregate_heads<'k>(
+    call: &AttentionCall<'_>,
+    position: usize,
+    query: &[f32],
+    key_of: impl Fn(usize) -> &'k [f32],
+    value_of: impl Fn(usize) -> &'k [f32],
+) -> Vec<f32> {
+    aggregate_heads_keeping(call, position, query, key_of, value_of, None)
+}
+
+/// [`aggregate_heads`] that, when asked, keeps each head's softmax
+/// distribution after it has been consumed (V3-HEAD-OBS-1). The
+/// arithmetic is identical with or without `keep`: the distribution is
+/// moved out after the weighted sum, never recomputed or reordered.
+pub(super) fn aggregate_heads_keeping<'k>(
+    call: &AttentionCall<'_>,
+    position: usize,
+    query: &[f32],
+    key_of: impl Fn(usize) -> &'k [f32],
+    value_of: impl Fn(usize) -> &'k [f32],
+    mut keep: Option<&mut Vec<Vec<f32>>>,
+) -> Vec<f32> {
+    let head_dim = call.head_dim;
+    let q_rows = call.num_q_heads * head_dim;
+    let group = call.num_q_heads / call.num_kv_heads;
+    let start = source_start(call, position);
     let _t = timed(OpClass::AttentionCore);
     let mut concat = vec![0.0f32; q_rows];
     for q_head in 0..call.num_q_heads {
@@ -686,6 +708,9 @@ pub(super) fn aggregate_heads<'k>(
             for (acc, v) in head_out.iter_mut().zip(v_slice) {
                 *acc += weight * v;
             }
+        }
+        if let Some(kept) = keep.as_deref_mut() {
+            kept.push(scores);
         }
     }
     concat
@@ -773,17 +798,58 @@ impl ProductionBackend {
         gate_input: &[f32],
         projected_gate: Option<&[f32]>,
     ) -> Result<Vec<f32>, VindexError> {
-        let q_rows = call.num_q_heads * call.head_dim;
-        let mut concat = aggregate_heads(call, position, query, key_of, value_of);
+        Self::attend_position_tapped(
+            call,
+            position,
+            query,
+            key_of,
+            value_of,
+            gate_input,
+            projected_gate,
+            None,
+        )
+    }
 
-        if let Some(GateCall { spec, weight }) = &call.gate {
+    /// [`Self::attend_position`] with the V3-HEAD-OBS-1 tap: when armed,
+    /// each head's distribution is kept by the kernel and, once the gate
+    /// values are known but BEFORE they multiply the heads, one record
+    /// per query head is handed to `tap` — the head's mixed value
+    /// pre-gate, its activated gate slice, its distribution and the sink
+    /// mass. The arithmetic the executor performs is the same either way.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn attend_position_tapped<'k>(
+        call: &AttentionCall<'_>,
+        position: usize,
+        query: &[f32],
+        key_of: impl Fn(usize) -> &'k [f32],
+        value_of: impl Fn(usize) -> &'k [f32],
+        gate_input: &[f32],
+        projected_gate: Option<&[f32]>,
+        tap: Option<&mut dyn FnMut(AttentionHeadRecord<'_>)>,
+    ) -> Result<Vec<f32>, VindexError> {
+        let head_dim = call.head_dim;
+        let q_rows = call.num_q_heads * head_dim;
+        let mut kept: Vec<Vec<f32>> = Vec::new();
+        let mut concat = aggregate_heads_keeping(
+            call,
+            position,
+            query,
+            &key_of,
+            &value_of,
+            tap.as_ref().map(|_| &mut kept),
+        );
+
+        // The gate values, computed before anything multiplies the heads,
+        // so a tap can carry each head's activated slice; the multiply
+        // itself is unchanged below.
+        let gate_values: Option<Vec<f32>> = if let Some(GateCall { spec, weight }) = &call.gate {
             // Exhaustive on the judged semantics, same as the
             // reference: a new variant must be implemented before it
             // can execute on this backend either.
             let GateActivation::Sigmoid = spec.activation;
             let GateCombine::ElementwiseMultiply = spec.combine;
             let GatePlacement::AfterAggregationBeforeOutputProjection = spec.placement;
-            let gate_values = match (spec.source, projected_gate) {
+            let values = match (spec.source, projected_gate) {
                 // Already computed: the projection that produced the
                 // queries produced these in the same pass.
                 (GateSource::FusedQueryProjection, Some(values)) => values.to_vec(),
@@ -802,8 +868,35 @@ impl ProductionBackend {
                     project_matrix(weight, gate_input, q_rows, call.hidden)?
                 }
             };
+            Some(values)
+        } else {
+            None
+        };
+
+        // V3-HEAD-OBS-1: the records, between aggregation and the gate,
+        // built in the one place every backend shares.
+        if let Some(tap) = tap {
+            let activated: Option<Vec<f32>> = gate_values
+                .as_ref()
+                .map(|g| g.iter().map(|g| 1.0 / (1.0 + (-g).exp())).collect());
+            super::observe::fire_head_records(
+                tap,
+                position,
+                call.num_q_heads,
+                call.num_kv_heads,
+                head_dim,
+                source_start(call, position),
+                call.sinks.is_some(),
+                &concat,
+                &kept,
+                activated.as_deref(),
+                &value_of,
+            );
+        }
+
+        if let Some(gate_values) = &gate_values {
             let _t = timed(OpClass::OutputGate);
-            for (c, g) in concat.iter_mut().zip(&gate_values) {
+            for (c, g) in concat.iter_mut().zip(gate_values) {
                 *c *= 1.0 / (1.0 + (-g).exp());
             }
         }
@@ -811,6 +904,49 @@ impl ProductionBackend {
         let mut out = project_matrix(&call.w_o, &concat, call.hidden, q_rows)?;
         add_output_bias(call, &mut out);
         Ok(out)
+    }
+
+    /// The decode step with an optional per-head tap: one projection,
+    /// one attention over the cached rows plus the fresh one, the tap
+    /// threaded into the aggregation. `attention_step` is this with
+    /// `None`, so the observed step IS the step.
+    fn attention_step_tapped(
+        step: AttentionStepCall<'_>,
+        tap: Option<&mut dyn FnMut(AttentionHeadRecord<'_>)>,
+    ) -> Result<AttentionStepOut, VindexError> {
+        let call = &step.op;
+        let pre = &call.inputs[0];
+        let ProjectedAttention {
+            qkv: (q, k, v),
+            gate,
+        } = Self::project_position(call, step.position, pre)?;
+        let output = Self::attend_position_tapped(
+            call,
+            step.position,
+            &q,
+            |p| {
+                if p == step.position {
+                    k.as_slice()
+                } else {
+                    step.keys[p].as_slice()
+                }
+            },
+            |p| {
+                if p == step.position {
+                    v.as_slice()
+                } else {
+                    step.values[p].as_slice()
+                }
+            },
+            pre,
+            gate.as_deref(),
+            tap,
+        )?;
+        Ok(AttentionStepOut {
+            key: k,
+            value: v,
+            output,
+        })
     }
 }
 
@@ -1044,38 +1180,19 @@ impl PlanBackend for ProductionBackend {
     }
 
     fn attention_step(&self, step: AttentionStepCall<'_>) -> Result<AttentionStepOut, VindexError> {
-        let call = &step.op;
-        let pre = &call.inputs[0];
-        let ProjectedAttention {
-            qkv: (q, k, v),
-            gate,
-        } = Self::project_position(call, step.position, pre)?;
-        let output = Self::attend_position(
-            call,
-            step.position,
-            &q,
-            |p| {
-                if p == step.position {
-                    k.as_slice()
-                } else {
-                    step.keys[p].as_slice()
-                }
-            },
-            |p| {
-                if p == step.position {
-                    v.as_slice()
-                } else {
-                    step.values[p].as_slice()
-                }
-            },
-            pre,
-            gate.as_deref(),
-        )?;
-        Ok(AttentionStepOut {
-            key: k,
-            value: v,
-            output,
-        })
+        Self::attention_step_tapped(step, None)
+    }
+
+    fn serves_attention_heads(&self) -> bool {
+        true
+    }
+
+    fn attention_step_observed(
+        &self,
+        step: AttentionStepCall<'_>,
+        tap: &mut dyn FnMut(AttentionHeadRecord<'_>),
+    ) -> Result<AttentionStepOut, VindexError> {
+        Self::attention_step_tapped(step, Some(tap))
     }
 
     fn ffn(&self, call: FfnCall<'_>) -> Result<Vec<f32>, VindexError> {

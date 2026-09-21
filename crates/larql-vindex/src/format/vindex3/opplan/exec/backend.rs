@@ -809,6 +809,18 @@ impl<T: PlanBackend + Send + ?Sized> PlanBackend for std::sync::Arc<T> {
         (**self).attention_step(call)
     }
 
+    fn serves_attention_heads(&self) -> bool {
+        (**self).serves_attention_heads()
+    }
+
+    fn attention_step_observed(
+        &self,
+        call: AttentionStepCall<'_>,
+        tap: &mut dyn FnMut(super::observe::AttentionHeadRecord<'_>),
+    ) -> Result<AttentionStepOut, VindexError> {
+        (**self).attention_step_observed(call, tap)
+    }
+
     fn ffn(&self, call: FfnCall<'_>) -> Result<Vec<f32>, VindexError> {
         (**self).ffn(call)
     }
@@ -938,6 +950,29 @@ pub trait PlanBackend: Sync {
     /// pin the two paths together per backend, and a backend may not
     /// borrow another backend's step to fill the gap.
     fn attention_step(&self, call: AttentionStepCall<'_>) -> Result<AttentionStepOut, VindexError>;
+
+    /// V3-HEAD-OBS-1: whether this backend's softmax attention core can
+    /// hand an observer one [`super::observe::AttentionHeadRecord`] per
+    /// query head. `false` by default, and a request against a backend
+    /// that says so is refused before the first token executes.
+    fn serves_attention_heads(&self) -> bool {
+        false
+    }
+
+    /// [`Self::attention_step`] with the per-head tap armed: the same
+    /// arithmetic, with each query head's distribution and mixed value
+    /// handed to `tap` between aggregation and the output gate. The
+    /// default refuses, matching [`Self::serves_attention_heads`].
+    fn attention_step_observed(
+        &self,
+        _call: AttentionStepCall<'_>,
+        _tap: &mut dyn FnMut(super::observe::AttentionHeadRecord<'_>),
+    ) -> Result<AttentionStepOut, VindexError> {
+        Err(VindexError::Parse(format!(
+            "per-head attention observation is not served by the {} backend",
+            self.name()
+        )))
+    }
 
     /// Fallible for the same reason as [`Self::attention`]: a backend
     /// with no kernel for a judged variant must say so, not borrow
