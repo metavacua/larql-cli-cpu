@@ -24,6 +24,9 @@ use larql_inference::vindex3::{
 use larql_vindex::format::vindex3::opplan::exec::backend::PlanBackend;
 use larql_vindex::format::vindex3::opplan::exec::decode::DecodeSession;
 use larql_vindex::format::vindex3::opplan::exec::intervene::{CarrierCapture, InterventionPlan};
+use larql_vindex::format::vindex3::opplan::exec::intervene_heads::{
+    HeadCapture, HeadInterventionPlan,
+};
 use larql_vindex::format::vindex3::opplan::exec::kv::RowKvState;
 use larql_vindex::format::vindex3::opplan::exec::observe_stats::{FixedBasis, StatsObserver};
 use larql_vindex::format::vindex3::opplan::exec::prepared::{ExecutionSlice, PreparedOperands};
@@ -153,6 +156,17 @@ pub struct ObserveArgs {
     /// vector and its hash.
     #[arg(long, requires = "capture")]
     pub capture_out: Option<PathBuf>,
+
+    /// V3-INTERVENE-2: addresses `layer:head:position[,…]` whose
+    /// uninintervened `ctx_h` is captured in memory during the run and
+    /// written to `--capture-heads-out`.
+    #[arg(long, requires = "capture_heads_out")]
+    pub capture_heads: Option<String>,
+
+    /// Where the captured heads go: the run id and, per address, the
+    /// vector and its hash.
+    #[arg(long, requires = "capture_heads")]
+    pub capture_heads_out: Option<PathBuf>,
 }
 
 pub fn run(args: ObserveArgs) -> Result<(), BoxErr> {
@@ -185,6 +199,8 @@ pub(super) struct Outcome {
     pub(super) stepping: Duration,
     /// How many declared interventions fired (V3-INTERVENE-1).
     pub(super) applied: usize,
+    /// How many declared head interventions fired (V3-INTERVENE-2).
+    pub(super) head_applied: usize,
 }
 
 struct Observe<'a> {
@@ -211,12 +227,12 @@ impl BackendVisitor for Observe<'_> {
             &self.args.component,
             self.tokens,
         );
-        // V3-INTERVENE-1: the declaration, if any, joins the identity
-        // before the first token; the capture, if any, watches the same
+        // V3-INTERVENE-1/2: the declaration, if any, joins the identity
+        // before the first token; the captures, if any, watch the same
         // run through one observer beside the recorder.
-        let interventions = match &self.args.intervene {
+        let (interventions, head_interventions) = match &self.args.intervene {
             Some(path) => intervention::load_plan(path)?,
-            None => InterventionPlan::none(),
+            None => (InterventionPlan::none(), HeadInterventionPlan::none()),
         };
         let mut recorder = RunRecorder::for_image(identity, &ops, Some(stats));
         if let Some(list) = &self.args.lens_tokens {
@@ -230,16 +246,29 @@ impl BackendVisitor for Observe<'_> {
             let lens = LogitLens::new(&ops, backend, sites, tokens, self.args.lens_top_k);
             recorder = recorder.with_lens(Box::new(lens));
         }
-        if self.args.heads {
+        // V3-INTERVENE-2, J5: a declared `zero` head firing needs the
+        // head reader armed AND retaining children to price its shortcut
+        // gap, whether or not the caller separately asked for `--heads`.
+        let wants_gap = head_interventions
+            .interventions()
+            .iter()
+            .any(|i| i.kind() == larql_vindex::format::vindex3::opplan::exec::intervene_heads::HeadInterventionKind::Zero);
+        if self.args.heads || wants_gap {
             // V3-HEAD-OBS-1: the head reader projects on the same basis
             // the stats observer uses, so a head's coordinates and the
             // carrier's share one coordinate system by construction.
             let basis = basis_for(self.args, hidden)?;
-            let heads = HeadStats::new(&ops, plan, backend, Some(basis), self.args.heads_top_k);
+            let mut heads = HeadStats::new(&ops, plan, backend, Some(basis), self.args.heads_top_k);
+            if wants_gap {
+                heads = heads.retaining_children();
+            }
             recorder = recorder.with_heads(Box::new(heads));
         }
         if !interventions.is_none() {
             recorder = recorder.with_interventions(&interventions);
+        }
+        if !head_interventions.is_none() {
+            recorder = recorder.with_head_interventions(&head_interventions);
         }
         let addresses = match &self.args.capture {
             Some(list) => intervention::parse_addresses(list)?,
@@ -247,21 +276,31 @@ impl BackendVisitor for Observe<'_> {
         };
         let mut capture =
             (!addresses.is_empty()).then(|| CarrierCapture::at(addresses.iter().copied()));
+        let head_addresses = match &self.args.capture_heads {
+            Some(list) => intervention::parse_head_addresses(list)?,
+            None => Vec::new(),
+        };
+        let mut head_capture =
+            (!head_addresses.is_empty()).then(|| HeadCapture::at(head_addresses.iter().copied()));
 
         let clock = Instant::now();
         let mut kv = RowKvState::default();
         let mut session = DecodeSession::over_prepared(plan, &ops, backend, &mut kv)?;
         let mut applied = 0usize;
+        let mut head_applied = 0usize;
         let mut last = None;
         for &token in self.tokens {
-            let (logits, fired) = step(
+            let (logits, fired, head_fired) = step(
                 &mut session,
                 token,
                 &mut recorder,
                 capture.as_mut(),
+                head_capture.as_mut(),
                 &interventions,
+                &head_interventions,
             )?;
             applied += fired;
+            head_applied += head_fired;
             last = logits;
         }
         let mut generated = Vec::with_capacity(self.args.generate);
@@ -271,14 +310,17 @@ impl BackendVisitor for Observe<'_> {
                 .ok_or("the component carries no output head, so nothing can be generated")?;
             let next = argmax(logits);
             generated.push(next);
-            let (logits, fired) = step(
+            let (logits, fired, head_fired) = step(
                 &mut session,
                 next,
                 &mut recorder,
                 capture.as_mut(),
+                head_capture.as_mut(),
                 &interventions,
+                &head_interventions,
             )?;
             applied += fired;
+            head_applied += head_fired;
             last = logits;
         }
         let stepping = clock.elapsed();
@@ -289,6 +331,9 @@ impl BackendVisitor for Observe<'_> {
         if let (Some(out), Some(capture)) = (&self.args.capture_out, &capture) {
             intervention::write_capture(out, self.run_id, capture, &addresses)?;
         }
+        if let (Some(out), Some(head_capture)) = (&self.args.capture_heads_out, &head_capture) {
+            intervention::write_head_capture(out, self.run_id, head_capture, &head_addresses)?;
+        }
         let record_bytes = std::fs::metadata(&self.args.record)?.len();
         Ok(Outcome {
             record,
@@ -297,22 +342,31 @@ impl BackendVisitor for Observe<'_> {
             record_bytes,
             stepping,
             applied,
+            head_applied,
         })
     }
 }
 
-/// One step through the recorder and, when armed, the capture, with the
-/// declared interventions; returns the logits and how many fired.
+/// One step through the recorder and, when armed, the captures, with the
+/// declared interventions; returns the logits and how many fired
+/// (carrier interventions, then head interventions).
+#[allow(clippy::too_many_arguments)]
 fn step<B: PlanBackend>(
     session: &mut DecodeSession<'_, B>,
     token: u32,
     recorder: &mut RunRecorder<'_>,
     capture: Option<&mut CarrierCapture>,
+    head_capture: Option<&mut HeadCapture>,
     interventions: &InterventionPlan,
-) -> Result<(Option<Vec<f32>>, usize), BoxErr> {
-    let mut tee = intervention::Tee { recorder, capture };
-    let out = session.step_intervened(token, &mut tee, interventions)?;
-    Ok((out.logits, out.firings.len()))
+    head_interventions: &HeadInterventionPlan,
+) -> Result<(Option<Vec<f32>>, usize, usize), BoxErr> {
+    let mut tee = intervention::Tee {
+        recorder,
+        capture,
+        head_capture,
+    };
+    let out = session.step_intervened(token, &mut tee, interventions, head_interventions)?;
+    Ok((out.logits, out.firings.len(), out.head_firings.len()))
 }
 
 fn basis_for(args: &ObserveArgs, hidden: usize) -> Result<FixedBasis, BoxErr> {
@@ -510,8 +564,33 @@ pub(super) fn summary_lines(
             lines.push(format!("  intervention REFUSED: {refusal}"));
         }
     }
+    if let Some(hash) = &record.identity.head_intervention_sha256 {
+        lines.push(format!(
+            "  head interventions: declaration {hash}, {} declared, {} fired",
+            record.receipt.head_interventions_declared, outcome.head_applied
+        ));
+        if let Some(refusal) = &record.receipt.head_intervention_refusal {
+            lines.push(format!("  head intervention REFUSED: {refusal}"));
+        }
+        let gaps: Vec<String> = record
+            .events
+            .iter()
+            .filter_map(|e| match &e.event {
+                EventKind::HeadInterventionGap { layer, head, gap } => {
+                    Some(format!("L{layer} H{head}: {gap:.4}"))
+                }
+                _ => None,
+            })
+            .collect();
+        if !gaps.is_empty() {
+            lines.push(format!("  shortcut gap: {}", gaps.join(", ")));
+        }
+    }
     if let (Some(list), Some(out)) = (&args.capture, &args.capture_out) {
         lines.push(format!("  captured {list} -> {}", out.display()));
+    }
+    if let (Some(list), Some(out)) = (&args.capture_heads, &args.capture_heads_out) {
+        lines.push(format!("  captured heads {list} -> {}", out.display()));
     }
     lines.extend(lens_lines(record, positions.saturating_sub(1), tokenizer));
     lines.push(format!("  final position, top {}:", args.top_k));

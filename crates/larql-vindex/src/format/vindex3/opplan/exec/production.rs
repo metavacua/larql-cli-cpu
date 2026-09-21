@@ -807,6 +807,7 @@ impl ProductionBackend {
             gate_input,
             projected_gate,
             None,
+            None,
         )
     }
 
@@ -826,6 +827,7 @@ impl ProductionBackend {
         gate_input: &[f32],
         projected_gate: Option<&[f32]>,
         tap: Option<&mut dyn FnMut(AttentionHeadRecord<'_>)>,
+        head_intervene: Option<&mut super::backend::HeadIntervene<'_>>,
     ) -> Result<Vec<f32>, VindexError> {
         let head_dim = call.head_dim;
         let q_rows = call.num_q_heads * head_dim;
@@ -894,6 +896,16 @@ impl ProductionBackend {
             );
         }
 
+        // V3-INTERVENE-2: each head's `ctx_h`, mutated in place if the
+        // caller declared an intervention there — AFTER the head record
+        // above fired on the uninintervened value (J3), BEFORE the gate
+        // multiply, `o_proj` and the post-attention norm below (J1).
+        if let Some(head_intervene) = head_intervene {
+            for (head, ctx_h) in concat.chunks_exact_mut(head_dim).enumerate() {
+                head_intervene(head, ctx_h);
+            }
+        }
+
         if let Some(gate_values) = &gate_values {
             let _t = timed(OpClass::OutputGate);
             for (c, g) in concat.iter_mut().zip(gate_values) {
@@ -906,13 +918,15 @@ impl ProductionBackend {
         Ok(out)
     }
 
-    /// The decode step with an optional per-head tap: one projection,
-    /// one attention over the cached rows plus the fresh one, the tap
-    /// threaded into the aggregation. `attention_step` is this with
-    /// `None`, so the observed step IS the step.
+    /// The decode step with an optional per-head tap and an optional
+    /// per-head intervention: one projection, one attention over the
+    /// cached rows plus the fresh one, both threaded into the
+    /// aggregation. `attention_step` is this with `None, None`, so the
+    /// observed step IS the step.
     fn attention_step_tapped(
         step: AttentionStepCall<'_>,
         tap: Option<&mut dyn FnMut(AttentionHeadRecord<'_>)>,
+        head_intervene: Option<&mut super::backend::HeadIntervene<'_>>,
     ) -> Result<AttentionStepOut, VindexError> {
         let call = &step.op;
         let pre = &call.inputs[0];
@@ -941,6 +955,7 @@ impl ProductionBackend {
             pre,
             gate.as_deref(),
             tap,
+            head_intervene,
         )?;
         Ok(AttentionStepOut {
             key: k,
@@ -1180,7 +1195,7 @@ impl PlanBackend for ProductionBackend {
     }
 
     fn attention_step(&self, step: AttentionStepCall<'_>) -> Result<AttentionStepOut, VindexError> {
-        Self::attention_step_tapped(step, None)
+        Self::attention_step_tapped(step, None, None)
     }
 
     fn serves_attention_heads(&self) -> bool {
@@ -1192,7 +1207,20 @@ impl PlanBackend for ProductionBackend {
         step: AttentionStepCall<'_>,
         tap: &mut dyn FnMut(AttentionHeadRecord<'_>),
     ) -> Result<AttentionStepOut, VindexError> {
-        Self::attention_step_tapped(step, Some(tap))
+        Self::attention_step_tapped(step, Some(tap), None)
+    }
+
+    fn serves_head_intervention(&self) -> bool {
+        true
+    }
+
+    fn attention_step_intervened(
+        &self,
+        step: AttentionStepCall<'_>,
+        tap: Option<&mut dyn FnMut(AttentionHeadRecord<'_>)>,
+        head_intervene: &mut super::backend::HeadIntervene<'_>,
+    ) -> Result<AttentionStepOut, VindexError> {
+        Self::attention_step_tapped(step, tap, Some(head_intervene))
     }
 
     fn ffn(&self, call: FfnCall<'_>) -> Result<Vec<f32>, VindexError> {

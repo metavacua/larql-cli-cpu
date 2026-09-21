@@ -20,6 +20,7 @@
 
 use super::hyper_connection::{Bundle, SinkhornSplit};
 use super::intervene::InterventionKind;
+use super::intervene_heads::HeadInterventionKind;
 
 /// One decode step's observation events, in execution order.
 ///
@@ -69,6 +70,17 @@ pub enum StepEvent {
         layer: usize,
         site: SublayerSite,
         kind: InterventionKind,
+    },
+    /// V3-INTERVENE-2: a head intervention fired on this head's `ctx_h`,
+    /// inside the attention kernel — after the (uninintervened) head
+    /// record fired (J3), before the gate multiply, `o_proj` and the
+    /// post-attention norm. Fires before the attention site's own
+    /// `CarrierWrite`, whose `delta` then reflects the model's own
+    /// response to the change.
+    HeadIntervened {
+        layer: usize,
+        head: usize,
+        kind: HeadInterventionKind,
     },
 }
 

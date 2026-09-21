@@ -24,6 +24,9 @@ use std::sync::mpsc::{SyncSender, TrySendError};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use larql_vindex::format::vindex3::opplan::exec::intervene::{InterventionKind, InterventionPlan};
+use larql_vindex::format::vindex3::opplan::exec::intervene_heads::{
+    HeadInterventionKind, HeadInterventionPlan,
+};
 use larql_vindex::format::vindex3::opplan::exec::observe::{
     CarrierForm, CarrierWriteRecord, StepEvent, StepObserver, SublayerSite,
 };
@@ -56,6 +59,12 @@ pub struct RunIdentity {
     /// baseline of the same prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intervention_sha256: Option<String>,
+    /// V3-INTERVENE-2: the hash of the head-intervention declaration this
+    /// run executed under; `None` for a run with none. Independent of
+    /// [`Self::intervention_sha256`] — a declaration may carry both
+    /// carrier and head entries, and each gets its own hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_intervention_sha256: Option<String>,
 }
 
 impl RunIdentity {
@@ -71,6 +80,7 @@ impl RunIdentity {
                 .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
                 .unwrap_or(0),
             intervention_sha256: None,
+            head_intervention_sha256: None,
         }
     }
 }
@@ -126,6 +136,25 @@ impl From<InterventionKind> for Kind {
             InterventionKind::Zero => Self::Zero,
             InterventionKind::Add => Self::Add,
             InterventionKind::Replace => Self::Replace,
+        }
+    }
+}
+
+/// The runner's spelling of a head intervention kind (V3-INTERVENE-2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeadKind {
+    Zero,
+    Scale,
+    Replace,
+}
+
+impl From<HeadInterventionKind> for HeadKind {
+    fn from(kind: HeadInterventionKind) -> Self {
+        match kind {
+            HeadInterventionKind::Zero => Self::Zero,
+            HeadInterventionKind::Scale => Self::Scale,
+            HeadInterventionKind::Replace => Self::Replace,
         }
     }
 }
@@ -218,6 +247,27 @@ pub enum EventKind {
         layer: usize,
         site: Site,
         intervention: Kind,
+    },
+    /// V3-INTERVENE-2: a head intervention fired on this head's `ctx_h`,
+    /// inside the attention kernel, at the envelope's position. Precedes
+    /// the layer's `HeadsObserved`/`HeadWrite`/`HeadSum` and its
+    /// attention `CarrierWrite`.
+    HeadIntervened {
+        layer: usize,
+        head: usize,
+        intervention: HeadKind,
+    },
+    /// V3-INTERVENE-2, J5: the shortcut gap for one `zero` head firing —
+    /// `‖delta_real − (delta_base − c′_h)‖ / ‖delta_base‖`, where
+    /// `delta_base` and `c′_h` are reconstructed from this SAME run's
+    /// pre-intervention head records (the head-sum law's own terms, not
+    /// a second run). Requires the head reader armed and retaining
+    /// children; recorded once per `zero` firing, after that write's
+    /// `HeadSum`.
+    HeadInterventionGap {
+        layer: usize,
+        head: usize,
+        gap: f64,
     },
     /// An executor event this schema has no spelling for yet. Recorded
     /// with the executor's debug form so nothing is lost.
@@ -352,6 +402,15 @@ pub struct Receipt {
     /// is a refusal on the receipt, never a silent no-op.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intervention_refusal: Option<String>,
+    /// V3-INTERVENE-2: how many head interventions the run declared.
+    #[serde(default)]
+    pub head_interventions_declared: u64,
+    /// V3-INTERVENE-2: how many head firings the run recorded.
+    #[serde(default)]
+    pub head_interventions_applied: u64,
+    /// V3-INTERVENE-2: a declared head address the run never reached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_intervention_refusal: Option<String>,
 }
 
 /// A finished record: header, events, receipt.
@@ -388,6 +447,14 @@ pub struct RunRecorder<'a> {
     /// One past the highest position an event carried, so the receipt
     /// can name declared addresses the run never reached.
     positions_executed: usize,
+    /// V3-INTERVENE-2: the head declaration this run executes under.
+    head_interventions: Option<HeadInterventionPlan>,
+    /// Head firings recorded so far.
+    head_applied: u64,
+    /// `zero` head firings not yet matched to their write's decomposition
+    /// (J5): `(layer, head, position)`, cleared as `carrier_write`
+    /// consumes them.
+    pending_head_zero: Vec<(usize, usize, usize)>,
 }
 
 impl<'a> RunRecorder<'a> {
@@ -412,6 +479,9 @@ impl<'a> RunRecorder<'a> {
             interventions: None,
             applied: 0,
             positions_executed: 0,
+            head_interventions: None,
+            head_applied: 0,
+            pending_head_zero: Vec::new(),
         }
     }
 
@@ -421,6 +491,18 @@ impl<'a> RunRecorder<'a> {
     pub fn with_interventions(mut self, interventions: &InterventionPlan) -> Self {
         self.identity.intervention_sha256 = interventions.declaration_sha256();
         self.interventions = Some(interventions.clone());
+        self
+    }
+
+    /// Declare the head interventions this run executes under
+    /// (V3-INTERVENE-2). The declaration's hash joins the run identity;
+    /// the receipt counts firings against declarations and names any
+    /// address never reached. A `zero` firing's shortcut gap (J5) is
+    /// computed only when the head reader is ALSO armed and retaining
+    /// children ([`HeadReader`]/[`super::HeadStats::retaining_children`]).
+    pub fn with_head_interventions(mut self, head_interventions: &HeadInterventionPlan) -> Self {
+        self.identity.head_intervention_sha256 = head_interventions.declaration_sha256();
+        self.head_interventions = Some(head_interventions.clone());
         self
     }
 
@@ -542,6 +624,31 @@ impl<'a> RunRecorder<'a> {
             }
             _ => None,
         };
+        let head_interventions_declared = self
+            .head_interventions
+            .as_ref()
+            .map(|p| u64::try_from(p.declared()).expect("count fits"))
+            .unwrap_or(0);
+        let head_intervention_refusal = match (&self.head_interventions, self.complete) {
+            (Some(plan), true) => {
+                let unreached = plan.unreached(self.positions_executed);
+                (!unreached.is_empty()).then(|| {
+                    let named: Vec<String> = unreached
+                        .iter()
+                        .map(|u| {
+                            format!("layer {} head {} position {}", u.layer, u.head, u.position)
+                        })
+                        .collect();
+                    format!(
+                        "declared head intervention never fired: the run executed {} \
+                         position(s) and did not reach {}",
+                        self.positions_executed,
+                        named.join(", ")
+                    )
+                })
+            }
+            _ => None,
+        };
         RunRecord {
             identity: self.identity,
             provenance: serde_json::to_value(&self.provenance).expect("provenance serialises"),
@@ -561,6 +668,9 @@ impl<'a> RunRecorder<'a> {
                 interventions_declared,
                 interventions_applied: self.applied,
                 intervention_refusal,
+                head_interventions_declared,
+                head_interventions_applied: self.head_applied,
+                head_intervention_refusal,
             },
             events: self.events,
         }
@@ -590,6 +700,17 @@ impl StepObserver for RunRecorder<'_> {
                 EventKind::Intervened {
                     layer,
                     site: site.into(),
+                    intervention: kind.into(),
+                }
+            }
+            StepEvent::HeadIntervened { layer, head, kind } => {
+                self.head_applied += 1;
+                if kind == HeadInterventionKind::Zero {
+                    self.pending_head_zero.push((layer, head, self.position));
+                }
+                EventKind::HeadIntervened {
+                    layer,
+                    head,
                     intervention: kind.into(),
                 }
             }
@@ -638,6 +759,48 @@ impl StepObserver for RunRecorder<'_> {
             None => None,
         };
         if let Some(write) = head_write {
+            // V3-INTERVENE-2, J5: a `zero` firing at THIS write's
+            // (layer, position) gets its shortcut gap now — the one
+            // moment `write.sum` (delta_base) and `write.children`
+            // (c′_h, from the SAME run's pre-intervention records) are
+            // both in hand, beside the write's own `delta` (delta_real).
+            let (matched, remaining): (Vec<_>, Vec<_>) = self
+                .pending_head_zero
+                .drain(..)
+                .partition(|&(layer, _, position)| {
+                    layer == write.layer && position == record.position
+                });
+            self.pending_head_zero = remaining;
+            for (layer, head, _position) in matched {
+                if let Some(children) = &write.children {
+                    if let Some(i) = write.rows.iter().position(|row| row.head == head) {
+                        let base_norm: f64 = write
+                            .sum
+                            .iter()
+                            .map(|v| f64::from(*v).powi(2))
+                            .sum::<f64>()
+                            .sqrt();
+                        let shortcut: Vec<f64> = write
+                            .sum
+                            .iter()
+                            .zip(&children[i])
+                            .map(|(s, c)| f64::from(*s) - f64::from(*c))
+                            .collect();
+                        let err: f64 = shortcut
+                            .iter()
+                            .zip(record.delta)
+                            .map(|(s, d)| (s - f64::from(*d)).powi(2))
+                            .sum::<f64>()
+                            .sqrt();
+                        let gap = if base_norm > 0.0 {
+                            err / base_norm
+                        } else {
+                            err
+                        };
+                        self.push(EventKind::HeadInterventionGap { layer, head, gap });
+                    }
+                }
+            }
             self.push(EventKind::HeadSum {
                 layer: write.layer,
                 method: HEAD_SUM_METHOD.to_string(),

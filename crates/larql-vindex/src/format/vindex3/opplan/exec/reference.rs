@@ -323,6 +323,7 @@ impl ReferenceBackend {
             gate_input,
             gate_mutation,
             None,
+            None,
         )
     }
 
@@ -342,6 +343,7 @@ impl ReferenceBackend {
         gate_input: &[f32],
         gate_mutation: GateMutation,
         mut tap: Option<&mut dyn FnMut(AttentionHeadRecord<'_>)>,
+        mut head_intervene: Option<&mut super::backend::HeadIntervene<'_>>,
     ) -> Result<Vec<f32>, VindexError> {
         let mut kept: Vec<Vec<f32>> = Vec::new();
         let mut fired = false;
@@ -479,6 +481,14 @@ impl ReferenceBackend {
                 );
                 fired = true;
             }
+            // V3-INTERVENE-2: each head's `ctx_h`, mutated in place if
+            // declared — after the uninintervened head record above (J3),
+            // before the gate multiply and `o_proj` below (J1).
+            if let Some(hi) = head_intervene.as_deref_mut() {
+                for (head, ctx_h) in concat.chunks_exact_mut(head_dim).enumerate() {
+                    hi(head, ctx_h);
+                }
+            }
             if gate_mutation != GateMutation::NoGate
                 && gate_mutation != GateMutation::GateAfterOProj
             {
@@ -515,6 +525,17 @@ impl ReferenceBackend {
                 &value_of,
             );
         }
+        // V3-INTERVENE-2: a plan without a gate applies its head
+        // intervention here; a gated plan applied it above regardless of
+        // whether observation was armed — gated on the plan's OWN gate,
+        // not on `fired`, which tracks the tap and stays false without one.
+        if call.gate.is_none() {
+            if let Some(hi) = head_intervene {
+                for (head, ctx_h) in concat.chunks_exact_mut(head_dim).enumerate() {
+                    hi(head, ctx_h);
+                }
+            }
+        }
 
         let mut out = matvec(call.w_o.as_f32()?, call.hidden, q_rows, &concat);
         if let Some(bias) = &call.bias {
@@ -523,11 +544,13 @@ impl ReferenceBackend {
         Ok(out)
     }
 
-    /// The decode step with an optional per-head tap; `attention_step`
-    /// is this with `None`, so the observed step IS the step.
+    /// The decode step with an optional per-head tap and an optional
+    /// per-head intervention; `attention_step` is this with `None, None`,
+    /// so the observed step IS the step.
     fn attention_step_tapped(
         step: AttentionStepCall<'_>,
         tap: Option<&mut dyn FnMut(AttentionHeadRecord<'_>)>,
+        head_intervene: Option<&mut super::backend::HeadIntervene<'_>>,
     ) -> Result<AttentionStepOut, VindexError> {
         let call = &step.op;
         let pre = &call.inputs[0];
@@ -553,6 +576,7 @@ impl ReferenceBackend {
             pre,
             GateMutation::None,
             tap,
+            head_intervene,
         )?;
         Ok(AttentionStepOut {
             key: k,
@@ -811,7 +835,7 @@ impl PlanBackend for ReferenceBackend {
     }
 
     fn attention_step(&self, step: AttentionStepCall<'_>) -> Result<AttentionStepOut, VindexError> {
-        Self::attention_step_tapped(step, None)
+        Self::attention_step_tapped(step, None, None)
     }
 
     fn serves_attention_heads(&self) -> bool {
@@ -823,7 +847,20 @@ impl PlanBackend for ReferenceBackend {
         step: AttentionStepCall<'_>,
         tap: &mut dyn FnMut(AttentionHeadRecord<'_>),
     ) -> Result<AttentionStepOut, VindexError> {
-        Self::attention_step_tapped(step, Some(tap))
+        Self::attention_step_tapped(step, Some(tap), None)
+    }
+
+    fn serves_head_intervention(&self) -> bool {
+        true
+    }
+
+    fn attention_step_intervened(
+        &self,
+        step: AttentionStepCall<'_>,
+        tap: Option<&mut dyn FnMut(AttentionHeadRecord<'_>)>,
+        head_intervene: &mut super::backend::HeadIntervene<'_>,
+    ) -> Result<AttentionStepOut, VindexError> {
+        Self::attention_step_tapped(step, tap, Some(head_intervene))
     }
 
     fn ffn(&self, call: FfnCall<'_>) -> Result<Vec<f32>, VindexError> {

@@ -57,6 +57,12 @@ pub struct HeadWrite {
     pub rows: Vec<HeadRow>,
     /// `c′_h` per head, kept only when the reader was asked to retain them.
     pub children: Option<Vec<Vec<f32>>>,
+    /// V3-INTERVENE-2, J5: `Σ_h c′_h + bias′` — reconstructed purely from
+    /// this write's per-head records (never from `delta`), so on an
+    /// UNINTERVENED run it equals `delta` to the head-sum law's own
+    /// residual, and on an intervened run it is the same run's own
+    /// "what the unintervened write would have been" (`delta_base`).
+    pub sum: Vec<f32>,
 }
 
 /// What a recorder needs from a head reader: forward it every head
@@ -285,6 +291,7 @@ impl<'a, B: PlanBackend + ?Sized> HeadStats<'a, B> {
             residual,
             rows,
             children: self.retain_children.then_some(children),
+            sum: sum.iter().map(|v| *v as f32).collect(),
         })
     }
 }

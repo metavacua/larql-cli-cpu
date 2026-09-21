@@ -35,6 +35,10 @@ use crate::error::VindexError;
 use crate::format::vindex3::opplan::planned::PlannedOperand;
 use crate::format::vindex3::represent::kquant::KQuant;
 
+/// V3-INTERVENE-2: a per-head intervention applier — `(head, ctx_h)`,
+/// mutating the head's mixed value in place.
+pub type HeadIntervene<'a> = dyn FnMut(usize, &mut [f32]) + 'a;
+
 /// The numerical representation a backend wants matrix operands in.
 ///
 /// Asked once by the interpreter (a capability, like [`PlanBackend::name`],
@@ -821,6 +825,19 @@ impl<T: PlanBackend + Send + ?Sized> PlanBackend for std::sync::Arc<T> {
         (**self).attention_step_observed(call, tap)
     }
 
+    fn serves_head_intervention(&self) -> bool {
+        (**self).serves_head_intervention()
+    }
+
+    fn attention_step_intervened(
+        &self,
+        call: AttentionStepCall<'_>,
+        tap: Option<&mut dyn FnMut(super::observe::AttentionHeadRecord<'_>)>,
+        head_intervene: &mut HeadIntervene<'_>,
+    ) -> Result<AttentionStepOut, VindexError> {
+        (**self).attention_step_intervened(call, tap, head_intervene)
+    }
+
     fn ffn(&self, call: FfnCall<'_>) -> Result<Vec<f32>, VindexError> {
         (**self).ffn(call)
     }
@@ -970,6 +987,30 @@ pub trait PlanBackend: Sync {
     ) -> Result<AttentionStepOut, VindexError> {
         Err(VindexError::Parse(format!(
             "per-head attention observation is not served by the {} backend",
+            self.name()
+        )))
+    }
+
+    /// V3-INTERVENE-2: whether this backend's softmax attention core can
+    /// take a per-head intervention — mutate `ctx_h` in place, after the
+    /// (uninintervened) head record fires and before the gate multiply.
+    /// `false` by default, matching [`Self::serves_attention_heads`].
+    fn serves_head_intervention(&self) -> bool {
+        false
+    }
+
+    /// [`Self::attention_step`] with a per-head intervention armed, and
+    /// optionally the per-head tap too (records still see the
+    /// uninintervened `ctx_h`, J3). The default refuses, matching
+    /// [`Self::serves_head_intervention`].
+    fn attention_step_intervened(
+        &self,
+        _call: AttentionStepCall<'_>,
+        _tap: Option<&mut dyn FnMut(super::observe::AttentionHeadRecord<'_>)>,
+        _head_intervene: &mut HeadIntervene<'_>,
+    ) -> Result<AttentionStepOut, VindexError> {
+        Err(VindexError::Parse(format!(
+            "per-head attention intervention is not served by the {} backend",
             self.name()
         )))
     }

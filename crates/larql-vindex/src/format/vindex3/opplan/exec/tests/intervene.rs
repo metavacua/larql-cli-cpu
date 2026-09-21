@@ -13,6 +13,7 @@ use crate::format::vindex3::opplan::exec::intervene::{
     vector_sha256, Address, CarrierCapture, Firing, Intervention, InterventionKind,
     InterventionPlan, Unreached, VectorProvenance,
 };
+use crate::format::vindex3::opplan::exec::intervene_heads::HeadInterventionPlan;
 use crate::format::vindex3::opplan::exec::observe::{
     CarrierForm, CarrierWriteRecord, StepEvent, StepObserver, SublayerSite,
 };
@@ -123,7 +124,7 @@ fn intervened<B: PlanBackend>(
         .iter()
         .map(|&t| {
             let out = session
-                .step_intervened(t, &mut writes, interventions)
+                .step_intervened(t, &mut writes, interventions, &HeadInterventionPlan::none())
                 .unwrap();
             firings.extend(out.firings);
             out.logits.unwrap()
@@ -570,7 +571,12 @@ fn ip5_admission_refuses_before_the_first_token() {
         let mut session = DecodeSession::new(&plan, &store, &backend).unwrap();
         let mut sink = Writes::default();
         refused(
-            session.step_intervened(G_TOKENS[0], &mut sink, &declared),
+            session.step_intervened(
+                G_TOKENS[0],
+                &mut sink,
+                &declared,
+                &HeadInterventionPlan::none(),
+            ),
             needle,
         );
         assert_eq!(
