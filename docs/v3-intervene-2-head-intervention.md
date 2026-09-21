@@ -1,12 +1,22 @@
 # V3-INTERVENE-2 — can the canonical decode step remove or replace ONE head's contribution before the model recombines it, and prove the subtractive shortcut is not the same experiment?
 
-**DRAFT, NOT FROZEN (2026-09-20).** Chris's order for the intervention rung: after HEAD-OBS-1
-lands, rebase INTERVENE-1 onto the then-current main (not a synthetic base), re-thread its
-seam beside the current head observer, and pass the no-op parity migration gate plus one
-positive CARRIED migration witness on that build BEFORE freezing anything against the named
-heads. This document is written so the seam is designed in the open; it becomes a freeze
-only after those gates pass, and its properties may change before then. Nothing here
-claims a result.
+**FROZEN 2026-09-21.** The precondition this document was gated on is now satisfied:
+V3-INTERVENE-1's migration onto post-HEAD-OBS-1 main passed its no-op parity gate (on the
+record, not only the logits) and its CARRIED migration witness, and merged as PR #494
+(`4ba8766a`). The properties J1–J7 and acceptance properties JP1–JP6 below are FROZEN as of
+this commit; nothing here claims a result, and no property changes without a new commit
+that says so.
+
+This rung is chosen ahead of ATTR-1C (the additive child-transplant form, `delta' =
+delta − c′_h` / `c′_h(B) − c′_h(A)`) because HEAD-OBS-1's decomposition sits underneath a
+post-attention RMS norm: subtracting a recorded head child after the fact does not reproduce
+what the model would have computed had that head never contributed, because removing one
+head's contribution changes the norm's scalar, which changes every OTHER head's effective
+contribution too. ATTR-1C answers "how much of the observed write does this additive
+component represent" — a real and useful question, kept as the decomposition/control
+comparator once this rung lands (JP6 runs both forms on the same pair so they can be read
+against each other) — but it is not a causal necessity claim on its own, and this rung is
+what tells us whether the shortcut is even a good approximation (J5/JP3, the "shortcut gap").
 
 Programme: OBSERVE. Above V3-INTERVENE-1 (carrier addresses) and V3-HEAD-OBS-1 (the per-head
 tap, closed on `58eb342d`). The rung that lets the intervention machinery see the heads —
