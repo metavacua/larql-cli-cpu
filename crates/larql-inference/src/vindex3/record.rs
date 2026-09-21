@@ -23,6 +23,7 @@ use std::path::Path;
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use larql_vindex::format::vindex3::opplan::exec::intervene::{InterventionKind, InterventionPlan};
 use larql_vindex::format::vindex3::opplan::exec::observe::{
     CarrierForm, CarrierWriteRecord, StepEvent, StepObserver, SublayerSite,
 };
@@ -49,6 +50,12 @@ pub struct RunIdentity {
     pub schema: String,
     /// Wall-clock start, metadata only; never an ordering key.
     pub started_unix_ms: u64,
+    /// V3-INTERVENE-1: the hash of the intervention declaration this run
+    /// executed under; `None` for an unintervened run. Part of the
+    /// identity, so a record from an intervened run is never read as a
+    /// baseline of the same prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intervention_sha256: Option<String>,
 }
 
 impl RunIdentity {
@@ -63,6 +70,7 @@ impl RunIdentity {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
                 .unwrap_or(0),
+            intervention_sha256: None,
         }
     }
 }
@@ -99,6 +107,25 @@ impl From<CarrierForm> for Carrier {
             CarrierForm::Single => Self::Single,
             CarrierForm::Bundle => Self::Bundle,
             CarrierForm::History => Self::History,
+        }
+    }
+}
+
+/// The runner's spelling of an intervention kind (V3-INTERVENE-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    Zero,
+    Add,
+    Replace,
+}
+
+impl From<InterventionKind> for Kind {
+    fn from(kind: InterventionKind) -> Self {
+        match kind {
+            InterventionKind::Zero => Self::Zero,
+            InterventionKind::Add => Self::Add,
+            InterventionKind::Replace => Self::Replace,
         }
     }
 }
@@ -183,6 +210,14 @@ pub enum EventKind {
         method: String,
         heads: usize,
         residual: f64,
+    },
+    /// V3-INTERVENE-1: an intervention fired on this site's write at the
+    /// envelope's position. Precedes the write's stats and structural
+    /// event, as the executor fires it.
+    Intervened {
+        layer: usize,
+        site: Site,
+        intervention: Kind,
     },
     /// An executor event this schema has no spelling for yet. Recorded
     /// with the executor's debug form so nothing is lost.
@@ -306,6 +341,17 @@ pub struct Receipt {
     /// stays complete without its rows from that point.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_failure: Option<String>,
+    /// V3-INTERVENE-1: how many interventions the run declared.
+    #[serde(default)]
+    pub interventions_declared: u64,
+    /// V3-INTERVENE-1: how many firings the run recorded.
+    #[serde(default)]
+    pub interventions_applied: u64,
+    /// V3-INTERVENE-1: a declared address the run never reached, named
+    /// at the end of the run. A declared intervention that never fired
+    /// is a refusal on the receipt, never a silent no-op.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intervention_refusal: Option<String>,
 }
 
 /// A finished record: header, events, receipt.
@@ -335,6 +381,13 @@ pub struct RunRecorder<'a> {
     events: Vec<RecordedEvent>,
     live: Option<LiveTap>,
     complete: bool,
+    /// V3-INTERVENE-1: the declaration this run executes under, if any.
+    interventions: Option<InterventionPlan>,
+    /// Firings recorded so far.
+    applied: u64,
+    /// One past the highest position an event carried, so the receipt
+    /// can name declared addresses the run never reached.
+    positions_executed: usize,
 }
 
 impl<'a> RunRecorder<'a> {
@@ -356,7 +409,19 @@ impl<'a> RunRecorder<'a> {
             events: Vec::new(),
             live: None,
             complete: false,
+            interventions: None,
+            applied: 0,
+            positions_executed: 0,
         }
+    }
+
+    /// Declare the interventions this run executes under (V3-INTERVENE-1).
+    /// The declaration's hash joins the run identity; the receipt counts
+    /// firings against declarations and names any address never reached.
+    pub fn with_interventions(mut self, interventions: &InterventionPlan) -> Self {
+        self.identity.intervention_sha256 = interventions.declaration_sha256();
+        self.interventions = Some(interventions.clone());
+        self
     }
 
     /// Arm a recorder over a prepared image: the provenance is read off
@@ -450,6 +515,33 @@ impl<'a> RunRecorder<'a> {
             .and_then(|h| h.failure().map(ToString::to_string));
         let head_layers_uncovered = self.uncovered.clone();
         let fingerprint = self.provenance.fingerprint();
+        let interventions_declared = self
+            .interventions
+            .as_ref()
+            .map(|p| u64::try_from(p.declared()).expect("count fits"))
+            .unwrap_or(0);
+        // A declared address the run never reached is named on the
+        // receipt, but only once the run is complete: an incomplete
+        // record is a valid prefix, and a prefix has not failed to reach
+        // anything yet.
+        let intervention_refusal = match (&self.interventions, self.complete) {
+            (Some(plan), true) => {
+                let unreached = plan.unreached(self.positions_executed);
+                (!unreached.is_empty()).then(|| {
+                    let named: Vec<String> = unreached
+                        .iter()
+                        .map(|u| format!("layer {} {:?} position {}", u.layer, u.site, u.position))
+                        .collect();
+                    format!(
+                        "declared intervention never fired: the run executed {} position(s) and \
+                         did not reach {}",
+                        self.positions_executed,
+                        named.join(", ")
+                    )
+                })
+            }
+            _ => None,
+        };
         RunRecord {
             identity: self.identity,
             provenance: serde_json::to_value(&self.provenance).expect("provenance serialises"),
@@ -466,6 +558,9 @@ impl<'a> RunRecorder<'a> {
                 head_records,
                 head_layers_uncovered,
                 head_failure,
+                interventions_declared,
+                interventions_applied: self.applied,
+                intervention_refusal,
             },
             events: self.events,
         }
@@ -477,6 +572,7 @@ impl StepObserver for RunRecorder<'_> {
         let kind = match event {
             StepEvent::Embedded { position } => {
                 self.position = position;
+                self.positions_executed = self.positions_executed.max(position + 1);
                 EventKind::Embedded
             }
             StepEvent::AttentionDone { layer } => EventKind::AttentionDone { layer },
@@ -488,6 +584,14 @@ impl StepObserver for RunRecorder<'_> {
                     self.uncovered.insert(at, layer);
                 }
                 EventKind::HeadsUncovered { layer }
+            }
+            StepEvent::Intervened { layer, site, kind } => {
+                self.applied += 1;
+                EventKind::Intervened {
+                    layer,
+                    site: site.into(),
+                    intervention: kind.into(),
+                }
             }
             StepEvent::CarrierWrite {
                 layer,

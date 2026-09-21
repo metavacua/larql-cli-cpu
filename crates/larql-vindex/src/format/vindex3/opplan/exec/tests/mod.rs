@@ -39,6 +39,7 @@ mod gated_delta_parity;
 mod gated_delta_tiny;
 mod hybrid_traversal;
 mod hyper_connection;
+mod intervene;
 #[cfg(all(feature = "gpu", target_os = "macos"))]
 mod kda_metal;
 #[cfg(all(feature = "gpu", target_os = "macos"))]
