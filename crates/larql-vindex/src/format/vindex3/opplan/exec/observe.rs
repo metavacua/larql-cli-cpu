@@ -19,6 +19,7 @@
 //! [`step`]: super::decode::DecodeSession::step
 
 use super::hyper_connection::{Bundle, SinkhornSplit};
+use super::intervene::InterventionKind;
 
 /// One decode step's observation events, in execution order.
 ///
@@ -61,6 +62,14 @@ pub enum StepEvent {
     /// decomposition. Fires only when the observer asked for heads; the
     /// receipt names the layer as uncovered.
     HeadsUncovered { layer: usize },
+    /// V3-INTERVENE-1: an intervention fired on this site's write. Fires
+    /// BEFORE the write's record and its structural event, so a reader of
+    /// that record knows its `after` is not the branch's own.
+    Intervened {
+        layer: usize,
+        site: SublayerSite,
+        kind: InterventionKind,
+    },
 }
 
 /// The form the residual carrier takes at a write (V3-OBS-1, property
@@ -88,6 +97,15 @@ pub enum CarrierForm {
 /// chains instead — a write's `before` is the previous write's `after`
 /// (times `layer_scale` where the previous write carried one), and the
 /// first link is [`StepObserver::entering_carrier`].
+///
+/// At an intervened site (V3-INTERVENE-1, the `Intervened` event
+/// precedes this record) `delta` is `after − before`: the rounded write
+/// including the patch, which is not the branch output the unintervened
+/// record carries (`fl(before + d) − before ≠ d`). An intervention that
+/// left the carrier bit-identical to the unpatched write is not a write
+/// and reports the branch's own `delta`, so a no-op plan is bit-identical
+/// on the record. A reader that wants the branch output at an intervened
+/// site subtracts the patch itself.
 #[derive(Debug, Clone, Copy)]
 pub struct CarrierWriteRecord<'a> {
     pub layer: usize,

@@ -21,6 +21,7 @@ distributed).
 | [instrument-1b-lens.md](instrument-1b-lens.md) | INSTRUMENT-1b — pre-registered: the V3-LENS-1 lens pointed at the emergence write on the INSTRUMENT-1a cases (no new selection); rank/top-1 before, at and after L23 (L35 on 12B) |
 | [v3-obs-1-carrier-observation.md](v3-obs-1-carrier-observation.md) | Frozen executor-side carrier observation rung for the VINDEX3 Observatory contract: `leave_site` tap, parity/reconstruction properties, witness map, and capture-cost protocol |
 | [v3-head-obs-1-per-head-observation.md](v3-head-obs-1-per-head-observation.md) | Frozen V3-HEAD-OBS-1 rung: per-head distribution and pre-projection output from the one softmax kernel, per-layer coverage on the receipt, the per-head and per-source split identities, and the first HEAD-2 reading |
+| [v3-intervene-1-carrier-intervention.md](v3-intervene-1-carrier-intervention.md) | Frozen V3-INTERVENE-1 rung: Zero/Add/Replace on one declared carrier address, vector provenance, the no-op law, receipt fields, and the first causal arm (HEAD-1 CARRIED) |
 | [vindex3-experiments.md](vindex3-experiments.md) | Pre-registered VINDEX3 experimental programme (the V2-0..V2-4 gates) |
 | [vindex3-ontology-drill.md](vindex3-ontology-drill.md) | The four-architecture ontology drill (candidate §17.4) — run 2026-08-30, findings F1–F16 |
 | [lyrw-v2.md](lyrw-v2.md) | LYRW v2 — the K3 routed-layer physical-layout gate (storage half of K3) |
