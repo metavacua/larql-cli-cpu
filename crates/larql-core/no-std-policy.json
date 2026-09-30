@@ -1,0 +1,13 @@
+{
+  "policy_note": "larql-core is a wave-1 crate (per the leaf-first no_std segregation plan): its one OS-coupled dependency, reqwest, already sits entirely behind the optional `http` feature (part of `default = [\"http\", \"msgpack\"]`), so `cargo check --no-default-features` already drops it today -- this is the one crate in the plausible set that needed no NEW feature-gating work at the dependency layer. It is still expected-fail on every target below for the same reason as the wave-0 leaves: `#![cfg_attr(not(feature = \"std\"), no_std)]` has not been added at the crate root yet. The no-default-features flag this workflow already passes for larql-core (see target-matrix.yml) stays in place once the crate root opt-out lands -- msgpack's rmp-serde is not OS-coupled and is not being asked to go away here. Promote a target's entry to expected-pass only as part of the PR that adds the no_std opt-out.",
+  "targets": {
+    "wasm32v1-none": "expected-fail",
+    "riscv32i-unknown-none-elf": "expected-fail",
+    "riscv32im-unknown-none-elf": "expected-fail",
+    "riscv32imac-unknown-none-elf": "expected-fail",
+    "riscv32imafc-unknown-none-elf": "expected-fail",
+    "riscv32imc-unknown-none-elf": "expected-fail",
+    "riscv64gc-unknown-none-elf": "expected-fail",
+    "riscv64imac-unknown-none-elf": "expected-fail"
+  }
+}

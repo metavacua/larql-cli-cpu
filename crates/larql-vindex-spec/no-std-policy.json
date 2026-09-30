@@ -1,0 +1,13 @@
+{
+  "policy_note": "larql-vindex-spec is a wave-0 crate (per the leaf-first no_std segregation plan): a true leaf, zero larql-* dependencies, only serde/serde_json/thiserror. Its dependency graph has no unconditional OS coupling, but the crate does not yet declare `#![cfg_attr(not(feature = \"std\"), no_std)]` -- an ordinary crate implicitly links std unless it opts out at its crate root, and this one has not. Every target below is therefore expected-fail today, honestly, not because of anything this crate's dependencies need but because the no_std opt-out itself has not landed. Promote a target's entry to expected-pass only as part of the PR that adds that opt-out (see scripts/check_no_std_policy.py for what promoting means and why demoting is never done silently).",
+  "targets": {
+    "wasm32v1-none": "expected-fail",
+    "riscv32i-unknown-none-elf": "expected-fail",
+    "riscv32im-unknown-none-elf": "expected-fail",
+    "riscv32imac-unknown-none-elf": "expected-fail",
+    "riscv32imafc-unknown-none-elf": "expected-fail",
+    "riscv32imc-unknown-none-elf": "expected-fail",
+    "riscv64gc-unknown-none-elf": "expected-fail",
+    "riscv64imac-unknown-none-elf": "expected-fail"
+  }
+}

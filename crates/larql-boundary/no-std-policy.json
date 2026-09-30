@@ -1,0 +1,13 @@
+{
+  "policy_note": "larql-boundary is a wave-0 crate (per the leaf-first no_std segregation plan): a true leaf, only serde/serde_json/thiserror, same profile as larql-vindex-spec. No unconditional OS coupling exists to gate; every target below is expected-fail today purely because `#![cfg_attr(not(feature = \"std\"), no_std)]` has not been added yet. Promote a target's entry to expected-pass only as part of the PR that adds that opt-out.",
+  "targets": {
+    "wasm32v1-none": "expected-fail",
+    "riscv32i-unknown-none-elf": "expected-fail",
+    "riscv32im-unknown-none-elf": "expected-fail",
+    "riscv32imac-unknown-none-elf": "expected-fail",
+    "riscv32imafc-unknown-none-elf": "expected-fail",
+    "riscv32imc-unknown-none-elf": "expected-fail",
+    "riscv64gc-unknown-none-elf": "expected-fail",
+    "riscv64imac-unknown-none-elf": "expected-fail"
+  }
+}

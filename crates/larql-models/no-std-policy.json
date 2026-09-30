@@ -1,0 +1,13 @@
+{
+  "policy_note": "larql-models is a wave-1 crate (per the leaf-first no_std segregation plan): its one OS-coupled dependency, memmap2 (weight-file loading), is unconditional today -- unlike larql-core, this crate needs a NEW opt-out feature added (e.g. `mmap-load`, default-on so no current consumer's behavior changes) before a no-default-features build even has anything to gain. Every target below is expected-fail for two independent reasons until that lands: the unconditional memmap2 dependency, and the crate root not yet declaring `#![cfg_attr(not(feature = \"std\"), no_std)]`. Once the mmap-load feature exists, update target-matrix.yml's library-no-std-check job to pass `--no-default-features` for this crate (mirroring larql-core's entry) as part of the same change, and promote targets to expected-pass only once the check genuinely passes with that flag.",
+  "targets": {
+    "wasm32v1-none": "expected-fail",
+    "riscv32i-unknown-none-elf": "expected-fail",
+    "riscv32im-unknown-none-elf": "expected-fail",
+    "riscv32imac-unknown-none-elf": "expected-fail",
+    "riscv32imafc-unknown-none-elf": "expected-fail",
+    "riscv32imc-unknown-none-elf": "expected-fail",
+    "riscv64gc-unknown-none-elf": "expected-fail",
+    "riscv64imac-unknown-none-elf": "expected-fail"
+  }
+}

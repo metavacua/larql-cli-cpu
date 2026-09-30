@@ -1,0 +1,685 @@
+# Target matrix: binary-crate host-capability ladder + library-crate
+# conditional no_std check.
+#
+# This is deliberately NOT another per-push gate. It complements the
+# existing per-crate workflows (larql-cli.yml, larql-compute.yml, ...),
+# which already cover x86_64-unknown-linux-gnu / windows-msvc / macOS on
+# every push, by asking two questions nothing else in this repo asks:
+#
+#   1. For the two BINARY crates (larql-cli, larql-router), how far does
+#      compilation get as OS services are progressively taken away (down
+#      to none at all), and do the other three Tier-1 GNU targets
+#      (aarch64, i686, x86_64-pc-windows-gnu) - which nothing else here
+#      builds - still really pass?
+#   2. For the five LIBRARY crates with no obviously-unconditional OS
+#      coupling, how far would a `#![no_std]` port get today?
+#
+# Scope note: this workflow was designed against this repository's own
+# 14-crate closure specifically (larql-cli-cpu, the CPU-only extraction),
+# not the larger upstream workspace it was extracted from. Upstream also
+# has larql-server, vindex-cli, larql-compute-metal, larql-demos,
+# larql-python and model-compute; none of them is a member of this
+# workspace, and none is named anywhere below.
+#
+# House-style note carried through every job: failing steps are never
+# redirected to a file or summarised away. `cargo check` / `cargo clippy`
+# / `cargo fmt` are invoked with their output going straight to the step
+# log, so a red step already shows the full, unfiltered compiler text -
+# see the "Print it here, unfiltered." precedent in
+# lql-strategy-matrix.yml. Nothing here pipes a command through `tail`,
+# `--quiet`, or `2>/dev/null`.
+
+name: target-matrix
+
+on:
+  # This workflow answers a question that is a pure function of this
+  # repo's own code and Cargo.lock - unlike `quality.yml`'s cargo-audit
+  # job, there is no externally-drifting advisory database to catch, so
+  # there is no equivalent case for a *weekly* schedule here.
+  #
+  # It is also expensive in a way none of this repo's push/PR gates are:
+  # four native runners (including one Windows and one arm64 leg) plus a
+  # 40-cell cross-compilation matrix across toolchains nothing else here
+  # installs. So: no `push:`/`pull_request:` trigger here. A separate,
+  # narrow, path-filtered workflow scoped to one crate at a time is the
+  # right complement for PR-time feedback once a crate's no_std port is
+  # actually underway - this file is the full, infrequent audit, not
+  # that.
+  #
+  # `workflow_dispatch` covers the actual expected use: run this before
+  # or after a dependency bump, or before committing to a real `no_std`
+  # port, to get a fresh read. A light MONTHLY schedule (not weekly, and
+  # narrower than quality.yml's cadence, because nothing here goes stale
+  # for advisory reasons - only for toolchain/target-support rot) exists
+  # purely so the matrix itself doesn't bit-rot from disuse.
+  workflow_dispatch: {}
+  schedule:
+    - cron: '0 6 1 * *' # first of the month, 06:00 UTC
+
+permissions:
+  contents: read
+
+# Supersede in-flight pull-request runs: pushing a new commit to a PR
+# cancels the runs still compiling the previous one. Non-PR runs (main
+# pushes, schedules, manual dispatch) are keyed by `run_id`, unique per
+# run, so they are each alone in their group - not the same as
+# `cancel-in-progress: false`, since a concurrency group still holds at
+# most one pending run and would otherwise evict an intermediate main
+# commit's record.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # ── Binary-crate ladder, leg 1: the three diagnostic rungs plus the
+  # two Tier-1 GNU targets that share this leg's host architecture
+  # (x86_64). Colocating x86_64-unknown-linux-gnu and
+  # i686-unknown-linux-gnu here is deliberate, not incidental: a cargo
+  # build script or proc-macro ALWAYS compiles for the HOST regardless of
+  # the `--target` being checked, and the host here is x86_64 Linux for
+  # all five of this job's targets. aarch64-unknown-linux-gnu and
+  # x86_64-pc-windows-gnu need a genuinely different host to even RUN
+  # their test binaries (see the two jobs below), so they gain nothing
+  # from being here and are kept out.
+  binary-ladder-ubuntu-x86_64:
+    name: binary ladder (x86_64 host) · ${{ matrix.crate }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # larql-cli's default features are just `research` (no `gpu`
+          # exists in this workspace) - bare `cargo check`/`test` already
+          # gets the right feature set, no extra flags needed.
+          - crate: larql-cli
+            extra_flags: ''
+          # larql-router defaults to `default = []` - nothing to opt out of.
+          - crate: larql-router
+            extra_flags: ''
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # T2-without-host-tools targets need only `rustup target add` - no
+      # SDK - for `cargo check`. wasm32-unknown-emscripten's Emscripten
+      # SDK requirement is specifically a LINK-time requirement (`emcc`
+      # is required to link the final wasm binary); this job only ever
+      # runs `cargo check` on it (see Rung 2 below), which never reaches
+      # the linker, so emsdk is deliberately never installed anywhere in
+      # this job. i686-unknown-linux-gnu is added here too (not a
+      # separate job): an x86_64 CPU executes i686 code natively, so -
+      # unlike aarch64 or windows-gnu - it needs no separate runner, only
+      # the target and its 32-bit system libs (next step).
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: >-
+            wasm32-unknown-unknown,
+            wasm32-unknown-emscripten,
+            wasm32-wasip1,
+            i686-unknown-linux-gnu
+
+      # OpenBLAS is a SYSTEM dependency here, not vendored:
+      # `larql-compute`'s Linux target-cfg block pulls in
+      # `openblas-src = { features = ["system"] }`, which links the
+      # system `libopenblas` rather than building one, so every one of
+      # this job's binary crates needs it on PATH via pkg-config to even
+      # check successfully (larql-cli reaches larql-compute transitively
+      # through larql-inference; larql-router has no larql-compute
+      # dependency at all - installing it unconditionally is simpler and
+      # harmless).
+      #
+      # The `:i386` block is the least battle-tested step in this whole
+      # workflow. Every other apt install here mirrors a pattern already
+      # proven in larql-cli.yml / larql-compute.yml; running a 32-bit
+      # BLAS through Debian/Ubuntu's multiarch packaging is not something
+      # any existing workflow in this repo does. That is exactly why the
+      # i686 rung below is `continue-on-error: true` while the native
+      # x86_64 rung is a real gate - see that step's comment.
+      - name: Install OpenBLAS + 32-bit cross support (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopenblas-dev pkg-config
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib libc6-dev-i386 libopenblas-dev:i386 pkg-config:i386
+          echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
+
+      - name: Cache cargo registry (downloads only, never target/)
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-reg2-target-matrix-ladder-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-reg2-target-matrix-ladder-
+
+      - name: No compiled workspace artefacts may be restored
+        shell: bash
+        run: |
+          # The cache above carries downloads only. A target/ restored from
+          # another commit can satisfy a link against stale code, so a green
+          # matrix would be evidence about an artefact that is not in this
+          # commit. Fail loudly rather than build on one.
+          if [ -e target ]; then
+            echo "::error::target/ was restored from cache - the cache key or path is wrong"
+            exit 1
+          fi
+
+      # ── Rung 1/4: wasm32-unknown-unknown ("unknown"). No OS at all.
+      # `continue-on-error: true` so Rungs 2-4 still run even if this one
+      # fails - the point of a ladder is to see how far each crate gets,
+      # not to stop at the first broken rung.
+      - name: 'Rung 1/4 (unknown): cargo check --target wasm32-unknown-unknown'
+        id: rung1
+        continue-on-error: true
+        run: cargo check --target wasm32-unknown-unknown -p ${{ matrix.crate }} --bins ${{ matrix.extra_flags }}
+
+      # ── Rung 2/4: wasm32-unknown-emscripten. Unlocks a real,
+      # POSIX-compatible (musl-based) filesystem and JS interop.
+      - name: 'Rung 2/4 (emscripten): cargo check --target wasm32-unknown-emscripten'
+        id: rung2
+        continue-on-error: true
+        run: cargo check --target wasm32-unknown-emscripten -p ${{ matrix.crate }} --bins ${{ matrix.extra_flags }}
+
+      # ── Rung 3/4: wasm32-wasip1. Unlocks a real, WASI-syscall-backed
+      # filesystem (a different mechanism than emscripten's POSIX
+      # emulation) while explicitly, definitively refusing threads and
+      # process spawn (both "always return an error" per the WASI docs,
+      # not merely unstubbed).
+      - name: 'Rung 3/4 (wasi): cargo check --target wasm32-wasip1'
+        id: rung3
+        continue-on-error: true
+        run: cargo check --target wasm32-wasip1 -p ${{ matrix.crate }} --bins ${{ matrix.extra_flags }}
+
+      # ── Rung 4/4 (gnu), x86_64-unknown-linux-gnu leg: the one target
+      # in this job with a full native OS underneath it. This is the
+      # first rung expected to actually pass, so - unlike Rungs 1-3 - it
+      # is a REAL gate: no continue-on-error, and a failure here fails
+      # the job.
+      - name: 'Rung 4/4 (gnu, x86_64-unknown-linux-gnu): cargo check'
+        run: cargo check --target x86_64-unknown-linux-gnu -p ${{ matrix.crate }} --bins ${{ matrix.extra_flags }}
+
+      - name: 'Rung 4/4 (gnu, x86_64-unknown-linux-gnu): cargo test'
+        run: cargo test --target x86_64-unknown-linux-gnu -p ${{ matrix.crate }} ${{ matrix.extra_flags }}
+
+      # ── Rung 4/4 (gnu), i686-unknown-linux-gnu leg: also a Tier-1 GNU
+      # target, and in principle also a real gate. It is marked
+      # continue-on-error here ONLY because of the 32-bit OpenBLAS
+      # cross-packaging risk flagged above, not because the target
+      # itself is any less "real" than x86_64 - an x86_64 CPU runs i686
+      # code natively, so this is not an emulation concern, purely a
+      # "will `libopenblas-dev:i386` resolve and link cleanly" one. Once
+      # a real run confirms the package set above, remove
+      # `continue-on-error` here to make it a full gate like x86_64's.
+      - name: 'Rung 4/4 (gnu, i686-unknown-linux-gnu): cargo check'
+        id: rung4_i686_check
+        continue-on-error: true
+        run: cargo check --target i686-unknown-linux-gnu -p ${{ matrix.crate }} --bins ${{ matrix.extra_flags }}
+
+      - name: 'Rung 4/4 (gnu, i686-unknown-linux-gnu): cargo test'
+        id: rung4_i686_test
+        continue-on-error: true
+        run: cargo test --target i686-unknown-linux-gnu -p ${{ matrix.crate }} ${{ matrix.extra_flags }}
+
+      - name: Ladder summary
+        if: always()
+        run: |
+          {
+            echo "### binary ladder · ${{ matrix.crate }} (x86_64 host)"
+            echo "| rung | target | outcome |"
+            echo "|---|---|---|"
+            echo "| 1 | wasm32-unknown-unknown | ${{ steps.rung1.outcome }} |"
+            echo "| 2 | wasm32-unknown-emscripten | ${{ steps.rung2.outcome }} |"
+            echo "| 3 | wasm32-wasip1 | ${{ steps.rung3.outcome }} |"
+            echo "| 4 (gnu) | x86_64-unknown-linux-gnu | real gate above |"
+            echo "| 4 (gnu) | i686-unknown-linux-gnu (check) | ${{ steps.rung4_i686_check.outcome }} |"
+            echo "| 4 (gnu) | i686-unknown-linux-gnu (test) | ${{ steps.rung4_i686_test.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Binary-crate ladder, leg 2: the Tier-1 GNU target that needs a
+  # genuinely different host. `cargo test` has to RUN the compiled
+  # binary, and an x86_64 runner cannot run aarch64 code without
+  # emulation; a native arm64 runner sidesteps that entirely (same
+  # philosophy release.yml already uses: one native runner per target,
+  # never a cross-linker-plus-QEMU setup).
+  binary-gnu-aarch64:
+    name: binary gnu gate (aarch64) · ${{ matrix.crate }}
+    # GitHub-hosted arm64 Ubuntu runners. If this label is unavailable on
+    # this repository's plan, the fallback is a self-hosted arm64 runner
+    # or QEMU user-mode emulation, neither of which this job attempts.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - crate: larql-cli
+            extra_flags: ''
+          - crate: larql-router
+            extra_flags: ''
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      # A native arm64 machine, so this is the plain apt package - no
+      # multiarch/multilib dance like the i686 leg above.
+      - name: Install OpenBLAS (Linux, aarch64)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopenblas-dev pkg-config
+
+      - name: Cache cargo registry (downloads only, never target/)
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-arm64-cargo-reg2-target-matrix-aarch64-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-arm64-cargo-reg2-target-matrix-aarch64-
+
+      - name: No compiled workspace artefacts may be restored
+        shell: bash
+        run: |
+          if [ -e target ]; then
+            echo "::error::target/ was restored from cache - the cache key or path is wrong"
+            exit 1
+          fi
+
+      # A REAL gate, same as x86_64-unknown-linux-gnu above: a Tier-1
+      # GNU target with a full native OS, running on the architecture it
+      # targets, so nothing here should be structurally unable to pass.
+      - name: 'Rung 4/4 (gnu, aarch64-unknown-linux-gnu): cargo check'
+        run: cargo check --target aarch64-unknown-linux-gnu -p ${{ matrix.crate }} --bins ${{ matrix.extra_flags }}
+
+      - name: 'Rung 4/4 (gnu, aarch64-unknown-linux-gnu): cargo test'
+        run: cargo test --target aarch64-unknown-linux-gnu -p ${{ matrix.crate }} ${{ matrix.extra_flags }}
+
+  # ── Binary-crate ladder, leg 3: the other Tier-1 GNU target needing a
+  # genuinely different host - a windows-gnu binary needs a real Windows
+  # OS to run, same reasoning as the aarch64 leg above.
+  binary-gnu-windows-gnu:
+    name: binary gnu gate (windows-gnu) · ${{ matrix.crate }}
+    runs-on: windows-latest
+    timeout-minutes: 40
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - crate: larql-cli
+            extra_flags: ''
+          - crate: larql-router
+            extra_flags: ''
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      # `windows-latest` defaults to the MSVC toolchain; rustc's gnu
+      # targets still shell out to a real `gcc`/`ld` to link, which MSVC
+      # does not provide. Chocolatey's `mingw` package is the same
+      # install mechanism this repo already uses for `protoc` below.
+      - name: Install MinGW-w64 toolchain (Windows)
+        shell: pwsh
+        run: |
+          choco install mingw -y --no-progress
+          # Chocolatey's `mingw` package has installed to one of these two
+          # paths across different runner-image generations; check both
+          # rather than hardcoding one, and fail loudly (AGENTS.md: no
+          # silent fallback) if neither exists, rather than silently
+          # leaving rustc's windows-gnu linker unable to find `gcc`/`ld`.
+          $candidates = @(
+            'C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin',
+            'C:\tools\mingw64\bin'
+          )
+          $mingwBin = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $mingwBin) {
+            Write-Error "mingw64\bin not found under any known chocolatey install path ($($candidates -join ', ')) - inspect this step's log and update the candidate list"
+            exit 1
+          }
+          $mingwBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Install OpenBLAS (Windows)
+        shell: pwsh
+        run: |
+          $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
+          if (-not $vcpkgRoot) { $vcpkgRoot = "C:\vcpkg" }
+          "VCPKG_ROOT=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+          & "$vcpkgRoot\vcpkg.exe" install openblas:x64-windows
+
+      # larql-router-protocol's build.rs relies on a SYSTEM protoc on
+      # Windows (its non-Windows path bundles one via protobuf_src, whose
+      # cmake-driven build fails specifically on windows-latest - see
+      # that crate's build.rs and larql-cli.yml, which installs protoc
+      # the same way for the same reason). Both binary crates in this
+      # job reach larql-router-protocol - larql-cli transitively through
+      # larql-inference, larql-router directly.
+      - name: Install protoc (Windows)
+        shell: pwsh
+        run: choco install protoc -y --no-progress
+
+      - name: Cache cargo registry (downloads only, never target/)
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-reg2-target-matrix-windows-gnu-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-reg2-target-matrix-windows-gnu-
+
+      - name: No compiled workspace artefacts may be restored
+        shell: bash
+        run: |
+          if [ -e target ]; then
+            echo "::error::target/ was restored from cache - the cache key or path is wrong"
+            exit 1
+          fi
+
+      - name: 'Rung 4/4 (gnu, x86_64-pc-windows-gnu): cargo check'
+        run: cargo check --target x86_64-pc-windows-gnu -p ${{ matrix.crate }} --bins ${{ matrix.extra_flags }}
+
+      - name: 'Rung 4/4 (gnu, x86_64-pc-windows-gnu): cargo test'
+        run: cargo test --target x86_64-pc-windows-gnu -p ${{ matrix.crate }} ${{ matrix.extra_flags }}
+
+  # ── Library-crate conditional no_std check. ──
+  #
+  # Each cell's expected outcome is declared in that crate's own
+  # crates/<crate>/no-std-policy.json (scripts/check_no_std_policy.py),
+  # mirroring how crates/<crate>/coverage-policy.json already tracks a
+  # different per-crate debt baseline in this repo: a checked-in,
+  # versioned statement of what is CURRENTLY expected, read by a script,
+  # ratcheted tighter one target at a time, never loosened silently.
+  #
+  # Today every cell for every crate below is declared "expected-fail":
+  # none of these five crates declares `#![no_std]` yet (confirmed by
+  # grep, not assumed), so every check fails at the crate root
+  # (`error[E0463]: can't find crate for 'std'`) regardless of how clean
+  # its dependency graph looks. That is the honest starting state of a
+  # port nobody has begun, not a defect in this workflow - and it is why
+  # these steps are no longer a blanket `continue-on-error: true`: the
+  # policy script turns "did it pass" into "did it match what we already
+  # know to expect", so a REAL regression (a target that was already
+  # ported starts failing again) still fails the job, while the
+  # universal not-yet-ported baseline does not.
+  library-no-std-check:
+    name: no_std check · ${{ matrix.crate }} · ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every crate marked not-plausible-without-refactor in the
+        # leaf-first repo analysis is named here explicitly, so it is
+        # clear each was considered and skipped for a stated reason, not
+        # forgotten:
+        #
+        #   larql-compute         - rayon + a per-target BLAS backend
+        #                            (blas-src/openblas-src) are
+        #                            unconditional, core to the crate's
+        #                            purpose, and behind no feature.
+        #   larql-factory         - reqwest is unconditional with no
+        #                           feature to gate it, and it also
+        #                           depends unconditionally on
+        #                           larql-models' ungated memmap2.
+        #   larql-inference       - tokio, wasmtime, reqwest,
+        #                           tonic/prost, memmap2, rayon and a
+        #                           BLAS backend are all unconditional
+        #                           default dependencies.
+        #   larql-kv              - depends unconditionally on
+        #                           larql-inference and larql-vindex,
+        #                           both themselves not-plausible.
+        #   larql-lql             - reqwest (USE REMOTE) and rustyline
+        #                           (REPL) are unconditional, plus
+        #                           unconditional larql-inference and
+        #                           larql-vindex.
+        #   larql-router-protocol - tonic and tokio (net) are
+        #                           unconditional and woven through the
+        #                           generated code; quic/http3 only add
+        #                           more, never gate them.
+        #   larql-vindex          - reqwest, hf-hub, memmap2 and rayon
+        #                           are unconditional, central to
+        #                           vindex loading/HF-hub publish.
+        crate:
+          - larql-boundary
+          - larql-execution
+          - larql-vindex-spec
+          - larql-models
+          - larql-core
+        # wasm32v1-none plus every riscv32/64-*-none-elf target Tier 2
+        # covers - see the accompanying write-up for why this specific
+        # pairing (a frozen-feature-set wasm target plus a real hardware
+        # ISA with a mixed atomics story) catches more than either
+        # family alone.
+        target:
+          - wasm32v1-none
+          - riscv32i-unknown-none-elf
+          - riscv32im-unknown-none-elf
+          - riscv32imac-unknown-none-elf
+          - riscv32imafc-unknown-none-elf
+          - riscv32imc-unknown-none-elf
+          - riscv64gc-unknown-none-elf
+          - riscv64imac-unknown-none-elf
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # All eight targets are Tier 2 (without host tools) and ship
+      # prebuilt core+alloc rlibs through plain `rustup target add` on a
+      # STABLE toolchain - none of them need `-Zbuild-std` or a nightly
+      # switch. That is specifically what distinguishes wasm32v1-none
+      # from hand-rolling the same frozen feature set on
+      # wasm32-unknown-unknown (see the write-up).
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry (downloads only, never target/)
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-reg2-target-matrix-nostd-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-reg2-target-matrix-nostd-
+
+      - name: No compiled workspace artefacts may be restored
+        shell: bash
+        run: |
+          if [ -e target ]; then
+            echo "::error::target/ was restored from cache - the cache key or path is wrong"
+            exit 1
+          fi
+
+      # `--lib` only: dev-dependencies (criterion, tempfile, ...) are
+      # std-only and irrelevant to whether the LIBRARY target itself is
+      # no_std-clean, so `--tests`/`--benches`/`--examples` would only
+      # add noise here, not signal.
+      #
+      # larql-core is the one crate whose no-std-policy.json flags it as
+      # already having somewhere to go with --no-default-features
+      # (drops reqwest AND msgpack). Every other crate here has nothing
+      # behind its default feature set worth shedding YET - larql-models
+      # is deliberately run plain despite memmap2 being its known
+      # blocker: the feature that would let this flag mean anything for
+      # larql-models does not exist in its Cargo.toml yet (see its
+      # no-std-policy.json), and inventing one here, unasked, is not
+      # this workflow's job.
+      #
+      # The exit code is captured, not allowed to fail the step directly
+      # - scripts/check_no_std_policy.py decides the step's real outcome
+      # against that crate's policy file.
+      - name: cargo check --lib (no_std diagnostic)
+        run: |
+          set +e
+          EXTRA=""
+          if [ "${{ matrix.crate }}" = "larql-core" ]; then EXTRA="--no-default-features"; fi
+          cargo check --target ${{ matrix.target }} -p ${{ matrix.crate }} --lib $EXTRA
+          ec=$?
+          set -e
+          python3 scripts/check_no_std_policy.py \
+            "${{ matrix.crate }}" "${{ matrix.target }}" "$ec" "check" \
+            "crates/${{ matrix.crate }}/no-std-policy.json"
+
+      # The three core/alloc/std restriction lints, applied via --fix
+      # rather than a bare check. Confirmed against clippy's own source
+      # (clippy_lints/src/std_instead_of_core.rs) that all three share
+      # one emission path using Applicability::MachineApplicable, so
+      # --fix genuinely rewrites these - it is not a no-op. This step is
+      # a GATE, not a mutation: --fix runs, then the tree must come back
+      # clean. A resulting diff means a fixable violation exists and was
+      # not applied ahead of time; it is printed unfiltered below as
+      # exactly the fix a human should commit. Nothing here pushes or
+      # commits from CI - the runner is disposable either way.
+      #
+      # Dormant today for the same reason the check step above is: no
+      # crate here is `#![no_std]` yet, so clippy never gets past the
+      # crate root far enough to run its lint passes at all. It activates
+      # automatically, per (crate, target) cell, the moment that cell's
+      # check step starts passing - no one has to remember to add this
+      # later. Fed through the same policy file and script as the check
+      # step: a crate is expected to pass BOTH once its port lands, not
+      # tracked as two independently-promotable axes.
+      #
+      # alloc_instead_of_core's own "Known problems" note: it is "only
+      # partially aware of the required MSRV for items that were
+      # originally in std but moved to core" - unlikely to bite at this
+      # repo's pinned 1.98, worth knowing if a fix ever looks wrong.
+      - name: 'cargo clippy --fix: core/alloc/std restriction lints (target-scoped)'
+        run: |
+          set +e
+          EXTRA=""
+          if [ "${{ matrix.crate }}" = "larql-core" ]; then EXTRA="--no-default-features"; fi
+          cargo clippy --fix --allow-dirty --allow-staged \
+            --target ${{ matrix.target }} -p ${{ matrix.crate }} --lib --no-deps $EXTRA -- \
+            -W clippy::std_instead_of_core \
+            -W clippy::std_instead_of_alloc \
+            -W clippy::alloc_instead_of_core
+          clippy_ec=$?
+          git diff -- "crates/${{ matrix.crate }}"
+          git diff --exit-code -- "crates/${{ matrix.crate }}" > /dev/null
+          diff_ec=$?
+          set -e
+          if [ "$clippy_ec" -ne 0 ]; then ec=$clippy_ec; else ec=$diff_ec; fi
+          python3 scripts/check_no_std_policy.py \
+            "${{ matrix.crate }}" "${{ matrix.target }}" "$ec" "clippy-fix" \
+            "crates/${{ matrix.crate }}/no-std-policy.json"
+
+      - name: Cell summary
+        if: always()
+        run: |
+          {
+            echo "| crate | target |"
+            echo "|---|---|"
+            echo "| ${{ matrix.crate }} | ${{ matrix.target }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Target-less hygiene: fmt has no --target concept at all. Confirmed
+  # directly (`rustfmt --help`): its flags are --check/--edition/--emit,
+  # nothing target-triple-shaped, because rustfmt formats the raw
+  # token stream/AST as parsed and never resolves `cfg` - every
+  # `#[cfg(target_arch = "wasm32")]`-gated branch gets formatted
+  # identically no matter which target would activate it. That is the
+  # mirror image of why clippy above has to run once per target: clippy
+  # only lints the cfg-resolved code a real compilation would produce,
+  # fmt never resolves cfg at all, so there is exactly one fmt check to
+  # run, not eight.
+  #
+  # The workspace-wide clippy-fix pass below is deliberately NOT scoped
+  # to the five no_std-plausible crates: std-vs-core/alloc precision is
+  # worth having in every crate, whether or not it will ever target a
+  # freestanding platform, and unlike the per-target pass above, this
+  # one runs on the host target where every crate already compiles
+  # today - the only piece of this whole file that does real, immediate
+  # work on first run rather than staying dormant.
+  core-alloc-std-hygiene-native:
+    name: workspace hygiene (fmt + core/alloc/std, native)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install OpenBLAS
+        run: sudo apt-get update && sudo apt-get install -y libopenblas-dev pkg-config
+
+      - name: Cache cargo registry (downloads only, never target/)
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-reg2-target-matrix-hygiene-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-reg2-target-matrix-hygiene-
+
+      - name: No compiled workspace artefacts may be restored
+        shell: bash
+        run: |
+          if [ -e target ]; then
+            echo "::error::target/ was restored from cache - the cache key or path is wrong"
+            exit 1
+          fi
+
+      # A REAL gate, not continue-on-error: every other workflow in this
+      # repo already blocks on `cargo fmt --all -- --check`, and this
+      # file should not be the one place that quietly lets it drift.
+      # Present here mainly for self-containment - someone running only
+      # this workflow via workflow_dispatch still gets the full picture
+      # without cross-referencing larql-cli.yml/quality.yml.
+      - name: cargo fmt --all -- --check
+        run: cargo fmt --all -- --check
+
+      # continue-on-error, matching the per-target step's reasoning: this
+      # is this lint trio's first-ever execution against this codebase,
+      # workspace-wide, with no measured baseline yet. Unlike the
+      # per-target job, there is no per-crate no-std-policy.json to
+      # consult here - this pass is about workspace-wide std/alloc/core
+      # precision, not about no_std readiness, so a plain
+      # continue-on-error (rather than a policy file) is the right,
+      # simpler shape for its first landing. If this ever needs
+      # per-crate tracking of its own, that is the point to add one.
+      - name: 'cargo clippy --fix: core/alloc/std restriction lints (workspace, native)'
+        id: clippy_fix_native
+        continue-on-error: true
+        run: |
+          cargo clippy --fix --allow-dirty --allow-staged --workspace --no-deps -- \
+            -W clippy::std_instead_of_core \
+            -W clippy::std_instead_of_alloc \
+            -W clippy::alloc_instead_of_core
+          git diff
+          git diff --exit-code
+
+      - name: Hygiene summary
+        if: always()
+        run: |
+          {
+            echo "### workspace hygiene (native)"
+            echo "| check | outcome |"
+            echo "|---|---|"
+            echo "| fmt --check | real gate above |"
+            echo "| core/alloc/std fix (workspace) | ${{ steps.clippy_fix_native.outcome }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
