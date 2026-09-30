@@ -7,7 +7,7 @@
 use std::fs;
 use std::io::Read;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Instant;
 
 use clap::{Args, Subcommand};
@@ -26,7 +26,6 @@ mod layers;
 mod scoring;
 #[cfg(feature = "research")]
 mod verify;
-mod vindex;
 pub use args::ShannonCommand;
 use args::*;
 use arith::*;
@@ -35,23 +34,20 @@ use scoring::*;
 pub(crate) use scoring::{forward_hidden_all_layers, load_model, read_text};
 #[cfg(feature = "research")]
 use verify::*;
-use vindex::*;
 
 const LN_2: f64 = std::f64::consts::LN_2;
 pub(crate) const DEFAULT_CONTEXT: usize = 512;
 const DEFAULT_STRIDE: usize = 256;
 
 // Arithmetic coding must rebuild the exact same integer frequency table when
-// decoding. The vindex/Metal path is fast but can produce tiny cross-run float
-// drift, so keep this comfortably above Gemma's 262K vocab without making the
-// table hypersensitive to low-order logit differences.
+// decoding, so keep this comfortably above Gemma's 262K vocab without making
+// the table hypersensitive to low-order logit differences.
 const FREQ_TOTAL: u32 = 1 << 19;
 const CODE_BITS: u32 = 32;
 const TOP_VALUE: u64 = (1u64 << CODE_BITS) - 1;
 const FIRST_QTR: u64 = TOP_VALUE / 4 + 1;
 const HALF: u64 = FIRST_QTR * 2;
 const THIRD_QTR: u64 = FIRST_QTR * 3;
-const VINDEX_BLOCK_TARGET_TOKENS: usize = 512;
 
 pub fn run(cmd: ShannonCommand) -> Result<(), Box<dyn std::error::Error>> {
     match cmd {
@@ -71,9 +67,6 @@ pub fn run(cmd: ShannonCommand) -> Result<(), Box<dyn std::error::Error>> {
         }
         ShannonCommand::LayerDiff(args) => {
             crate::commands::primary::shannon_trace::compare::run_layer_diff(args)
-        }
-        ShannonCommand::DecodeDiff(args) => {
-            crate::commands::primary::shannon_trace::decode_diff::run_decode_diff(args)
         }
     }
 }
@@ -201,32 +194,5 @@ mod tests {
         assert_eq!(parsed.target_tokens, 42);
         assert_eq!(parsed.original_bytes, 100);
         assert_eq!(parsed.payload, vec![1, 2, 3, 4]);
-    }
-
-    #[test]
-    pub(super) fn vindex_blocks_round_trip() {
-        let blocks = vec![
-            VindexShannonBlock {
-                first_token: 2,
-                target_tokens: 3,
-                payload: vec![1, 2, 3],
-            },
-            VindexShannonBlock {
-                first_token: 5,
-                target_tokens: 1,
-                payload: vec![8, 13],
-            },
-        ];
-
-        let encoded = encode_vindex_blocks(&blocks);
-        let parsed = parse_vindex_blocks(&encoded).unwrap().unwrap();
-        assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0].first_token, 2);
-        assert_eq!(parsed[0].target_tokens, 3);
-        assert_eq!(parsed[0].payload, vec![1, 2, 3]);
-        assert_eq!(parsed[1].first_token, 5);
-        assert_eq!(parsed[1].target_tokens, 1);
-        assert_eq!(parsed[1].payload, vec![8, 13]);
-        assert!(parse_vindex_blocks(&[1, 2, 3]).unwrap().is_none());
     }
 }

@@ -1,6 +1,7 @@
 //! Cross-engine verification: run the reference scorers and compare totals.
 
 use super::*;
+use std::path::Path;
 
 // ── Engine identifiers used across `shannon verify` ─────────────────────
 // Engines name themselves in the comparison table, in the --engines arg
