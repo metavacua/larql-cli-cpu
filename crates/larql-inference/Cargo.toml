@@ -72,8 +72,13 @@ async-stream = "0.3"
 futures = "0.3"
 
 # WASM expert registry
-wasmtime = { version = "36.0.7", default-features = false, features = ["cranelift", "runtime"] }
-wasmtime-wasi = "36.0.7"
+# >=36.0.16: RUSTSEC-2026-0316 (wasmtime, low) / RUSTSEC-2026-0314
+# (wasmtime-wasi, medium) - both published 2026-09-24, fixed >=36.0.16 in
+# the 36.x line. Staying in 36.x rather than jumping to the 48/49 series
+# the advisories also accept, since that is a much larger version jump
+# than a security patch bump warrants.
+wasmtime = { version = "36.0.16", default-features = false, features = ["cranelift", "runtime"] }
+wasmtime-wasi = "36.0.16"
 anyhow = "1"
 
 
