@@ -818,6 +818,82 @@ jobs:
             echo "| ${{ matrix.crate }} | ${{ matrix.target }} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+  # ── larql-core algo/core isolation probe. ──
+  #
+  # A different question than library-no-std-check's larql-core row asks.
+  # That row checks the WHOLE crate (`cargo check --lib`, no feature
+  # flags) against every no_std target - today that's expected-fail
+  # purely because the crate root has no `#![no_std]` opt-out yet, and
+  # says nothing about WHICH part of the crate would be the blocker once
+  # it lands.
+  #
+  # larql-core has two modules with real OS/network coupling (`io`:
+  # std::fs-based checkpoint/csv/json/msgpack/packed load-save; `engine`:
+  # reqwest behind the `http` feature) sitting beside two that have none
+  # (`algo`: BFS/PageRank/shortest-path/merge/diff/walk; `core`: the
+  # Graph/Edge/Node types algo operates on - confirmed by grep, not
+  # assumed, to have zero std::fs/std::path/std::env/std::net references
+  # anywhere in either). `io`/`engine` are now feature-gated
+  # (crates/larql-core/Cargo.toml, default-on so no existing consumer's
+  # behavior changes) specifically so `--no-default-features` isolates
+  # `algo`+`core` alone as the entire compiled surface - as close as
+  # Cargo's crate-level compilation model gets to "check just this
+  # module."
+  #
+  # wasm32v1-none, not any of the riscv-none family, is the right
+  # instrument for this specific question: it is the one target in this
+  # file where `std` does not exist to link against at all (not merely
+  # stubbed-to-panic, the way wasm32-unknown-unknown's std facade is), so
+  # a pass here is a compile-time-enforced proof of zero hidden host
+  # dependency, not a runtime-untested hope. The riscv32imc/riscv32imac
+  # pair in library-no-std-check's matrix is the complementary probe for
+  # the OTHER axis (hidden atomics dependency) - this job and that pair
+  # together are what "isolate the specific feature sets within a
+  # monolithic library" actually means in practice, not just in theory.
+  larql-core-algo-isolation:
+    name: larql-core algo/core isolation · wasm32v1-none
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Add rustup target (wasm32v1-none)
+        run: rustup target add wasm32v1-none
+
+      - name: Cache cargo registry (downloads only, never target/)
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-reg2-target-matrix-algo-isolation-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-reg2-target-matrix-algo-isolation-
+
+      - name: No compiled workspace artefacts may be restored
+        shell: bash
+        run: |
+          if [ -e target ]; then
+            echo "::error::target/ was restored from cache - the cache key or path is wrong"
+            exit 1
+          fi
+
+      # `--no-default-features` turns off `http`, `msgpack`, `io` and
+      # `engine` together - `algo`+`core` (and their unconditional
+      # serde/serde_json/thiserror dependencies) are everything left.
+      # Exit code captured, not allowed to fail the step directly -
+      # scripts/check_no_std_policy.py decides the real outcome against
+      # this probe's own policy file, distinct from library-no-std-check's.
+      - name: cargo check --lib --no-default-features (algo/core isolation)
+        run: |
+          set +e
+          cargo check --target wasm32v1-none -p larql-core --lib --no-default-features
+          ec=$?
+          set -e
+          python3 scripts/check_no_std_policy.py \
+            "larql-core" "wasm32v1-none" "$ec" "check-algo-isolation" \
+            "crates/larql-core/no-std-algo-policy.json"
+
   # ── Target-less hygiene: fmt has no --target concept at all. Confirmed
   # directly (`rustfmt --help`): its flags are --check/--edition/--emit,
   # nothing target-triple-shaped, because rustfmt formats the raw

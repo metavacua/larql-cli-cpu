@@ -21,9 +21,20 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 rmp-serde = { version = "1", optional = true }
 
 [features]
-default = ["http", "msgpack"]
+default = ["http", "msgpack", "io", "engine"]
 http = ["dep:reqwest"]
 msgpack = ["dep:rmp-serde"]
+# `io`/`engine` gate the two modules with real OS/network coupling
+# (`io`: std::fs/std::path checkpoint+import/export; `engine::http_provider`:
+# reqwest, already behind `http` above) separately from `algo`/`core`,
+# which have neither. Default-on so no existing consumer's behavior
+# changes; `--no-default-features` isolates `algo`+`core` alone, which is
+# exactly what target-matrix.yml's `larql-core-algo-isolation` job checks
+# against `wasm32v1-none` — proving (or disproving) that the pure graph
+# algorithms have no hidden host dependency, independent of the
+# whole-crate no_std port tracked in `no-std-policy.json`.
+io = []
+engine = []
 
 [dev-dependencies]
 assert_approx_eq = "1"
