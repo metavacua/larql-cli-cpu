@@ -1,0 +1,97 @@
+# TEMPORARY — verifies the CPU-only extraction on work branches.
+#
+# The per-crate workflows only run on `main` pushes and PRs into `main`,
+# and nothing may be compiled on the development machine, so this is the
+# build host for the extraction and GPU-excision commits. It is deleted in
+# the commit that lands the work on `main`, where the per-crate workflows
+# and quality.yml take over.
+
+name: extraction-check
+
+on:
+  push:
+    branches-ignore: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  # The OpenBLAS global buffer pool races under the parallel test runner
+  # (see larql-inference.yml); single-threaded BLAS keeps results stable.
+  OPENBLAS_NUM_THREADS: "1"
+  OMP_NUM_THREADS: "1"
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: rustfmt (workspace)
+        run: cargo fmt --all -- --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Free runner disk
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - name: Install BLAS
+        run: sudo apt-get update && sudo apt-get install -y libopenblas-dev
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-extraction-clippy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-extraction-clippy-
+      - name: clippy — workspace, all targets, default features
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: clippy — larql-cli without the research feature
+        run: cargo clippy -p larql-cli --bins --tests --no-default-features --locked -- -D warnings
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Free runner disk
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - name: Install BLAS
+        run: sudo apt-get update && sudo apt-get install -y libopenblas-dev
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-extraction-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-extraction-test-
+      - name: test — workspace
+        # --no-fail-fast: every failing test binary in one run, not just
+        # the first — a reduced tree breaks gates in several crates at once.
+        run: cargo test --workspace --locked --no-fail-fast
+      - name: registry check (the embedded model registry against registry/)
+        run: cargo run -p larql-cli --locked -- registry check
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Markdown links
+        run: python3 scripts/check_doc_links.py
+      - name: Generated facts
+        run: |
+          python3 scripts/current_facts.py --check
+          python3 -m unittest discover -s scripts -p test_workspace_facts.py
+          python3 scripts/workspace_facts.py --check
+      - name: Inline references (report only while the tree is being reduced)
+        run: python3 scripts/check_doc_references.py || true
