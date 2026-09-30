@@ -3,9 +3,6 @@
 use super::*;
 
 pub(super) fn run_encode(args: EncodeArgs) -> Result<(), Box<dyn std::error::Error>> {
-    if args.vindex.is_some() {
-        return run_encode_vindex(args);
-    }
     if args.context < 1 {
         return Err("--context must be at least 1".into());
     }
@@ -62,9 +59,6 @@ pub(super) fn run_encode(args: EncodeArgs) -> Result<(), Box<dyn std::error::Err
 }
 
 pub(super) fn run_decode(args: DecodeArgs) -> Result<(), Box<dyn std::error::Error>> {
-    if args.vindex.is_some() {
-        return run_decode_vindex(args);
-    }
     let mut raw = Vec::new();
     fs::File::open(&args.input)?.read_to_end(&mut raw)?;
     let blob = ShannonFile::from_bytes(&raw)?;
@@ -285,13 +279,6 @@ pub(super) struct ShannonFile {
     pub(super) payload: Vec<u8>,
 }
 
-#[derive(Clone)]
-pub(super) struct VindexShannonBlock {
-    pub(super) first_token: u32,
-    pub(super) target_tokens: u64,
-    pub(super) payload: Vec<u8>,
-}
-
 impl ShannonFile {
     pub(super) fn to_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(36 + self.payload.len());
@@ -325,55 +312,4 @@ impl ShannonFile {
             payload: bytes[36..].to_vec(),
         })
     }
-}
-
-pub(super) fn encode_vindex_blocks(blocks: &[VindexShannonBlock]) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(b"LSB1");
-    out.extend_from_slice(&(blocks.len() as u32).to_le_bytes());
-    for block in blocks {
-        out.extend_from_slice(&block.first_token.to_le_bytes());
-        out.extend_from_slice(&block.target_tokens.to_le_bytes());
-        out.extend_from_slice(&(block.payload.len() as u64).to_le_bytes());
-        out.extend_from_slice(&block.payload);
-    }
-    out
-}
-
-pub(super) fn parse_vindex_blocks(
-    bytes: &[u8],
-) -> Result<Option<Vec<VindexShannonBlock>>, Box<dyn std::error::Error>> {
-    if !bytes.starts_with(b"LSB1") {
-        return Ok(None);
-    }
-    if bytes.len() < 8 {
-        return Err("truncated vindex block payload".into());
-    }
-    let block_count = u32::from_le_bytes(bytes[4..8].try_into()?) as usize;
-    let mut offset = 8usize;
-    let mut blocks = Vec::with_capacity(block_count);
-    for _ in 0..block_count {
-        if bytes.len().saturating_sub(offset) < 20 {
-            return Err("truncated vindex block header".into());
-        }
-        let first_token = u32::from_le_bytes(bytes[offset..offset + 4].try_into()?);
-        offset += 4;
-        let target_tokens = u64::from_le_bytes(bytes[offset..offset + 8].try_into()?);
-        offset += 8;
-        let payload_len = u64::from_le_bytes(bytes[offset..offset + 8].try_into()?) as usize;
-        offset += 8;
-        if bytes.len().saturating_sub(offset) < payload_len {
-            return Err("truncated vindex block payload".into());
-        }
-        blocks.push(VindexShannonBlock {
-            first_token,
-            target_tokens,
-            payload: bytes[offset..offset + payload_len].to_vec(),
-        });
-        offset += payload_len;
-    }
-    if offset != bytes.len() {
-        return Err("trailing bytes after vindex block payload".into());
-    }
-    Ok(Some(blocks))
 }

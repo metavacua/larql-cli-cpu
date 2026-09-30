@@ -40,13 +40,8 @@ pub(crate) const LEGACY_DEV_NAMES: &[&str] = &[
 /// Current top-level verbs that exist only in a `research` build. A
 /// research-build test checks each one is a real top-level subcommand.
 #[cfg(any(test, not(feature = "research")))]
-pub(crate) const RESEARCH_TOP_LEVEL: &[&str] = &[
-    "dev",
-    "k3-ledger",
-    "parity",
-    "moe-locality",
-    "optimizer-mcp",
-];
+pub(crate) const RESEARCH_TOP_LEVEL: &[&str] =
+    &["dev", "k3-ledger", "moe-locality", "optimizer-mcp"];
 
 /// `larql shannon <sub>` subcommands that exist only in a `research` build.
 #[cfg(any(test, not(feature = "research")))]

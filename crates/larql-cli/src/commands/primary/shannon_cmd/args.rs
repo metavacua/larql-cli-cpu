@@ -46,11 +46,6 @@ pub enum ShannonCommand {
     /// Compare two `layer-dump` directories layer by layer and name the first
     /// capture that drifts.
     LayerDiff(crate::commands::primary::shannon_trace::LayerDiffArgs),
-
-    /// CPU-vs-Metal parity across the prefill→decode seam. `layer-diff`
-    /// compares this engine to an external reference over a prefill and so
-    /// cannot see a decode-only defect; this one can.
-    DecodeDiff(crate::commands::primary::shannon_trace::DecodeDiffArgs),
 }
 
 #[derive(Args)]
@@ -159,17 +154,8 @@ pub struct EncodeArgs {
     pub(super) bytes: Option<usize>,
 
     /// Previous tokens visible to the model for each arithmetic-code step.
-    /// Ignored when --vindex is used; the KV-cache path uses 512-token blocks.
     #[arg(long, default_value_t = 256)]
     pub(super) context: usize,
-
-    /// Use a Q4K vindex for KV-cached forced-token scoring instead of raw HF weights.
-    #[arg(long, value_name = "DIR")]
-    pub(super) vindex: Option<PathBuf>,
-
-    /// Use the best GPU backend for the vindex path. Required for the fast Q4K path.
-    #[arg(long)]
-    pub(super) metal: bool,
 }
 
 #[derive(Args)]
@@ -184,14 +170,6 @@ pub struct DecodeArgs {
     /// Recovered UTF-8 text output.
     #[arg(long, value_name = "FILE")]
     pub(super) out: PathBuf,
-
-    /// Use a Q4K vindex for KV-cached forced-token scoring instead of raw HF weights.
-    #[arg(long, value_name = "DIR")]
-    pub(super) vindex: Option<PathBuf>,
-
-    /// Use the best GPU backend for the vindex path. Required for the fast Q4K path.
-    #[arg(long)]
-    pub(super) metal: bool,
 }
 
 #[cfg(feature = "research")]
