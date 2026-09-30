@@ -490,6 +490,21 @@ jobs:
             gcc-riscv64-linux-gnu g++-riscv64-linux-gnu libc6-dev-riscv64-cross \
             qemu-user-static
 
+      # Confirmed empirically (2026-09-30 CI run, after every earlier
+      # riscv64gc blocker was fixed): `larql-continuation-fixture` - a
+      # dylib test fixture some larql-cli test dynamically loads - is
+      # compiled for the HOST (x86_64-unknown-linux-gnu sysroot, plain
+      # `cc`, `-m64`) even inside an otherwise riscv64-targeted cargo
+      # invocation, because it must run natively to be loadable. It still
+      # depends on larql-compute, so it still needs a native x86_64
+      # OpenBLAS - the riscv64-arch package installed below does not
+      # cover it. Every other job in this file installs this; this job
+      # is the one place cross-compiling for a non-native target made it
+      # easy to forget the native side still needs it too.
+      - name: Install OpenBLAS (native, x86_64 - for host-built plugin fixtures)
+        run: |
+          sudo apt-get install -y libopenblas-dev pkg-config
+
       # riscv64 is an Ubuntu "ports" architecture (unlike i386, which sat
       # on the main archive), so its packages live under ports.ubuntu.com,
       # not the default mirrors - `dpkg --add-architecture` alone is not
