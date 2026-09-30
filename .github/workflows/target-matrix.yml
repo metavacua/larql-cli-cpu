@@ -155,17 +155,34 @@ jobs:
       # dependency at all - installing it unconditionally is simpler and
       # harmless).
       #
-      # The `:i386` block is the least battle-tested step in this whole
-      # workflow. Every other apt install here mirrors a pattern already
-      # proven in larql-cli.yml / larql-compute.yml; running a 32-bit
-      # BLAS through Debian/Ubuntu's multiarch packaging is not something
-      # any existing workflow in this repo does. That is exactly why the
-      # i686 rung below is `continue-on-error: true` while the native
-      # x86_64 rung is a real gate - see that step's comment.
-      - name: Install OpenBLAS + 32-bit cross support (Linux)
+      # Native x86_64 OpenBLAS lives in its own step, separate from the
+      # i686 attempt below, on purpose - see that step's comment for why.
+      - name: Install OpenBLAS (native, x86_64)
         run: |
           sudo apt-get update
           sudo apt-get install -y libopenblas-dev pkg-config
+
+      # Confirmed empirically (2026-09-30 CI run, not merely suspected):
+      # `libopenblas-dev:i386` does not exist in Ubuntu noble's archives at
+      # all - `apt-get install` fails with "Unable to locate package"
+      # even though the i386 Packages indices themselves fetch fine.
+      # OpenBLAS simply is not built for i386 there; this is the state of
+      # the archive, not a multiarch-plumbing mistake to fix. That first
+      # CI run also surfaced a second, more important bug this split
+      # fixes: this step used to install BOTH the native and i386
+      # packages together with no `continue-on-error`, so i386's failure
+      # ran under GitHub Actions' default `bash -e`, aborted the step
+      # before `PKG_CONFIG_ALLOW_CROSS` was even set, and - because the
+      # STEP itself had no continue-on-error - took the entire job down
+      # with it, skipping every rung including Rung 4/4's real,
+      # mandatory x86_64-unknown-linux-gnu gate. A speculative i686 leg
+      # must never be able to fail the one target in this job everything
+      # else depends on; isolating it here is what actually guarantees
+      # that.
+      - name: Install 32-bit i686 cross support (Linux)
+        id: i686_deps
+        continue-on-error: true
+        run: |
           sudo dpkg --add-architecture i386
           sudo apt-get update
           sudo apt-get install -y gcc-multilib libc6-dev-i386 libopenblas-dev:i386 pkg-config:i386
@@ -260,6 +277,7 @@ jobs:
             echo "| 2 | wasm32-unknown-emscripten | ${{ steps.rung2.outcome }} |"
             echo "| 3 | wasm32-wasip1 | ${{ steps.rung3.outcome }} |"
             echo "| 4 (gnu) | x86_64-unknown-linux-gnu | real gate above |"
+            echo "| - | i686 32-bit cross deps install | ${{ steps.i686_deps.outcome }} |"
             echo "| 4 (gnu) | i686-unknown-linux-gnu (check) | ${{ steps.rung4_i686_check.outcome }} |"
             echo "| 4 (gnu) | i686-unknown-linux-gnu (test) | ${{ steps.rung4_i686_test.outcome }} |"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -362,12 +380,20 @@ jobs:
         shell: pwsh
         run: |
           choco install mingw -y --no-progress
-          # Chocolatey's `mingw` package has installed to one of these two
-          # paths across different runner-image generations; check both
-          # rather than hardcoding one, and fail loudly (AGENTS.md: no
-          # silent fallback) if neither exists, rather than silently
-          # leaving rustc's windows-gnu linker unable to find `gcc`/`ld`.
+          # Chocolatey's `mingw` package has installed to one of these
+          # paths across different runner-image generations; check all of
+          # them rather than hardcoding one, and fail loudly (AGENTS.md: no
+          # silent fallback) if none exists, rather than silently leaving
+          # rustc's windows-gnu linker unable to find `gcc`/`ld`.
+          # `C:\ProgramData\mingw64\mingw64\bin` is the one actually
+          # confirmed live on the runner image in use as of 2026-09-30
+          # (chocolatey's own install log printed
+          # "Testing path: C:\ProgramData\mingw64\mingw64\bin...Found!") -
+          # neither of the other two candidates existed on that run; they
+          # are kept as candidates in case a future image reverts to one
+          # of them, not removed just because they didn't match this time.
           $candidates = @(
+            'C:\ProgramData\mingw64\mingw64\bin',
             'C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin',
             'C:\tools\mingw64\bin'
           )
@@ -474,17 +500,29 @@ jobs:
       # riscv64 is an Ubuntu "ports" architecture (unlike i386, which sits
       # on the main archive), so its packages live under ports.ubuntu.com,
       # not the default mirrors - `dpkg --add-architecture` alone is not
-      # enough here the way it was for the i686 leg's :i386 packages. This
-      # whole step is the least battle-tested part of this leg: no other
-      # workflow in this repo cross-links OpenBLAS for a ports-only
-      # architecture. If it does not resolve cleanly, the fix belongs
-      # here, not in the cargo invocation below.
+      # enough here the way it was for the i686 leg's :i386 packages.
+      #
+      # Confirmed empirically (2026-09-30 CI run): a plain `apt-get
+      # update` after adding riscv64 as a foreign architecture does NOT
+      # just pick up the new ports-riscv64.list source - it also tries
+      # every OTHER already-configured source (azure.archive.ubuntu.com,
+      # security.ubuntu.com, the runner's default main-archive mirrors)
+      # for a riscv64 index too, since none of those source entries
+      # restrict `Architectures:` to amd64/i386. Those mirrors do not
+      # host riscv64 at all, so that update fails outright with a 404 on
+      # every one of them before ever reaching the ports.ubuntu.com
+      # fetch that would actually succeed. The fix is to scope the update
+      # to just the newly-added list file, leaving every other source's
+      # already-cached (amd64/i386) indices untouched.
       - name: Install OpenBLAS for riscv64 (ports archive)
         run: |
           sudo dpkg --add-architecture riscv64
           echo "deb [arch=riscv64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -cs) main universe" \
             | sudo tee /etc/apt/sources.list.d/ports-riscv64.list
-          sudo apt-get update
+          sudo apt-get update \
+            -o Dir::Etc::sourcelist="sources.list.d/ports-riscv64.list" \
+            -o Dir::Etc::sourceparts="-" \
+            -o APT::Get::List-Cleanup="0"
           sudo apt-get install -y libopenblas-dev:riscv64 pkg-config
           echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
           echo "PKG_CONFIG_PATH_riscv64_unknown_linux_gnu=/usr/lib/riscv64-linux-gnu/pkgconfig" >> "$GITHUB_ENV"
