@@ -2,16 +2,11 @@
 """Multi-architecture correctness sweep using `larql shannon verify`.
 
 For each model in the architecture matrix, run the three-engine bits/char
-comparison and report PASS/FAIL. Three orthogonal axes are exercised:
-
-1. **F32 reference**: LARQL Rust CPU forward vs HF/PyTorch and MLX
-   references. Tests the safetensors → ModelWeights → forward path.
-
-2. **Q4K Metal** (when a local vindex is available): the production GPU
-   path. Tests larql-compute Metal shaders + vindex packing.
-
-3. **Q4K CPU** (vindex without `--metal`): the CPU fallback used on
-   machines without GPU support.
+comparison and report PASS/FAIL on the F32 reference axis: LARQL's Rust
+CPU forward vs HF/PyTorch and MLX references, which tests the
+safetensors → ModelWeights → forward path. (Upstream also swept a Q4K Metal
+axis through `shannon encode --vindex --metal`; this CPU-only build has
+neither.)
 
 Run with no args for the standard matrix; pass a model id to scope to one.
 
@@ -37,13 +32,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CORPUS = REPO_ROOT / "data" / "gutenberg" / "frankenstein.txt"
 DEFAULT_CORPUS_BYTES = 1024
 
-# Expected bits/char penalty for Q4_K_M vs the F32 reference, in percent.
-# Q4_K_M ships at ~30 % bpc loss for prose on instruction-tuned models;
-# anything outside this band is suspicious (kernel correctness regression
-# below, or upstream config drift above). Used as the PASS/FAIL band for
-# the Q4K Metal row in the sweep.
-Q4K_M_EXPECTED_GAP_PCT: tuple[float, float] = (15.0, 50.0)
-
 # Pre-fix mention of RESULT_PREFIX kept in sync with shannon_score_*.py.
 RESULT_PREFIX = "RESULT "
 
@@ -57,12 +45,6 @@ class TestCase:
     env: dict = field(default_factory=dict)
     skip_hf: bool = False  # for very large models where torch CPU is too slow
     note: str = ""
-    # Optional Q4K vindex paths for the GPU/CPU vindex-path correctness check.
-    q4k_vindex: Optional[Path] = None
-    # Expected quantization gap range (Q4K bits/char relative to F32, as
-    # a percentage). Defaults to the standard Q4_K_M band; override per
-    # case if a particular vindex was built with non-standard settings.
-    q4k_expected_gap_pct: tuple[float, float] = Q4K_M_EXPECTED_GAP_PCT
 
 
 # Architecture matrix. One small representative of each LARQL-supported
@@ -149,40 +131,8 @@ MATRIX: list[TestCase] = [
         name="Gemma-3-4B-it",
         model_id="google/gemma-3-4b-it",
         family="gemma3 (mixed SWA + global)",
-        q4k_vindex=REPO_ROOT / "output" / "gemma3-4b-q4k-v2.vindex",
     ),
 ]
-
-
-def run_q4k_metal(case: TestCase, corpus: Path) -> Optional[dict]:
-    """Run `larql shannon encode --vindex --metal` for the Q4K Metal path,
-    parse bits/char from the AC-coded payload. Returns None if no vindex."""
-    if case.q4k_vindex is None or not case.q4k_vindex.exists():
-        return None
-    out_path = Path(f"/tmp/diagnose_q4k_{os.getpid()}_{case.name}.bin")
-    cmd = [
-        str(REPO_ROOT / "target" / "release" / "larql"),
-        "shannon", "encode", case.model_id,
-        "--in", str(corpus),
-        "--out", str(out_path),
-        "--vindex", str(case.q4k_vindex),
-        "--metal",
-    ]
-    env = dict(os.environ)
-    env.update(case.env)
-    start = time.time()
-    proc = subprocess.run(cmd, env=env, capture_output=True, text=True)
-    elapsed = time.time() - start
-    out_path.unlink(missing_ok=True)
-    if proc.returncode != 0:
-        return {"error": proc.stderr or proc.stdout, "elapsed": elapsed}
-    m = re.search(r"bits/char:\s+([\d.]+)", proc.stdout)
-    if not m:
-        return {"error": "no bits/char in output", "elapsed": elapsed}
-    return {
-        "bits_per_char": float(m.group(1)),
-        "elapsed": elapsed,
-    }
 
 
 def parse_verify_output(text: str) -> Optional[dict]:
@@ -317,30 +267,6 @@ def main():
         delta_rust_hf = (rust_total - hf_total) / max(hf_total, 1.0) * 100.0 if hf_total else 0.0
         verdict = "PASS" if r["exit_code"] == 0 else "FAIL"
         print(f"{case.name:<22} {case.family:<32} {delta_rust_hf:>13.3f}% {r['parsed']['max_delta_pct']:>9.3f}% {verdict:>9} {r['elapsed']:>7.1f}s")
-
-    # Q4K Metal path: separate table. Only models with a local vindex run.
-    q4k_cases = [c for c in selected if c.q4k_vindex and c.q4k_vindex.exists()]
-    if q4k_cases:
-        print()
-        print("# Q4K Metal path (vs F32 reference)")
-        print(f"{'name':<22} {'F32 bpc':>10} {'Q4K bpc':>10} {'Δ pct':>10} {'verdict':>9} {'time':>8}")
-        print("-" * 80)
-        for r, case in zip([rr for rr in results if rr["case"] in q4k_cases], q4k_cases):
-            engines = (r["parsed"] or {}).get("engines", {})
-            f32_bpc = engines.get("hf", {}).get("bits_per_char")
-            if f32_bpc is None:
-                f32_bpc = engines.get("rust", {}).get("bits_per_char")
-            q4k = run_q4k_metal(case, tmp_corpus)
-            if q4k is None:
-                continue
-            if "error" in q4k:
-                print(f"{case.name:<22} {f32_bpc:>10.4f} {'ERR':>10} {'-':>10} {'FAIL':>9} {q4k['elapsed']:>7.1f}s")
-                print(f"  └─ {q4k['error'].strip().splitlines()[-1] if q4k['error'] else 'no detail'}")
-                continue
-            gap_pct = (q4k["bits_per_char"] - f32_bpc) / f32_bpc * 100.0
-            lo, hi = case.q4k_expected_gap_pct
-            verdict = "PASS" if lo <= gap_pct <= hi else "FAIL"
-            print(f"{case.name:<22} {f32_bpc:>10.4f} {q4k['bits_per_char']:>10.4f} {gap_pct:>9.1f}% {verdict:>9} {q4k['elapsed']:>7.1f}s")
 
     print()
     n_pass = sum(1 for r in results if r["exit_code"] == 0)

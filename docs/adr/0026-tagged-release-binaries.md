@@ -78,7 +78,7 @@ then do `curl -fsSL .../larql-x86_64-unknown-linux-gnu.tar.gz | tar xz`
 instead of a full `cargo build`.
 
 **Wired 2026-07-25, once `v0.1.0` existed to fetch from.**
-`scripts/dec0-arm-l.sh` now resolves binaries in four ordered steps:
+[`scripts/dec0-arm-l.sh`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/scripts/dec0-arm-l.sh) now resolves binaries in four ordered steps:
 operator-supplied (`DEC0L_LARQL_BIN`/`DEC0L_SERVER_BIN`) → reuse an
 already-populated `DEC0L_BIN_DIR` → fetch the release archive for the
 detected platform (`DEC0L_LARQL_VERSION`, default `v0.1.0`) → fall back to
@@ -92,8 +92,8 @@ knowingly accepts the cost, and the log line then says the policy was
 `DEC0L_SKIP_BUILD` knob is gone — "already present" is now detected rather
 than asserted.
 
-The logic lives in `scripts/lib/larql-binaries.sh` and is shared, since every
-remaining DEC stage provisions a fresh host. `scripts/dec0p5-x86.sh` uses it
+The logic lives in [`scripts/lib/larql-binaries.sh`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/scripts/lib/larql-binaries.sh) and is shared, since every
+remaining DEC stage provisions a fresh host. [`scripts/dec0p5-x86.sh`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/scripts/dec0p5-x86.sh) uses it
 too, with one deliberate exemption: DEC-0.5 still compiles the criterion
 kernel bench (`cargo bench -p larql-compute`), because a bench target is not
 a shipped binary and that kernel is precisely what the stage exists to

@@ -437,8 +437,8 @@ larql dec-bench drift gemma4-26b-a4b.vindex --ffn http://127.0.0.1:8081 \
   --wire f16,i8,q8k,f16/i8 --metal
 ```
 
-Drivers wrapping these for whole DEC stages live in `scripts/dec0-loopback.sh`
-(arm M), `scripts/dec0-arm-l.sh` (arm L / Linux) and `scripts/dec0p5-x86.sh`.
+Drivers wrapping these for whole DEC stages live in [`scripts/dec0-loopback.sh`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/scripts/dec0-loopback.sh)
+(arm M), [`scripts/dec0-arm-l.sh`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/scripts/dec0-arm-l.sh) (arm L / Linux) and [`scripts/dec0p5-x86.sh`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/scripts/dec0p5-x86.sh).
 
 ### `larql k3-ledger`
 

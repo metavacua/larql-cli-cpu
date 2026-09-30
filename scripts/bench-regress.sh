@@ -20,11 +20,10 @@ BASELINE_NAME="${BASELINE_NAME:-main}"
 THRESHOLD="${THRESHOLD:-0.10}"   # 10 % slowdown = regression
 # Benches to gate on. Override with `BENCHES="quant_matvec"` to focus.
 # Default set picks up the surfaces where the next throughput cliff
-# would surface first: quant matvec / f32 matmul (Metal) + cholesky /
-# ridge solve (CPU). Format: `<crate>:<bench-name>` so the script can
-# route across the split crates (ADR-019 extracted Metal benches to
-# `larql-compute-metal`).
-BENCHES="${BENCHES:-larql-compute-metal:quant_matvec larql-compute-metal:matmul larql-compute:linalg}"
+# would surface first: the Q4_K × Q8_K quantised matvec and the
+# cholesky / ridge solves, both on the CPU backend. Format:
+# `<crate>:<bench-name>`, so a bench in another crate can be named.
+BENCHES="${BENCHES:-larql-compute:q4k_q8k_matvec larql-compute:linalg}"
 
 cmd="${1:-check}"
 
@@ -34,9 +33,8 @@ run_all() {
         crate="${spec%%:*}"
         bench="${spec##*:}"
         if [ "$crate" = "$bench" ]; then
-            # Back-compat: bare bench name → assume larql-compute-metal,
-            # since that's where the quant kernels live now.
-            crate="larql-compute-metal"
+            # A bare bench name means larql-compute, where the kernels live.
+            crate="larql-compute"
         fi
         echo "[bench-regress] -> $crate / $bench ($mode $BASELINE_NAME)"
         cargo bench -p "$crate" --bench "$bench" \
@@ -73,8 +71,7 @@ Run '$0 save' on main first."
         echo
         echo "env vars: BASELINE_NAME (default: main), THRESHOLD (default: 0.10),"
         echo "          BENCHES (default:"
-        echo "            'larql-compute-metal:quant_matvec"
-        echo "             larql-compute-metal:matmul"
+        echo "            'larql-compute:q4k_q8k_matvec"
         echo "             larql-compute:linalg')"
         exit 2
         ;;
