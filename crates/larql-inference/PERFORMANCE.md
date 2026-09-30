@@ -14,7 +14,7 @@ llama.cpp     47 ms      24.2 ms   41.37     16  (Q4_K_M, BLAS, ngl=0, 12 thread
 
 **Decode 2.78× behind llama.cpp; prefill 55× behind.** ~40× over the
 pre-branch 0.36 tok/s baseline. Detailed side-by-side:
-`bench/baselines/cpu/COMPARISON.md`.
+[`bench/baselines/cpu/COMPARISON.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/bench/baselines/cpu/COMPARISON.md).
 
 Per-step CPU decode breakdown (post-branch):
 

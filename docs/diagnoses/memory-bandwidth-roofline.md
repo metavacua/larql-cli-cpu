@@ -3,7 +3,7 @@
 **Date:** 2026-07-28/29 · **Box:** M3 Max (12 P + 4 E, 128 GB), AC power
 **Instruments:** `crates/larql-compute/examples/membw_probe.rs` (new),
 `crates/larql-compute/benches/q4k_q8k_matvec.rs::bench_mt_production` (new),
-`crates/larql-compute-metal/examples/diag_profile_kernels.rs` (existing)
+[`crates/larql-compute-metal/examples/diag_profile_kernels.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/examples/diag_profile_kernels.rs) (existing)
 
 ## Why
 
@@ -146,7 +146,7 @@ End-to-end, `gemma4-26b-a4b-q4k`, `--cpu -n 50 --warmup 5`, story prompt:
 | 16 | 13.2, 10.6, 10.6 | **10.6** |
 
 **3.5×**, matching the 3.8× at the kernel. The predecessor doc
-`bench/baselines/cpu/DIAGNOSIS-2026-05-16-thread-scaling.md` recorded ~15% for
+[`bench/baselines/cpu/DIAGNOSIS-2026-05-16-thread-scaling.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/bench/baselines/cpu/DIAGNOSIS-2026-05-16-thread-scaling.md) recorded ~15% for
 >8 threads in the rayon era; the spin pool turned a mild effect into a severe one.
 
 #### Fix

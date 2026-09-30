@@ -47,5 +47,5 @@ cargo test -p larql-router
 
 See [runtime interfaces](../../docs/runtime-surfaces.md),
 [multi-host demo](docs/multi-host-demo.md), [hot-shard demo](docs/hot-shard-demo.md)
-and the [versioned router design](../larql-server/docs/router-spec.md).
+and the [versioned router design](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/docs/router-spec.md).
 Historical throughput numbers are topology-specific records.

@@ -1,6 +1,6 @@
 # Metal Shader Reference — larql-compute
 
-**Class: ARCHIVE.** This pre-split shader reference describes an older layout. Current kernels and controls are owned by [larql-compute-metal](../../larql-compute-metal/README.md); use [the substrate guide](../../../docs/compute-substrate.md) for ownership.
+**Class: ARCHIVE.** This pre-split shader reference describes an older layout. Current kernels and controls are owned by [larql-compute-metal](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/README.md); use [the substrate guide](../../../docs/compute-substrate.md) for ownership.
 
 ~50 Metal Shading Language kernels across ~30 shader files in `src/metal/shaders/`.
 All compiled into a single Metal library via `all_shaders()`.

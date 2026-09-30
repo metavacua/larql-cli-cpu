@@ -20,7 +20,7 @@ The current host is
 [larql-inference::experts](../larql-inference/src/experts/). It owns loading,
 registry/session lifecycle, dispatch and sandbox limits. Model routing and
 prompt-to-operation translation belong above the guest ABI. The separate
-[model-compute](../model-compute/README.md) solver host uses a different ABI;
+[model-compute](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/model-compute/README.md) solver host uses a different ABI;
 the two are not interchangeable.
 
 ## Build and validate

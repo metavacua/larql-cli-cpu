@@ -254,8 +254,8 @@ larql-router
 | `crates/larql-router/src/grid/` | `mod.rs` holds `available_servers`; `replication.rs` holds `try_assign_gap` / `try_replicate_from_available` / `send_assign_to_named_available`; `hot_shard.rs` holds `hot_layer_ranges` + `mark_elevated`. (Final shipped layout post-2026-05-16 split.) |
 | `crates/larql-router/src/tasks/rebalancer/` | Background rebalancer task split into `mod.rs` (loop), `config.rs`, `hot_shard.rs`, `replication.rs`, `eviction.rs`, `imbalance.rs`. |
 | `crates/larql-router/src/main.rs` | Spawn rebalancer task; add CLI flags |
-| `crates/larql-server/src/announce.rs` | Handle `AssignMsg` → trigger `shard_loader`; handle `UnassignMsg` → drain + `DroppingMsg` |
-| `crates/larql-server/src/shard_loader.rs` | NEW — HTTP range download, hash verify, atomic rename. The hash is the origin's content hash (`AnnounceMsg.shard_sha256` → `AssignMsg.shard_sha256`); a missing one is refused unless `--allow-unverified-shards` (2026-09-27, H9) |
+| [`crates/larql-server/src/announce.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/announce.rs) | Handle `AssignMsg` → trigger `shard_loader`; handle `UnassignMsg` → drain + `DroppingMsg` |
+| [`crates/larql-server/src/shard_loader.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/shard_loader.rs) | NEW — HTTP range download, hash verify, atomic rename. The hash is the origin's content hash (`AnnounceMsg.shard_sha256` → `AssignMsg.shard_sha256`); a missing one is refused unless `--allow-unverified-shards` (2026-09-27, H9) |
 | `crates/larql-server/src/routes/walk_ffn.rs` | Collect per-layer latency via `LayerLatencyTracker` |
 | `crates/larql-server/src/bootstrap.rs` | Accept `--available-ram`, `--vindex-store`; CLI for Mode B |
 

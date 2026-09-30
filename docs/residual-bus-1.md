@@ -6,7 +6,7 @@ witnesses and forecasts below change only by a new, dated section.
 
 Programme: RESIDUAL-BUS. The reconnaissance is in
 [`residual-bus-1-reconnaissance.md`](residual-bus-1-reconnaissance.md). The
-programme order is in [`residual-bus-lcp-1.md`](residual-bus-lcp-1.md) §7.
+programme order is in [`residual-bus-lcp-1.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/residual-bus-lcp-1.md) §7.
 
 ## The question
 
@@ -112,7 +112,7 @@ transition it alters:
 
 **Batch: the existing `LayerTrace` copies.** Instrument `OpClass::PlaneTrace`
 (`da8ec6a0`), example `bus1_prefill_trace_cost`, results in
-[`bench/residual-bus-1/results/20260926/`](../bench/residual-bus-1/results/20260926/prefill-trace.txt).
+[`bench/residual-bus-1/results/20260926/`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/bench/residual-bus-1/results/20260926/prefill-trace.txt).
 Granite 4.2 3B `.s6`, production CPU, 128 prompt tokens, 10 trials after 2
 warm-ups:
 
@@ -130,7 +130,7 @@ Exclusivity is not claimed.
 **Decode: V3-OBS-1 P5 on the same container.** Harness
 `carrier_write_real.rs` at `da8ec6a0`, release test binary, Production
 backend, 15 interleaved pairs after one discarded warm-up pair
-([`p5.txt`](../bench/residual-bus-1/results/20260926/p5.txt)). The run started
+([`p5.txt`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/bench/residual-bus-1/results/20260926/p5.txt)). The run started
 after a full quiet minute (no `rustc`, `cargo`, `sccache` or `mds_stores`
 activity, and a 1-minute load under 3.0). Load was 1.64 before and 2.77 after,
 with no compile at the end. Two earlier attempts found no quiet minute and

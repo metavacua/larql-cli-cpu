@@ -24,7 +24,7 @@ handling, auxiliary buffers, dispatch geometry, and what selects it. Route
 tables and a wiring-status inventory follow, then ranked findings.
 
 Provenance: six parallel per-family audits over every `.rs`-embedded MSL
-shader in `crates/larql-compute-metal/src/shaders/` plus all dispatch sites.
+shader in [`crates/larql-compute-metal/src/shaders/`](https://github.com/metavacua/larql-to-sparql/tree/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/shaders) plus all dispatch sites.
 Every ranked finding carries an explicit status:
 
 - **VERIFIED** — re-checked by hand against the source before ranking.
@@ -48,7 +48,7 @@ Column key
 |---|---|---|---|---|---|---|
 | `q4k_matvec` | Q4_K 144B · f32 | sg | 4·128 | %256 s | rows masked; K tail dropped | prod (opt-out variant) |
 | `q4k_matvec_8sg` | Q4_K 144B · f32 | sg | 8·256 | %256 s | same | **prod default** |
-| `q4k_matvec_stride32` | Q4_K 144B · f32 | sg | 8·256 | %256 **a** (`trait_impl/matmul/dispatch.rs:389`) | host rejects bad K | prod (vindex lm-head knn) |
+| `q4k_matvec_stride32` | Q4_K 144B · f32 | sg | 8·256 | %256 **a** ([`trait_impl/matmul/dispatch.rs:389`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/trait_impl/matmul/dispatch.rs#L389)) | host rejects bad K | prod (vindex lm-head knn) |
 | `q4k_matmul` | Q4_K 144B · f32 [M,K] | sg | 4r×4c·128 | %256 s | best row/M tails of the set | plumbing dead: `Pipelines.q4k_matmul` never read |
 | `q6k_matvec` | Q6_K 210B planar · f32 | sg | 4·128 | %256 s | rows masked; K dropped | prod default |
 | `q6k_matvec_8sg` | Q6_K 210B planar · f32 | sg | 8·256 | %256 s | same | opt-in `LARQL_Q6K_8SG=1` |
@@ -182,14 +182,14 @@ weight-byte memcpys. No routing data reaches the GPU.~~
 
 ### QKV — three disagreeing mechanisms
 
-1. **Decode** (`pick_qkv_route`, `stages/qkv_proj.rs:61-68`):
+1. **Decode** (`pick_qkv_route`, [`stages/qkv_proj.rs:61-68`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/stages/qkv_proj.rs#L61-L68)):
    Q4_K×3→UniformQ4K; Q4_KF×3→UniformQ4Kf; (Q4_K,Q4_K,Q6_K)→Mixed;
    else PerProjection. Q8_0×3 is a *hand-written bypass* before the route
    table; if it ever reached PerProjection it would panic.
-2. **Prefill** (`ops/full_pipeline/stages.rs:70-96`): `all_same_format`
+2. **Prefill** ([`ops/full_pipeline/stages.rs:70-96`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/ops/full_pipeline/stages.rs#L70-L96)): `all_same_format`
    gate + two-arm match. **The mixed kernel is unreachable at prefill** —
    Gemma's Q4_K/Q4_K/Q6_K silently degrades to three per-proj dispatches.
-3. **Hybrid** (`decode_hybrid.rs:145-149`) — **VERIFIED**: selects on
+3. **Hybrid** ([`decode_hybrid.rs:145-149`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/decode_hybrid.rs#L145-L149)) — **VERIFIED**: selects on
    `wq` **alone**. `wq=Q4_K, wv=Q6_K` (production Gemma shape) dispatches
    the uniform Q4_K kernel, striding V at 144B against 210B blocks.
    Production-reachable via `layer_graph/hybrid.rs:148`.
@@ -225,7 +225,7 @@ panics loudly.
 local CPU `cpu_moe_forward` only when no moe_fn and not remote. `has_moe`
 is **model-level** but layer_scalar application is layer-level: dense
 layers of a hybrid MoE model **never get their layer_scalar applied**
-(`decode/mod.rs:789` vs `:832-841`).
+([`decode/mod.rs:789`](https://github.com/metavacua/larql-to-sparql/blob/a6801951defe5d0b106e9f96357610d77945f179/crates/larql-compute-metal/src/decode/mod.rs#L789) vs `:832-841`).
 
 ### Norms
 
@@ -299,7 +299,7 @@ Hygiene / inventory:
   doc), both `gate_knn_score*`, both `turboquant_*`, all 7 `mxfp4g_*`
   arms (2 of which deliberately compute wrong answers), grouped-experts
   pair, `q4k_matmul` router plumbing. All reachable by name in one Metal
-  library — the pipeline-selection hazard `shaders/mod.rs:9-16` warns
+  library — the pipeline-selection hazard [`shaders/mod.rs:9-16`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/shaders/mod.rs#L9-L16) warns
   about.
 - **F22. Doc/code mismatches**: `LARQL_FUSED_Q6K_DOWN` doc names the
   cached kernel, dispatches the other; `LARQL_F16_ACC` co-requirement

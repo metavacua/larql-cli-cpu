@@ -5,7 +5,7 @@
 ADR-0009 (wire-format evolution), ADR-0010 (QUIC transport).
 **Implementation:**
 `crates/larql-router-protocol/proto/shard.proto`,
-`crates/larql-server/src/shard_query.rs`,
+[`crates/larql-server/src/shard_query.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/shard_query.rs),
 `crates/larql-server/src/bootstrap.rs` (registration on
 `--shard-query-tau`).
 
@@ -112,7 +112,7 @@ other:
 - Every existing `.read().await` / `.write().await` call site is
   preserved by Rust's Deref coercion through `Arc<RwLock<T>>`
 - An integration test (`live_patch_propagation` in
-  `crates/larql-server/tests/test_shard_query.rs`) covers this: a
+  [`crates/larql-server/tests/test_shard_query.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/tests/test_shard_query.rs)) covers this: a
   patch added through one Arc handle is observable on the next
   `Query` through another handle.
 
@@ -220,10 +220,10 @@ choice is consistent across the wire surface.
 |---|---|
 | `crates/larql-router-protocol/proto/shard.proto` | The wire contract |
 | `crates/larql-router-protocol/src/lib.rs` (re-exports) | `ShardService`, `ShardQuery`, `ShardResult`, `ShardServiceServer`, `ShardServiceClient` |
-| `crates/larql-server/src/shard_query.rs` | `ShardCache`, `ShardSource`, `knn_lookup`, `l2_normalize`, `cosine_similarities`, `weighted_topk_average`, `decode_f32_le`, `encode_f32_le`, `ShardServiceImpl` |
+| [`crates/larql-server/src/shard_query.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/shard_query.rs) | `ShardCache`, `ShardSource`, `knn_lookup`, `l2_normalize`, `cosine_similarities`, `weighted_topk_average`, `decode_f32_le`, `encode_f32_le`, `ShardServiceImpl` |
 | `crates/larql-server/src/bootstrap.rs` | `--shard-query-tau` CLI plumbing + tonic registration |
 | `crates/larql-server/src/state.rs` | `LoadedModel.patched: Arc<RwLock<PatchedVindex>>` (the shared Arc) |
-| `crates/larql-server/tests/test_shard_query.rs` | 4 round-trip integration tests over real TCP (hit / below-tau miss / unknown-layer / live-patch propagation) |
+| [`crates/larql-server/tests/test_shard_query.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/tests/test_shard_query.rs) | 4 round-trip integration tests over real TCP (hit / below-tau miss / unknown-layer / live-patch propagation) |
 
 ### Test coverage
 

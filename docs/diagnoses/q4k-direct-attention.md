@@ -8,7 +8,7 @@ instead of a reconstruction. Source-verified 2026-05-30 against the
 `fix/moe-setup-pure-moe` tree.
 
 Companion docs: `docs/diagnoses/remote-moe-bottlenecks.md` (the decode-stage
-split that gives the 28%), `docs/diagnoses/walk-ffn-performance.md` (why this is
+split that gives the 28%), [`docs/diagnoses/walk-ffn-performance.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/diagnoses/walk-ffn-performance.md) (why this is
 the only speed lever left).
 
 ---

@@ -43,7 +43,7 @@ physical capacity       4096                 4096
 ```
 
 Both paths clamp what attention *reads*: `attention_span` is applied in
-[`decode/encode_attn/kv_attend.rs`](../crates/larql-compute-metal/src/decode/encode_attn/kv_attend.rs)
+[`decode/encode_attn/kv_attend.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/decode/encode_attn/kv_attend.rs)
 whoever is driving. Only the coarse path bounds what is *retained* —
 `coarse_decode_step_windowed` calls `compact_kv_to_window` every step,
 and nothing on the fused path does.
@@ -54,7 +54,7 @@ it is an unstated difference in contract, which is worse, because
 neither path documents that it has one.
 
 The executable form of this table lives in
-[`kv_residency_contract.rs`](../crates/larql-compute-metal/src/kv_residency_contract.rs),
+[`kv_residency_contract.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/kv_residency_contract.rs),
 which drives both policies over the boundaries `W-1, W, 2W-1, 2W, 2W+1`
 and a long run that crosses the compaction trigger twice. It asserts
 each row: identical spans, diverging occupancy, monotonic and equal
@@ -74,8 +74,8 @@ Three operations touch a layer's rows, not two:
 | operation | site | behaviour |
 |---|---|---|
 | allocate | `KVCache::new_per_layer` | one capacity for every layer |
-| prefill | [`full_pipeline/kv_copy.rs`](../crates/larql-compute-metal/src/ops/full_pipeline/kv_copy.rs) | bulk-copies `seq_len` rows, sets `current_len = seq_len` |
-| decode | [`decode/encode_attn/kv_attend.rs`](../crates/larql-compute-metal/src/decode/encode_attn/kv_attend.rs) | appends one row per step |
+| prefill | [`full_pipeline/kv_copy.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/ops/full_pipeline/kv_copy.rs) | bulk-copies `seq_len` rows, sets `current_len = seq_len` |
+| decode | [`decode/encode_attn/kv_attend.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/decode/encode_attn/kv_attend.rs) | appends one row per step |
 
 Compaction addresses only the third. Prefill writes `seq_len` rows in a
 single `copy_nonoverlapping`; its SAFETY note claims the copy is
@@ -93,7 +93,7 @@ So a per-layer capacity change has to answer this first:
 The evidence points at the tail, and it is nearly in hand:
 
 - Prefill attention **is** windowed on Metal, established by
-  [`test_prefill_sliding_window.rs`](../crates/larql-compute-metal/tests/test_prefill_sliding_window.rs).
+  [`test_prefill_sliding_window.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/tests/test_prefill_sliding_window.rs).
   Once it has run, nothing reads beyond `W` again.
 - Prefill computes into per-layer **scratch** buffers (`lb.k_out`), and
   `populate_kv_one_layer` copies scratch into the persistent cache. The
@@ -159,9 +159,9 @@ struct KvLayerResidency {
 The residency object should be **submitted once as configuration**, not
 queried per layer per token. This is not a style preference — the
 synchronous per-layer form was built and measured, and it lost.
-`crates/larql-compute-metal/src/kv_dispatch_impl.rs` is Step 4
+[`crates/larql-compute-metal/src/kv_dispatch_impl.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/kv_dispatch_impl.rs) is Step 4
 scaffolding whose every method delegates to `CpuBackend`, and the Step 5
-finding recorded in [`ROADMAP.md`](../ROADMAP.md) is that per-layer
+finding recorded in [`ROADMAP.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/ROADMAP.md) is that per-layer
 Metal kernels at the sync trait's granularity are *slower* than the
 fused decode path, because each call forces its own command-buffer
 commit. `AsyncComputeBackend` — deferred dispatch, intent collection —

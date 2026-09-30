@@ -17,7 +17,7 @@ must retain its identity. A true logit lens is separately armed with
 `--lens-tokens` and uses the execution image's normalization and vocabulary
 head; a raw selected-token probe is not a probability or rank.
 
-Open the JSONL in the [Observatory](../../observatory/README.md). The bridge
+Open the JSONL in the [Observatory](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/observatory/README.md). The bridge
 validates record structure, identities and receipt bindings and replays the
 recorded values. Importing a record does not run a model or prove its output
 agrees with an independent implementation.
@@ -36,7 +36,7 @@ sink mass and head-sum residuals, with coverage on the receipt. The
 what the softmax tap observes and the reconstruction/parity laws.
 [ATTR-1D](../v3-attr-1d-descriptive-support.md) normalizes descriptive support;
 attention weights and additive contributions alone do not establish causality.
-The earlier [CPU head-capture record](../v3-observatory-head-capture.md) remains
+The earlier [CPU head-capture record](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/v3-observatory-head-capture.md) remains
 a historical account of the separate Granite capture tooling.
 
 `observe --intervene declarations.json` accepts carrier and head interventions.
@@ -59,12 +59,12 @@ Use `--capture` with `--capture-out` for carrier donors and `--capture-heads`
 with `--capture-heads-out` for head donors. Reproduction needs the declared
 addresses, captured vectors, model/representation identity and comparison
 protocol. A successful intervention is not by itself a causal attribution
-result; the [instrument calibration](../instrument-1-calibration.md) and
-[HEAD-OBS-1 evidence programme](../head-obs-1-per-head-observation.md) explain
+result; the [instrument calibration](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/instrument-1-calibration.md) and
+[HEAD-OBS-1 evidence programme](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/head-obs-1-per-head-observation.md) explain
 why reader calibration and a discriminating decision matter.
 
 The [carrier observation record](../v3-obs-1-carrier-observation.md),
 [logit-lens record](../v3-lens-1-logit-lens.md) and
-[observation contract draft](../vindex3-observation-contract.md) retain their
+[observation contract draft](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/vindex3-observation-contract.md) retain their
 own status. Research results belong in records; the CURRENT overview links
 them without rewriting their experimental claims.

@@ -149,7 +149,7 @@ bound half. Swap the flag set in Terminal A to fill in other rows.
 | `crates/larql-vindex/src/index/core.rs` | New fields: `gate_cache_lru`, `gate_cache_max_layers` |
 | `crates/larql-vindex/src/index/gate.rs` | `set_gate_cache_max_layers`, `touch_gate_cache_lru`, wired into `resolve_gate` + `gate_knn_mmap_fast` |
 | `crates/larql-vindex/src/index/accessors.rs` | `release_mmap_pages` (calls `unchecked_advise(DontNeed)` on every owned mmap) |
-| `crates/larql-server/src/main.rs` | CLI flags, skips `warmup()` under `--ffn-only`, wires `set_gate_cache_max_layers` on load |
+| [`crates/larql-server/src/main.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/main.rs) | CLI flags, skips `warmup()` under `--ffn-only`, wires `set_gate_cache_max_layers` on load |
 | `crates/larql-server/src/state.rs` | `LoadedModel.release_mmap_after_request` field |
 | `crates/larql-server/src/routes/walk_ffn.rs` | Calls `release_mmap_pages()` inside `spawn_blocking` after `run_walk_ffn` returns |
 | `crates/larql-cli/src/main.rs` | Passthrough of `--max-gate-cache-layers` / `--release-mmap-after-request` to `larql-server` |

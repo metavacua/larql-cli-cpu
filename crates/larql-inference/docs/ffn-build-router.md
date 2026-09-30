@@ -235,7 +235,7 @@ impl<'a> LayerFfnRouter<'a> {
 }
 ```
 
-Existing callers (`larql-cli/src/commands/extraction/walk_cmd/q4k.rs:415`
+Existing callers ([`larql-cli/src/commands/extraction/walk_cmd/q4k.rs:415`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-cli/src/commands/extraction/walk_cmd/q4k.rs#L415)
 and `chris-experiments/larql_probes/examples/misc/walk_boundary_sweep.rs:205`) own the
 concrete backend instances as local values and pass references:
 
@@ -469,7 +469,7 @@ design and the implementation in the same pass.
   2026-08-07, so this cross-reference is to planned work, not to code.
 - `larql-inference/src/ffn/mod.rs:46` — existing `LayerFfnRouter`
   shape that §3 is reasoning against.
-- `larql-cli/src/commands/extraction/walk_cmd/q4k.rs:415` and
+- [`larql-cli/src/commands/extraction/walk_cmd/q4k.rs:415`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-cli/src/commands/extraction/walk_cmd/q4k.rs#L415) and
   `chris-experiments/larql_probes/examples/misc/walk_boundary_sweep.rs:205` — existing
   call sites that exemplify the "caller-owns-backends" pattern
   `build_router` is collapsing.

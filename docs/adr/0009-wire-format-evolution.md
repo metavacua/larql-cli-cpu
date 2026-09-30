@@ -151,8 +151,8 @@ The accuracy threshold may differ by model family and quantisation format:
 
 | File | Change |
 |---|---|
-| `crates/larql-server/src/wire.rs` | Add `F16_CT`, `I8_CT` constants; `fn preferred_response_ct(accept: &str) -> &str` |
-| `crates/larql-server/src/env_flags.rs` | Add `F16_WIRE = "LARQL_F16_WIRE"`, `I8_WIRE = "LARQL_I8_WIRE"` |
+| [`crates/larql-server/src/wire.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/wire.rs) | Add `F16_CT`, `I8_CT` constants; `fn preferred_response_ct(accept: &str) -> &str` |
+| [`crates/larql-server/src/env_flags.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/env_flags.rs) | Add `F16_WIRE = "LARQL_F16_WIRE"`, `I8_WIRE = "LARQL_I8_WIRE"` |
 | `crates/larql-server/src/routes/walk_ffn.rs` | Inspect Accept header; branch encode_binary_output to f16/i8 paths |
 | `crates/larql-inference/src/ffn/remote/codec.rs` | Add `encode_f16_request`, `decode_f16_single/batch`, `encode_i8_request`, `decode_i8_single/batch` |
 | `crates/larql-inference/src/ffn/remote/http.rs` | Set `Accept` header based on `WireFormat` enum; decode by response Content-Type |

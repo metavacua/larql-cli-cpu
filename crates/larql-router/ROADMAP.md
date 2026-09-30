@@ -302,10 +302,10 @@ deploy walkthrough ([`crates/larql-router/docs/multi-host-demo.md`](docs/multi-h
 — 3-box LAN topology covering router + 2 shards over `--grid-key`,
 firewall rules, NTP, MTU gotchas, plus a QUIC variant for ADR-0010
 and a MoE variant for V3/V4-scale models), vindex shard-download
-endpoint ([`crates/larql-server/docs/router-spec.md`](../larql-server/docs/router-spec.md)
+endpoint ([`crates/larql-server/docs/router-spec.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/docs/router-spec.md)
 §4 — `GET /v1/shard/{model_id}/{start}-{end}` serves the vindex
 directory as a streamed tar, client side at
-`crates/larql-server/src/shard_loader.rs` is idempotent + SHA-256
+[`crates/larql-server/src/shard_loader.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/shard_loader.rs) is idempotent + SHA-256
 verified against the donor's announced content hash (`shard_sha256`;
 missing hash refused unless `--allow-unverified-shards`) + atomic-unpack, exercised end-to-end by
 `crates/larql-server/tests/test_grid_mode_b.rs::mode_b_full_vertical_handoff`

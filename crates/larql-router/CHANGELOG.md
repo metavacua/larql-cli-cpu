@@ -453,7 +453,7 @@ Smoke-tested with the experiment's `config.example.json` —
   unpack in `shard_loader.rs`.
 - Server announce client transitions from Mode A to Mode B on the same
   gRPC stream after drain (`available_after_drain` config).
-- Integration tests: `crates/larql-server/tests/test_grid_mode_b.rs` (full
+- Integration tests: [`crates/larql-server/tests/test_grid_mode_b.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/tests/test_grid_mode_b.rs) (full
   vertical handoff + negative path) and `test_grid_drain_reassign.rs`
   (Phase B2 cycle).
 

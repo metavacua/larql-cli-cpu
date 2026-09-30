@@ -16,7 +16,7 @@ preserve the date and voice they were originally written in.
 
 ## [2026-05-28] — Hardening findings from the whole-codebase review
 
-From the whole-codebase review ([`docs/audits/codebase-review-2026-05-28.md`](../../docs/audits/codebase-review-2026-05-28.md), workspace [`ROADMAP.md`](../../ROADMAP.md) §"Codebase hardening"):
+From the whole-codebase review ([`docs/audits/codebase-review-2026-05-28.md`](../../docs/audits/codebase-review-2026-05-28.md), workspace [`ROADMAP.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/ROADMAP.md) §"Codebase hardening"):
 
 - **P0 — make `FfnBackend::forward` fallible.** The trait method returns an infallible `Array2<f32>`, forcing process-abort on served paths. Three `panic!` sites to convert to `?`-propagation into the existing `GenerateError` channel (sibling `interventions.rs:55` already does this):
   - ✅ `src/ffn/remote/http.rs:519` — `RemoteWalkBackend::forward` `.unwrap_or_else(|e| panic!())` aborts serving on any remote-shard network blip mid-generation. *(Confirmed by hand; the `from_shape_vec().expect()` at :521 is safe — leave it.)*
@@ -424,7 +424,7 @@ for an incremental pass.
 | H8: `forward::dump_config::DumpConfig` | New `OnceLock`-backed typed config consolidates 7 inline `LARQL_CPU_DUMP_LAYERS` / `LARQL_CPU_STAGE_DUMP` / `LARQL_STAGE_DUMP_LAYER` env reads (in `attention/block.rs`, `forward/layer.rs`, `forward/layer_interventions.rs`, `vindex/q4k_forward/hidden.rs`) into a single read at first access. 5 new tests pinning `from_env`, `stage_dir(layer)`, `layer_dir`, singleton stability, default fallback. |
 | H8: `ffn::moe_remote::runtime::RemoteMoeRuntime` | New `OnceLock`-backed runtime config consolidates 6 inline reads (`LARQL_HTTP_TIMING`, `LARQL_MOE_WIRE_F16`, `LARQL_DISABLE_Q8K_WIRE`, `LARQL_VERBOSE`) across `moe_remote/shard.rs` (HTTP + UDS transports) and `moe_remote/backend.rs`. Replaces two `thread_local!` block caches that fragmented the toggle state per worker thread. 3 new tests. |
 | H9: trim crate-root re-exports | Dropped 17 `forward::*` (e.g. `RawForward`, `LayerMode`, `forward_raw_logits`, `infer_patched_q4k`, `KNN_COSINE_THRESHOLD`) + 7 `layer_graph::*` (`GridGenerateResult`, `ChatMLRenderer`, `GemmaRenderer`, `LayerOutput`, `Llama3Renderer`, `PerLayerGraph`, `TurnRenderer`) re-exports with zero external consumers AND zero in-crate example/test usage. `research` module rewritten to source from full subpaths so it survives further root trims. Crate-root surface narrowed from ~120 to ~96 names. |
-| H11: verified — no hardcoded family branches | Audit found one remaining `match router_type { "gemma4_top_k_softmax" => ... }` at `pipeline_layer.rs:546`. That's the architecture trait's `router_type` metadata signal — the policy-object pattern this item asks for, not a hardcoded family check. H11 done. |
+| H11: verified — no hardcoded family branches | Audit found one remaining `match router_type { "gemma4_top_k_softmax" => ... }` at [`pipeline_layer.rs:546`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-inference/src/layer_graph/pipeline_layer.rs#L546). That's the architecture trait's `router_type` metadata signal — the policy-object pattern this item asks for, not a hardcoded family check. H11 done. |
 | H12: split `layer_graph/predict.rs` | 881-LOC single file → `predict/` directory: `mod.rs` 376 (entry + small variants), `split.rs` 285 (3-pass approximate-attention pipeline + logits-only fast path), `honest.rs` 261 (production GPU+CPU hybrid). All 9 predict tests pass; no public API change. |
 | Lib tests: 631 → 639 | 8 new tests for the two new typed configs (5 DumpConfig + 3 RemoteMoeRuntime); split of predict.rs preserved all existing tests; all 639 lib tests pass clean. |
 
@@ -571,7 +571,7 @@ Q4_K matmul for prefill / kernel fusion / encoder coalescing.
 - `crates/larql-inference/src/layer_graph/generate/lm_head.rs` — `lm_head_topk` `prefer_cpu` branch routes to `index.lm_head_knn_backend_skip_q4k(..., backend)`
 - `crates/larql-vindex/src/index/storage/lm_head.rs` — new `lm_head_knn_backend_skip_q4k` method (path 1 = stride-32 Q4_K, path 2 = f16 GEMV, path 3 = f32 BLAS); `LARQL_LM_HEAD_STRIDE32=0` opt-out
 - `crates/larql-inference/src/residual_diff/capture.rs` — `metal_decode_steps` helper for multi-step parity
-- `crates/larql-inference/tests/test_decode_consistency.rs` — `decode_consistency_gemma3_4b_2steps` test
+- [`crates/larql-inference/tests/test_decode_consistency.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-inference/tests/test_decode_consistency.rs) — `decode_consistency_gemma3_4b_2steps` test
 - `crates/larql-inference/tests/test_logits_goldens.rs` — Metal pins re-captured for v5 stride-32 path
 
 ## [2026-04-30] — gRPC grid accuracy + dense Metal chat template + Gemma 4 model coverage

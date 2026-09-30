@@ -4,8 +4,8 @@ Multi-engine accuracy snapshots from `larql accuracy`. Each baseline is a
 pair: `<model>-<date>.md` (commentary + headline table + regression
 thresholds) and `<model>-<date>.json` (per-prompt raw scores).
 
-Why per-crate (not under `bench/baselines/`): `bench/baselines/cpu/` and
-`bench/baselines/cross-arch/` measure the workspace end-to-end (us vs
+Why per-crate (not under [`bench/baselines/`](https://github.com/metavacua/larql-to-sparql/tree/f02693c90c1a9d51438dcc0a2479ba46959fb913/bench/baselines)): [`bench/baselines/cpu/`](https://github.com/metavacua/larql-to-sparql/tree/f02693c90c1a9d51438dcc0a2479ba46959fb913/bench/baselines/cpu) and
+[`bench/baselines/cross-arch/`](https://github.com/metavacua/larql-to-sparql/tree/f02693c90c1a9d51438dcc0a2479ba46959fb913/bench/baselines/cross-arch) measure the workspace end-to-end (us vs
 `llama.cpp`, cross-architecture sweeps). These baselines measure
 **`larql-kv` engine correctness specifically** — they regress only when
 something in this crate's engines (or the `accuracy_suite` driver)
@@ -55,7 +55,7 @@ Then write the `.md` companion documenting:
 
 ## Regression workflow
 
-Same shape as workspace-level `bench/baselines/cpu/`:
+Same shape as workspace-level [`bench/baselines/cpu/`](https://github.com/metavacua/larql-to-sparql/tree/f02693c90c1a9d51438dcc0a2479ba46959fb913/bench/baselines/cpu):
 
 1. Run the suite — `larql accuracy <model> --output-file <new>.json`.
 2. Diff `<new>.json` against the committed baseline of the same name:

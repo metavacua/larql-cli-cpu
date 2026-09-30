@@ -269,7 +269,7 @@ shard-005: layer_start=1, layer_end=1, expert_start=0,   expert_end=63
 
 Each `larql-server` invocation announces its slice via
 `--layers L-L` plus the expert range (flag wiring is server-side;
-see `crates/larql-server/docs/server-spec.md` for the per-shard
+see [`crates/larql-server/docs/server-spec.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/docs/server-spec.md) for the per-shard
 configuration).
 
 Client requests use the new MoE shape:
@@ -329,7 +329,7 @@ updates the `larql_router_grid_servers` gauge accordingly.
 
 - [`hot-shard-demo.md`](./hot-shard-demo.md) — load-driven elevation +
   cool-down on the same topology.
-- [`../../larql-server/docs/router-spec.md`](../../larql-server/docs/router-spec.md)
+- [`../../larql-server/docs/router-spec.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/docs/router-spec.md)
   — full CLI reference for both `larql-router` and `larql-server`.
 - [`../ROADMAP.md`](../ROADMAP.md) — per-feature shipping notes.
 - ADR-0017 (`/metrics`), ADR-0018 (MoE expert routing), ADR-0019

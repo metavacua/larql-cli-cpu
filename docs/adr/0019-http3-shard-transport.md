@@ -329,7 +329,7 @@ date. Rejected — we'd be perpetually waiting.
 | `crates/larql-router/src/main.rs` | `--http3-shards` flag |
 | `crates/larql-router/src/cli_helpers.rs` | `build_shard_client` returns transport-trait |
 | `crates/larql-router/src/dispatch.rs` | use trait dispatch instead of direct `reqwest::Client` calls |
-| `crates/larql-server/Cargo.toml` | `[features] http3 = ["larql-router-protocol/http3"]` |
+| [`crates/larql-server/Cargo.toml`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/Cargo.toml) | `[features] http3 = ["larql-router-protocol/http3"]` |
 | `crates/larql-server/src/bootstrap.rs` | spawn h3 listener on `--http3-port` |
 | `crates/larql-server/src/routes.rs` | h3 → axum adapter |
 

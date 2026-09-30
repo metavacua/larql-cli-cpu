@@ -1051,7 +1051,7 @@ mHC from budget-killer to bounded optimisation.
 
 #### 8.2.2a PHYSICAL-1 QUALITY, synthetic arm — RUN 2026-09-07, GREEN (mechanism and controls only)
 
-`crates/larql-compute-metal/src/trait_impl/kda/q4_trajectory.rs`, branch
+[`crates/larql-compute-metal/src/trait_impl/kda/q4_trajectory.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/trait_impl/kda/q4_trajectory.rs), branch
 `glm-physical-1` off `b833d3d4`. 6 tests, all green; the full KDA module is 16/16 with no
 regression; fmt clean; clippy adds nothing (the 5 warnings are pre-existing `PLE_*` and
 `block v0.1.6`).
@@ -1265,7 +1265,7 @@ The real-weight example now derives the form from `config.json`'s `architectures
 **The oracle is reproducible first.** `tools/oracles/glm5/` — pinned `requirements.txt`
 (torch 2.14.0, transformers 5.16.1, numpy 2.5.2, safetensors 0.8.0 on Python 3.12),
 `bootstrap.sh`, `verify_sources.sh` checking the installed `glm5_next` against
-`scripts/glm_reference_sources.sha256`, and `smoke.py`. The venv is not in the repo; its
+[`scripts/glm_reference_sources.sha256`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/scripts/glm_reference_sources.sha256), and `smoke.py`. The venv is not in the repo; its
 construction is. Steps 1–2 pass without the weights mounted and say so, so the environment
 verifies separately from the checkpoint.
 

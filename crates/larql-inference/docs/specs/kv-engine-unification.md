@@ -426,7 +426,7 @@ to `EngineKind` via the table in §6.1. Default off; existing path
 remains the fallback.
 
 **Parity gate:** Side-by-side run with and without the env var on
-`bench/baselines/cpu/` prompts. Must produce identical token streams
+[`bench/baselines/cpu/`](https://github.com/metavacua/larql-to-sparql/tree/f02693c90c1a9d51438dcc0a2479ba46959fb913/bench/baselines/cpu) prompts. Must produce identical token streams
 on all three `KvCacheKind` values (`standard` → `Standard { None }`,
 `markov-bounded` → `Standard { Some(N) }`, `none` → `NoCache`). If
 parity is not bit-exact on any of the three, this step does not land.

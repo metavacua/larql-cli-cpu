@@ -11,7 +11,7 @@ owns the normative container model and contract stack.
 The G0–G5 narrative below records the original implementation ladder, not the
 boundary of today's runtime. Experimental gates retain their historical scope
 in [vindex3-experiments.md](vindex3-experiments.md); the routed-layer physical
-layout is described in [lyrw-v2.md](lyrw-v2.md).
+layout is described in [lyrw-v2.md](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/lyrw-v2.md).
 
 > Older `spec §N` citations in `format/vindex3/{index,lyrw2,…}` code
 > comments refer to the pre-G2 draft of this spec; where they conflict,
@@ -686,7 +686,7 @@ graph carries the same kinds executes with zero runtime edits.
 
 ## 9. Relationship to existing formats
 
-- **LYRW v2** (`docs/lyrw-v2.md`) is the expert-bank segment codec. The
+- **LYRW v2** ([`docs/lyrw-v2.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/lyrw-v2.md)) is the expert-bank segment codec. The
   candidate spec's convergence rule (§5.6 there) makes it one segment
   family a representation may use; its region roles (`gate/up/down/bias/
   scales/latents`) are operand-level structure *inside* an FFN object,

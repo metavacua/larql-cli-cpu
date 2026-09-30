@@ -239,7 +239,7 @@ weights touched, no model routing used); compute is **never** the model's.
    pipeline: **MEASURED** (2026-06-12, larql-rs assembly run): AT-1 6/6 exact with
    schedule-end termination through the backend-routed constrained path, 345 ms–1.26 s
    per item incl. prefill (24-digit add = 25 forced tokens at ~20 tok/s end-to-end) —
-   `bench/aim-validation/ave_demo_gemma3-4b.json`, `ave_demo --metal`. The
+   [`bench/aim-validation/ave_demo_gemma3-4b.json`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/bench/aim-validation/ave_demo_gemma3-4b.json), `ave_demo --metal`. The
    sampler-level argument held: the mask applies to CPU-resident logits, so the drive
    is backend- and quantization-independent by construction *and now by measurement*.
    Probe and injection paths still need a re-calibration run if revived.

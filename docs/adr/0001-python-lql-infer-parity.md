@@ -97,7 +97,7 @@ Concretely:
   refactor (previously returned pre-attention residuals via
   `predict_with_ffn_trace`, contradicting its own docstring). Return type
   changed to `list[(layer_index, PyArray1)]` so callers can't silently
-  mis-index. See `docs/training-free-insert.md` for the updated usage example.
+  mis-index. See [`docs/training-free-insert.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/training-free-insert.md) for the updated usage example.
 - MLX / chuk-lazarus bindings are downstream of `larql-python` and inherit
   parity for free as long as they route through `PyVindex::infer`.
 

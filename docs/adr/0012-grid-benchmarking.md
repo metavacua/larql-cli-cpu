@@ -7,7 +7,7 @@
 
 ## Context
 
-The larql grid produces numbers that appear in `crates/larql-server/ROADMAP.md`
+The larql grid produces numbers that appear in [`crates/larql-server/ROADMAP.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/ROADMAP.md)
 as hand-measured snapshots (`17.7 tok/s → 19.7 tok/s after UDS + TCP_NODELAY`).
 These are not reproducible via a single command, are not tracked over time,
 and have no regression gate. Three categories of measurement are missing:
@@ -186,7 +186,7 @@ Ensures routing stays sub-microsecond at grid sizes up to 100 servers.
 
 ## Layer 3: CI Regression Gate
 
-### `scripts/bench-grid-regress.sh`
+### [`scripts/bench-grid-regress.sh`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/scripts/bench-grid-regress.sh)
 
 ```bash
 #!/usr/bin/env bash
@@ -212,7 +212,7 @@ python3 scripts/bench_compare.py \
   --p99-threshold       0.10     # fail if p99 rises >10%
 ```
 
-### `bench/baselines/` Directory
+### [`bench/baselines/`](https://github.com/metavacua/larql-to-sparql/tree/f02693c90c1a9d51438dcc0a2479ba46959fb913/bench/baselines) Directory
 
 Stores per-model JSON baselines. Updated explicitly via:
 
@@ -268,7 +268,7 @@ bench-all: bench-wire bench-routing bench-grid
 | `crates/larql-inference/benches/wire_codec.rs` | NEW — criterion codec bench |
 | `crates/larql-router/benches/routing.rs` | NEW — criterion routing bench |
 | `crates/larql-router/Cargo.toml` | ADD `criterion` dev-dep; `[[bench]]` entry |
-| `scripts/bench-grid-regress.sh` | NEW — CI regression gate |
-| `scripts/bench_compare.py` | NEW — JSON baseline comparison |
-| `bench/baselines/` | NEW directory — committed baseline JSONs |
+| [`scripts/bench-grid-regress.sh`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/scripts/bench-grid-regress.sh) | NEW — CI regression gate |
+| [`scripts/bench_compare.py`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/scripts/bench_compare.py) | NEW — JSON baseline comparison |
+| [`bench/baselines/`](https://github.com/metavacua/larql-to-sparql/tree/f02693c90c1a9d51438dcc0a2479ba46959fb913/bench/baselines) | NEW directory — committed baseline JSONs |
 | `Makefile` | ADD `bench-wire`, `bench-routing`, `bench-grid`, `bench-all` targets |

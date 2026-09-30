@@ -1,7 +1,7 @@
 # RESIDUAL-BUS-2: the address, identity and sequence of a carrier
 
 **Class: FREEZE.** Frozen 2026-09-27 against main `8afd0fbd`, before any
-BUS-2 implementation. It follows the [reconnaissance](residual-bus-2-reconnaissance.md)
+BUS-2 implementation. It follows the [reconnaissance](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/residual-bus-2-reconnaissance.md)
 (#615) and its two pre-freeze refusals (#616, #617). The question, properties,
 witnesses and forecasts below change only by a new, dated section.
 

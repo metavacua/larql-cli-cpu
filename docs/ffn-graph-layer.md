@@ -24,7 +24,7 @@ The down projection reads from `down_features.bin` — a feature-major `[interme
 
 ## Proof of Correctness
 
-The [walk boundary sweep](walk-boundary-sweep.md) tested vindex FFN at every layer boundary from L0 to L34 on Gemma-3 4B:
+The [walk boundary sweep](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/walk-boundary-sweep.md) tested vindex FFN at every layer boundary from L0 to L34 on Gemma-3 4B:
 
 ```
      B   walk%   correct  top1_avg  details

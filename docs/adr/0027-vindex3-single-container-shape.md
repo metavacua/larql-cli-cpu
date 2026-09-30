@@ -7,7 +7,7 @@ criteria below). This is gate 1 of the candidate specification's §21.
 rule, bank-ABI rows); `format::vindex3::write` (the bank writer) and its
 one production caller, `larql extract-index --expert-banks native
 --expert-banks-out`.
-**Related:** `docs/lyrw-v2.md` (the bank codec's own specification);
+**Related:** [`docs/lyrw-v2.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/lyrw-v2.md) (the bank codec's own specification);
 `docs/vindex-generation-policy.md` (M4).
 
 ---
@@ -68,7 +68,7 @@ sparse-bank machinery.
    NOT fail on it with a generic parse error. The LARQL reader keeps
    opening it. An independent reader (`vindex-core`, gate 3) MAY refuse it.
 3. **LYRW v2 stays an import/interchange codec, specified in
-   `docs/lyrw-v2.md`, outside the VINDEX3 3.0 normative contract.** The
+   [`docs/lyrw-v2.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/lyrw-v2.md), outside the VINDEX3 3.0 normative contract.** The
    part of it the graph shape uses, region format tags and packing →
    codec streams, is specified (gate 2) as part of the representation/codec
    contract and does not depend on the `.lyrw` file layout.

@@ -114,7 +114,7 @@ larql-execution       execution-refusal semantics (RefusalKind) shared across
 **`crates/larql-experts` is its own nested workspace** (own Cargo.toml with `[workspace]` members) — it builds the `wasm32-wasip1` expert modules that `model-compute`'s `wasm` feature hosts. Root `cargo build --workspace` does not include it — which also means the workspace-wide `clippy`, `coverage` and `test` sweeps miss it, so code there is not gated by `make ci`.
 
 **Metal is a first-class peer** (ADR-0022, 2026-05-18). Its crate has its own
-[README](crates/larql-compute-metal/README.md) — read that before changing kernels,
+[README](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/README.md) — read that before changing kernels,
 dispatch policy or anything under `shaders/`; the operator controls and the
 measurement protocol are documented there and nowhere else. `larql-compute-metal`
 is the same shape as a future `larql-compute-vulkan` / `larql-compute-cuda` —
@@ -233,4 +233,4 @@ These are the release bar. They apply to every crate and to test code as well as
 - ADRs: [docs/adr/](docs/adr/) (0001–0026 — wire format, grid, compute-trait extraction ADR-0022, multimodal seam ADR-0023, ...). Some crates have their own specifc ADRs in `crates/<crate-name>/doc/adr`.
 - KV-cache engines: [crates/larql-kv/README.md](crates/larql-kv/README.md), [crates/larql-kv/docs/state-policy.md](crates/larql-kv/docs/state-policy.md); Vindex Factory: [docs/vindex-factory.md](docs/vindex-factory.md)
 - Experimental work: `~/chris-source/chris-experiments/` — numbered 01-45, grouped into foundations, compilation, routing, and shannon series
-- Python bindings docs: [crates/larql-python/README.md](crates/larql-python/README.md), [docs/larql-python.md](docs/larql-python.md)
+- Python bindings docs: [crates/larql-python/README.md](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-python/README.md), [docs/larql-python.md](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/larql-python.md)

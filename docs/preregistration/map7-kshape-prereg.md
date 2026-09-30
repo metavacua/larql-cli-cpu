@@ -58,7 +58,7 @@ re-derived here):
   crossover K* ≈ 2944 on that path (to be re-priced, §4.6). R4's
   surviving lane is compiled compact-dense; R4 names the missing
   experiment: a contribution-quality oracle.
-- **V1 hash-routing diagnosis** (`docs/diagnoses/v1-hash-routing.md`):
+- **V1 hash-routing diagnosis** ([`docs/diagnoses/v1-hash-routing.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/diagnoses/v1-hash-routing.md)):
   per-layer KL screens do not compound — individually "safe" per-layer
   thresholds applied jointly produced +5.4 to +7.7 bits/token and
   78–95% argmax drift. **No verdict in either programme may rest on a

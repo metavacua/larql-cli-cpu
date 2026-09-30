@@ -76,7 +76,7 @@ crates), and why the eventual seam should be setup-time configuration
 rather than a per-layer callback, are all in
 [`docs/kv-residency-contract.md`](../../docs/kv-residency-contract.md).
 Executable form:
-[`kv_residency_contract.rs`](../larql-compute-metal/src/kv_residency_contract.rs).
+[`kv_residency_contract.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/kv_residency_contract.rs).
 
 ---
 

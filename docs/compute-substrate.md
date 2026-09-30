@@ -47,7 +47,7 @@ macOS-gated; consumers expose their own opt-in features. The top-level CLI
 has a default GPU feature, while other crates can have empty defaults. Read
 the actual manifest rather than treating one crate's default as workspace-wide.
 
-[The Metal README](../crates/larql-compute-metal/README.md) owns operator
+[The Metal README](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/README.md) owns operator
 controls, command-buffer failure handling and GPU measurement rules. A measured
 result requires declared model/representation/backend, warmed control brackets
 and uncontended execution. A profiler changes execution timing; use it for

@@ -22,7 +22,7 @@ Add Cargo's release target directory to PATH. Build `larql-server` for
 The [execution guide](../../docs/vindex3/execution.md) covers source admission,
 encoding and generation. [Observation and intervention](../../docs/vindex3/observation-and-intervention.md)
 distinguishes the supported recorder from scoped research tooling.
-The standalone [vindex tool](../vindex-cli/README.md) provides format operations.
+The standalone [vindex tool](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/vindex-cli/README.md) provides format operations.
 
 Commands are thin adapters under [src/commands](src/commands/): primary verbs
 include `run`, `chat`, `bench`, `serve`, `vindex3` and `shannon`; extraction,

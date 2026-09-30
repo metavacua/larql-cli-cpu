@@ -143,7 +143,7 @@ adjudicating either bank.
 either FAIL         RETIRE. No Bank 4.
 ```
 
-Full protocol: `bench/prompts/CPU6-VALIDATION.md`.
+Full protocol: [`bench/prompts/CPU6-VALIDATION.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/bench/prompts/CPU6-VALIDATION.md).
 
 **What to look at besides PASS/FAIL.** Whether the local anchor explains
 the cross-bank movement:

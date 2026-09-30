@@ -1717,14 +1717,14 @@ Deliberately boring, so MCTS is a policy swap and not a rewrite.
 | 8 | PUCT as another `SearchPolicy`; same states, actions, evidence | |
 | 9 | Extend `PhysicalState` with residency; optimise measured tok/s | |
 
-The pre-K3 milestone is [REPRESENT-LOOP-1](represent/forecasts/represent-loop-1.json):
+The pre-K3 milestone is [REPRESENT-LOOP-1](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/represent/forecasts/represent-loop-1.json):
 **A**, independently establish the compiled artifact; **B**, resume OPT-6 and
 admit observations transactionally; **C**, show accepted evidence changes
 future selection while rejected evidence cannot. All three are reviewed and
 merged. The demonstrated feedback uses `AlreadyObserved`; it is not yet
 numerical-quality-dependent preference or promotion.
 
-The next experimental milestone is [REPRESENT-PARETO-1](represent/forecasts/represent-pareto-1.json):
+The next experimental milestone is [REPRESENT-PARETO-1](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/represent/forecasts/represent-pareto-1.json):
 hold candidate identities, observed-key sets, cost facts and policy fixed across
 counterfactual replays, and require accepted quality values to change measured
 candidate preference. The first-gate assumption is a tiny controlled fixture;
@@ -1743,7 +1743,7 @@ digest. It then feeds persisted source, surface and effective decisions into
 `RepresentationState::from_decisions`; the root binding is artifact-integrity
 evidence and never another state-identity input.
 It never resolves the requested map or accepts a stored state id as authority.
-[The witnesses and limits](represent/forecasts/represent-candidate-authority-1-notes.json)
+[The witnesses and limits](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/represent/forecasts/represent-candidate-authority-1-notes.json)
 include a fresh read after deleting the source fixture, actual layout fallback,
 and valid-Y/requested-X refusal. Scientific ingestion and the closed-loop
 witness remain separate transitions; establishing candidate validity does not
@@ -1753,7 +1753,7 @@ Transition B now supplies [deterministic ingestion](../crates/larql-vindex/src/f
 It independently reopens candidate, source and bank authority before granting an
 `AcceptedMeasurement`, then commits a new observation atomically. Identical
 replays are no-ops; conflicting readings return a typed refusal with both
-observations. The [implementation notes](represent/forecasts/opt-6-ingestion-notes.json)
+observations. The [implementation notes](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/represent/forecasts/opt-6-ingestion-notes.json)
 record the valid-Y/requested-X witness and the additional bank-payload gap found
 during implementation. Legacy unsealed banks and sample orders the current
 executor cannot perform refuse.
@@ -1763,8 +1763,8 @@ the same persisted S0 selects A; accepted evidence makes A `AlreadyObserved`
 and the next request becomes the predetermined B. Freshly sealed incomplete
 evidence or a valid alternative candidate supplied for A leaves S0 and selection
 A unchanged. Reopening S1 and replaying A preserves both its single observation
-and selection B. The [forecast](represent/forecasts/represent-loop-1-c.json)
-and [notes](represent/forecasts/represent-loop-1-c-notes.json) bound this to
+and selection B. The [forecast](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/represent/forecasts/represent-loop-1-c.json)
+and [notes](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/represent/forecasts/represent-loop-1-c-notes.json) bound this to
 control-plane composition with synthetic observations over real persisted
 artifacts, not a numerical execution or K3 performance claim.
 

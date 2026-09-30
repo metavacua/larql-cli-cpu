@@ -5,7 +5,7 @@
 
 CPU numerical substrate and shared backend traits. CPU forward-pass math,
 attention, normalization, quantized kernels and per-layer state dispatch live
-here. Metal implements the shared traits in [larql-compute-metal](../larql-compute-metal/README.md).
+here. Metal implements the shared traits in [larql-compute-metal](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/README.md).
 Engine sessions, tokenizers, distributed routing and VINDEX3 recording belong
 to higher layers.
 
@@ -41,9 +41,9 @@ cargo test -p larql-compute --features heavy_tests
 
 `heavy_tests` enables the slower integration suites; `test-utils` exposes
 synthetic `KvIndex` fixtures. Benchmarks stay in this crate; user-facing
-examples are catalogued in [larql-demos](../larql-demos/README.md).
+examples are catalogued in [larql-demos](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-demos/README.md).
 
 Use [compute-substrate.md](../../docs/compute-substrate.md) for ownership and
-[the Metal README](../larql-compute-metal/README.md) for GPU controls and the
+[the Metal README](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/README.md) for GPU controls and the
 measurement protocol. Older shader/decode notes under this crate predate the
 backend split; they are linked as historical material, not current GPU ownership.

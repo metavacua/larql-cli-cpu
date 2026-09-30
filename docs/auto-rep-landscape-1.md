@@ -9,7 +9,7 @@ bank, analysis, replay arms, budgets, forecasts, thresholds and the values below
 | `sketch_seed` | `381943897866997936` |
 | sketch K | 256 |
 | `cube_order_seed` | `800104581919694298` |
-| schedule | `bench/auto-rep-landscape-1/schedule.json`, sha256 `ddfc7dd5306d4b9a2b71d65e0c1d07fc970d1b8f1bdd325a0e8a1ed5697fc437` |
+| schedule | [`bench/auto-rep-landscape-1/schedule.json`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/bench/auto-rep-landscape-1/schedule.json), sha256 `ddfc7dd5306d4b9a2b71d65e0c1d07fc970d1b8f1bdd325a0e8a1ed5697fc437` |
 
 Both seeds were drawn from the OS random source (`secrets.randbits(63)`) when this document was frozen.
 The cube runs on a build whose `measure/plan/{mod,record,sketch}.rs` are byte-identical to `31f8e3b5`'s,

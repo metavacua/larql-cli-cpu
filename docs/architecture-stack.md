@@ -15,13 +15,13 @@ The dependency graph is not a single linear chain.
 |---|---|
 | Contract and utility leaves | [vindex-spec](../crates/larql-vindex-spec/README.md) owns the manifest contract; [execution](../crates/larql-execution/README.md) owns refusal classification; [core](../crates/larql-core/README.md) owns generic knowledge graphs; [boundary](../crates/larql-boundary/README.md) owns residual codecs; [router-protocol](../crates/larql-router-protocol/README.md) owns transport contracts |
 | Source description | [models](../crates/larql-models/README.md) owns architecture/config, inventory, weight formats and multimodal descriptions |
-| Numerical substrate | [compute](../crates/larql-compute/README.md) owns shared traits and CPU math; [compute-metal](../crates/larql-compute-metal/README.md) owns the Metal implementation and shaders |
+| Numerical substrate | [compute](../crates/larql-compute/README.md) owns shared traits and CPU math; [compute-metal](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/README.md) owns the Metal implementation and shaders |
 | Artifact semantics | [vindex](../crates/larql-vindex/README.md) owns lifecycle, V3 graph/plans/representations and the canonical interpreter, alongside V2 index APIs |
 | Runtime and state | [inference](../crates/larql-inference/README.md) composes sessions/generation/records; [kv](../crates/larql-kv/README.md) provides engine/state implementations |
-| Language and tools | [lql](../crates/larql-lql/README.md), [larql CLI](../crates/larql-cli/README.md), [vindex CLI](../crates/vindex-cli/README.md) and [Python](../crates/larql-python/README.md) expose different subsets of the system |
-| Services | [server](../crates/larql-server/README.md) binds artifacts and serves requests; [router](../crates/larql-router/README.md) coordinates distributed nodes and capability-based proxying |
-| Build and examples | [Factory](../crates/larql-factory/README.md) orchestrates recipe builds; [demos](../crates/larql-demos/README.md) declares runnable examples |
-| Explicit compute tools | [model-compute](../crates/model-compute/README.md) provides native/solver calls; the separate [experts workspace](../crates/larql-experts/README.md) builds JSON-ABI WASM guests |
+| Language and tools | [lql](../crates/larql-lql/README.md), [larql CLI](../crates/larql-cli/README.md), [vindex CLI](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/vindex-cli/README.md) and [Python](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-python/README.md) expose different subsets of the system |
+| Services | [server](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/README.md) binds artifacts and serves requests; [router](../crates/larql-router/README.md) coordinates distributed nodes and capability-based proxying |
+| Build and examples | [Factory](../crates/larql-factory/README.md) orchestrates recipe builds; [demos](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-demos/README.md) declares runnable examples |
+| Explicit compute tools | [model-compute](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/model-compute/README.md) provides native/solver calls; the separate [experts workspace](../crates/larql-experts/README.md) builds JSON-ABI WASM guests |
 
 ## Boundaries that matter
 
@@ -59,4 +59,4 @@ cover the nested workspace.
 
 See [compute/source integration](compute-substrate.md),
 [VINDEX3 architecture](vindex3/architecture.md), [status](vindex3/status.md)
-and the [documentation policy](documentation-policy.md).
+and the [documentation policy](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/documentation-policy.md).

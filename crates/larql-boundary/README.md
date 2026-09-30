@@ -24,6 +24,6 @@ with hot continuation state belong to callers such as
 cargo test -p larql-boundary
 ```
 
-See [the boundary demos](../larql-demos/examples/boundary/README.md) for runnable
+See [the boundary demos](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-demos/examples/boundary/README.md) for runnable
 examples. VINDEX3 execution records and their receipts have a separate contract;
 a BOUNDARY frame does not stand in for an observation record.

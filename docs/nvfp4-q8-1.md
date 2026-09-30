@@ -13,7 +13,7 @@ activation, and #529, which decodes NVFP4 in NEON registers.
 Measured before this freeze on Gemma 3 4B. The binary was main `e8307501` plus #530 (the per-plan rate
 report) plus #529 (NEON NVFP4 decode), merged locally as `851e4214`. The run used a 24-token prompt and
 `--generate 32`, four arms interleaved, three repeats, 60 s cooldowns, on AC power. The raw runs are in
-`bench/nvfp4-q8-1/recon/`.
+[`bench/nvfp4-q8-1/recon/`](https://github.com/metavacua/larql-to-sparql/tree/f02693c90c1a9d51438dcc0a2479ba46959fb913/bench/nvfp4-q8-1/recon).
 
 | arm | ms/token | tok/s | main projection plan | bytes/token | rate |
 |---|---:|---:|---|---:|---:|
@@ -152,7 +152,7 @@ Judged against the frozen text above. Nothing in it was edited. Binary: source `
 
 ### F: PASS
 
-Evidence: `bench/nvfp4-q8-1/f/`. Both procedures are **admissible**, with complete facts. Each covers Q-BANK-1's 69
+Evidence: [`bench/nvfp4-q8-1/f/`](https://github.com/metavacua/larql-to-sparql/tree/f02693c90c1a9d51438dcc0a2479ba46959fb913/bench/nvfp4-q8-1/f). Both procedures are **admissible**, with complete facts. Each covers Q-BANK-1's 69
 samples, 1810 positions, in bank `74eded7e`, and reports "changed: the arm only".
 
 | comparison | mean KL (nats) | top-1, margin ≥ 0.5 |
@@ -171,7 +171,7 @@ samples, 1810 positions, in bank `74eded7e`, and reports "changed: the arm only"
 
 ### P: PARTIAL
 
-Evidence: `bench/nvfp4-q8-1/pm/`. Three interleaved repeats, 60 s cooldowns, on AC power. The 1-min load at each run
+Evidence: [`bench/nvfp4-q8-1/pm/`](https://github.com/metavacua/larql-to-sparql/tree/f02693c90c1a9d51438dcc0a2479ba46959fb913/bench/nvfp4-q8-1/pm). Three interleaved repeats, 60 s cooldowns, on AC power. The 1-min load at each run
 start was 1.7–2.2, with the 5- and 15-min averages still falling after a peer's compile.
 
 | arm | steady ms/token (runs) | median | tok/s |
@@ -208,7 +208,7 @@ for most of the gap:
 The arm does not reach the Q4_K × Q8_K regime. `FusedNvfp4Q8` streams at half `FusedKQuantQ8k`'s rate on the same
 bytes.
 
-**Why M misses** was recorded before any P/M run, in `bench/nvfp4-q8-1/diagnostic-split-threshold.md`, which is not
+**Why M misses** was recorded before any P/M run, in [`bench/nvfp4-q8-1/diagnostic-split-threshold.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/bench/nvfp4-q8-1/diagnostic-split-threshold.md), which is not
 an adjudication input. Gemma 3 4B's NVFP4 attention projections (1.5–2.9 MB) fall under the executor's 4 MB split
 threshold and run single-threaded, about 0.30 GB/token:
 - the worker slabs in the reports show it: 748 slabs over 238 calls for both NVFP4 arms, against 238 for the

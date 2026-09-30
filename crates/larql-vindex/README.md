@@ -61,7 +61,7 @@ execution refuses this slice. See [runtime integration](../../docs/vindex3/runti
 
 ## Contracts and use
 
-Use [vindex-cli](../vindex-cli/README.md) for format-native operations and
+Use [vindex-cli](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/vindex-cli/README.md) for format-native operations and
 [larql-cli](../larql-cli/README.md) for execution and recording. The
 [candidate specification](docs/vindex3-format-spec.md) owns the versioned
 format; [architecture](../../docs/vindex3/architecture.md),

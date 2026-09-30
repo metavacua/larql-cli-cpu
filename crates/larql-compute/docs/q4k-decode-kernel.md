@@ -5,7 +5,7 @@
 
 ## Diagnosis (already recorded)
 
-See `bench/baselines/cpu/COMPARISON.md` (2026-05-15) and `bench/baselines/cpu/DIAGNOSIS-2026-05-16-thread-scaling.md` (2026-05-16).
+See [`bench/baselines/cpu/COMPARISON.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/bench/baselines/cpu/COMPARISON.md) (2026-05-15) and [`bench/baselines/cpu/DIAGNOSIS-2026-05-16-thread-scaling.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/bench/baselines/cpu/DIAGNOSIS-2026-05-16-thread-scaling.md) (2026-05-16).
 
 Per-core thread-scaling table from the diagnosis:
 

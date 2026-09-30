@@ -1,7 +1,7 @@
 # CPU-7C2 — restore machine ownership, then measure stationarity on top
 
 Pre-registered 2026-08-26, before implementation. Gates FROZEN. Earned by
-CPU-7C1 (`docs/cpu7c-two-position-layer.md`), which established both the
+CPU-7C1 ([`docs/cpu7c-two-position-layer.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/cpu7c-two-position-layer.md)), which established both the
 mechanism and the defect this rung exists to remove.
 
 ---

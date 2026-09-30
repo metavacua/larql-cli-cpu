@@ -540,7 +540,7 @@ $ larql-server \
   `GridService`, all message types). Separate crate so neither server nor router
   depends on the other.
 - `crates/larql-router/src/grid/` — `GridState` (mod.rs), `GridServiceImpl` (service.rs), routing (routing.rs), replication (replication.rs), hot-shard (hot_shard.rs), status surface (status.rs)
-- `crates/larql-server/src/announce.rs` — background announce task
+- [`crates/larql-server/src/announce.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/announce.rs) — background announce task
 
 **What is implemented:**
 

@@ -26,7 +26,7 @@ A representation decision needs a fidelity measurement. The one LARQL has cannot
 The trigger was concrete. On gpt-oss-20b, compiling the output head to NVFP4 took the lowered decode
 from 10.37 to 8.51 ms/token (a 3-repeat protocol run, 2026-09-23). Whether that head is acceptable could
 not be asked of LARQL's own instrument. A hand-built comparison (HEAD-FID-1) was UNINFORMATIVE by its own
-frozen rule. Meanwhile `bench/prompts/quality-bank-1/run_bank.py` measures any model through
+frozen rule. Meanwhile [`bench/prompts/quality-bank-1/run_bank.py`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/bench/prompts/quality-bank-1/run_bank.py) measures any model through
 `vindex3 exec`, but it has no validity proofs, no gate and different units (bits over the full vocabulary,
 against the procedure's nats over the top 2048), and nothing reconciles the two paths.
 

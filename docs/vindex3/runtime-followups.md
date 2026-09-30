@@ -17,7 +17,7 @@ default) names `row/v1` and `standard` names `canonical/v1`. The CLI selects
 the identity from a fresh registry against the plan before anything runs,
 and a run reports the identity it resolved. Both implement the canonical
 interpreter's continuation contract (CONTINUATION-PLUGIN-1; see
-[the continuation plane](../continuation-plane-inventory.md)). An explicit
+[the continuation plane](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/continuation-plane-inventory.md)). An explicit
 `--engine` wins over `LARQL_KV_ENGINE`; unsupported values refuse. Attention
 windows come from the V3 plan, so a separate `--context-window` override refuses. `no-cache`
 (also `--kv-cache none`) retains the input history and replays it through fresh

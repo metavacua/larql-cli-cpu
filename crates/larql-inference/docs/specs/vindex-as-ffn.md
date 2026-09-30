@@ -461,7 +461,7 @@ or both; clients do not rebalance based on which one is faster.
 ### 9.2 Router fanout
 
 `larql-router` already implements layer-range fanout for `/v1/walk-ffn`
-(see `crates/larql-server/docs/router-spec.md`). The same shard map
+(see [`crates/larql-server/docs/router-spec.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/docs/router-spec.md)). The same shard map
 applies to `/v1/ffn-lookup`: requests for layer `L` go to the shard
 owning `L`'s range. No new routing logic; only a new endpoint name.
 
@@ -561,8 +561,8 @@ Required tests for this spec to be marked Implemented:
 - `~/chris-source/chris-experiments/shannon/52_vindex_as_ffn/RESULTS.md`
 - `~/chris-source/chris-experiments/shannon/53_sharded_vindex/README.md`
 - `~/chris-source/chris-experiments/shannon/51_ffn_remote_split/README.md`
-- `crates/larql-server/docs/server-spec.md` (existing transport)
-- `crates/larql-server/docs/router-spec.md` (existing fanout)
+- [`crates/larql-server/docs/server-spec.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/docs/server-spec.md) (existing transport)
+- [`crates/larql-server/docs/router-spec.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/docs/router-spec.md) (existing fanout)
 - `crates/larql-inference/src/vindex/walk_ffn/mod.rs` — WalkFfn routing
   table and the actual decode path this spec sits on top of
 - `crates/larql-inference/src/vindex/walk_ffn/sparse.rs` — the SAXPY

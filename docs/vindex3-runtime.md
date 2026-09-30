@@ -10,7 +10,7 @@ and serving seams; they are not the limit of the execution substrate.
 Canonical decode also exposes observation. A prepared image pins operands and
 realization; `step_observed` subscribes to its execution boundaries, and the
 runtime recorder binds carrier statistics, optional lens readouts, provenance
-and receipts into a run record. The [Observatory](../observatory/README.md)
+and receipts into a run record. The [Observatory](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/observatory/README.md)
 validates and replays that evidence. See
 [observation and intervention](vindex3/observation-and-intervention.md) for
 head-capture scope, descriptive attribution and counterfactual boundaries.
@@ -190,7 +190,7 @@ declared.
 ## 5. Serving — binding fork, `V3Model`, the OpenAI surfaces
 
 The V2/V3 distinction is decided **once**, at model binding.
-`bootstrap::load_artifact` (`crates/larql-server/src/bootstrap/`)
+`bootstrap::load_artifact` ([`crates/larql-server/src/bootstrap/`](https://github.com/metavacua/larql-to-sparql/tree/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/bootstrap))
 detects the artifact's container generation
 (`larql_vindex::format::generation::detect_generation`) and binds with
 the matching loader, returning a `LoadedArtifact`:
@@ -206,12 +206,12 @@ A VINDEX3 container binds as an executable program — it structurally
 cannot take the V2 path, whose `load_vindex_config` refuses non-V2
 generations. Nothing downstream re-detects the format: the server keeps
 V3 models in a separate `v3_models` list inside the coherent
-`AppState.model_set: RwLock<ModelSet>` snapshot (`crates/larql-server/src/state/model_set.rs`),
+`AppState.model_set: RwLock<ModelSet>` snapshot ([`crates/larql-server/src/state/model_set.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/state/model_set.rs)),
 and `AppState::served` (same file) resolves a request's model id to a
 `ServedModel::V2` or `ServedModel::V3` — the single request-time
 decision point.
 
-`V3Model` (`crates/larql-server/src/vindex3.rs`) is one bound container:
+`V3Model` ([`crates/larql-server/src/vindex3.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/vindex3.rs)) is one bound container:
 the opened `Vindex3Runtime<ProductionBackend>` plus serving glue (an id
 derived from the container directory name, and the container's
 `tokenizer.json` — the text API cannot serve ids-only). It holds no
@@ -226,7 +226,7 @@ VINDEX3 container → Vindex3Runtime → CanonicalKvState
     → existing SSE/JSON shaping
 ```
 
-`crates/larql-server/src/routes/openai/v3_completions.rs` serves
+[`crates/larql-server/src/routes/openai/v3_completions.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/routes/openai/v3_completions.rs) serves
 `/v1/completions` on a V3 runtime. Everything wire-shaped is **shared**
 with the V2 path (`build_text_completion_chunk`, `finalize_completion`,
 the SSE assembly, the response structs), so the two runtimes cannot
@@ -303,12 +303,12 @@ backend/operator limitations are described in the
 carrier capture does not imply that every backend exposes head internals.
 
 CPU dense FFN operation workers keep attention and row KV local. See the
-[distributed FFN guide](ffn/distributed.md#dense-ffn-operation-provider) for
+[distributed FFN guide](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/ffn/distributed.md#dense-ffn-operation-provider) for
 `--v3-ffn-shards`, binding checks, failure semantics and the supported scope.
 
 For per-position wall time and exact HTTP body byte counts, use
-[`--v3-profile`](ffn/v3-dense-profile.md) on the local and remote dense arms.
+[`--v3-profile`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/ffn/v3-dense-profile.md) on the local and remote dense arms.
 
-CPU [routed expert operation workers](ffn/v3-routed-experts.md) additionally
+CPU [routed expert operation workers](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/ffn/v3-routed-experts.md) additionally
 keep routing and ordered weighted reduction local. The first scope is packed
 MXFP4 single-stream softmax models, with exact binary HTTP expert batches.

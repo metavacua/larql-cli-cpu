@@ -76,7 +76,7 @@ invalidation. Wins: vindex↔cache gap closed from ~20% to ~7% on
 the steady-state shard-query bench; cross-layer mutation cost
 cut by ~17% (218.8 → 181.9 µs at n=256/d=1024) because mutating
 layer B no longer evicts layer A's cache. See
-`crates/larql-server/benches/shard_query.rs`.
+[`crates/larql-server/benches/shard_query.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/benches/shard_query.rs).
 
 Coverage at this point: aggregate 90.86% lines, 105 of 147 files at the 90%
 default, 42 debt baselines. The `patch/overlay.rs` baseline (82%) was the one
@@ -655,7 +655,7 @@ entry can land alongside.
 Earlier ROADMAPs sometimes drifted between `bench`, `bench_generate`,
 and `--warmup 0` numbers — those are not comparable.
 
-> **Superseded 2026-08-22 — `bench/prompts/README.md` is the protocol of
+> **Superseded 2026-08-22 — [`bench/prompts/README.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/bench/prompts/README.md) is the protocol of
 > record, and it pins `--warmup 16 -n 256`.** Two standardisations existed
 > in this repo, neither citing the other, and this one loses on its own
 > evidence: the prompts README measures that *a 49-step run reads ~22%

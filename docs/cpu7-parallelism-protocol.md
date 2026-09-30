@@ -3,7 +3,7 @@
 Pre-registered 2026-08-25, before any measurement. Gates in this file are
 FROZEN: they were written without a number in hand and they do not move
 afterwards. See `docs/cpu-execution-roadmap.md` §6 for why this programme
-exists, and `bench/prompts/quality-bank-1/CPU5-Q4Q8-QUALITY.md` for the
+exists, and [`bench/prompts/quality-bank-1/CPU5-Q4Q8-QUALITY.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/bench/prompts/quality-bank-1/CPU5-Q4Q8-QUALITY.md) for the
 method this inherits.
 
 ---

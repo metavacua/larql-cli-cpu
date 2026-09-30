@@ -120,11 +120,11 @@ globally. Not hypothetical: this is Kimi-Linear-48B, executing in-tree.*
   `EXPLAIN` (`explain.rs:142`).
 - **The deletion invariant does not hold for KDA/MLA execution today.**
   The branch condition is clean — container-typed on the persisted
-  `operator: "kda" | "mla"` (`kimi_source.rs:141-151`), no
+  `operator: "kda" | "mla"` ([`kimi_source.rs:141-151`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-vindex/src/format/vindex3/opplan/exec/kimi_source.rs#L141-L151)), no
   model_type/family dispatch anywhere in opplan/plan. But the executed
   body is a family-shaped loader that bypasses
   `ComponentOpPlan`/`OperandRole` entirely: hard-coded HF tensor
-  spellings (`kimi_source/model.rs:33-106`), `MLA_KV_A_NORM_EPS = 1e-6`
+  spellings ([`kimi_source/model.rs:33-106`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-vindex/src/format/vindex3/opplan/exec/kimi_source/model.rs#L33-L106)), `MLA_KV_A_NORM_EPS = 1e-6`
   ("The graph carries the config value; **this one fact it cannot
   carry**"), `MLA_CACHE_POSITIONS = 64`, a `first_k_dense_replace=1`
   panic message, `kimi_*` Metal kernels — and it is reachable only from
@@ -179,7 +179,7 @@ rules.*
   Six call sites resolve "the text model" by `find(role ==
   PrimaryText)` — first-match semantics that go quietly wrong, not
   loudly, the day two text-shaped components exist (`plan/mod.rs:425`,
-  `capability.rs:285`, `encode/mod.rs:330`, `represent/mod.rs:226`,
+  `capability.rs:285`, `encode/mod.rs:330`, [`represent/mod.rs:226`](https://github.com/metavacua/larql-to-sparql/blob/a5681816b187dab0918ca9c5e29b9b8a6bb51e15/crates/larql-vindex/src/format/vindex3/represent/mod.rs#L226),
   `sensitivity.rs:106`, `consequence.rs:254`).
 - **There is exactly one species of edge.** `HiddenStateEdge`
   (`edge.rs:13-27`) has five fields and no kind discriminator;

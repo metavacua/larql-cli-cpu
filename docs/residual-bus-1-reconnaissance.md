@@ -47,13 +47,13 @@ stack**: `stack.rs` / `token.rs` / `stack_metal.rs`. Its only non-test caller is
 REPRESENT's teacher-forced Metal measurement (`represent/measure/teacher_forced.rs:365,531`),
 reached only through `TeacherForcedExecutor`, which no CLI or server command
 registers. It is a transcription witnessed against the Python oracle
-(`tests/stack_parity.rs:377`, `generate_metal.rs:353`). It is not an execution
+(`tests/stack_parity.rs:377`, [`generate_metal.rs:353`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-vindex/src/format/vindex3/opplan/exec/tests/generate_metal.rs#L353)). It is not an execution
 path the bus must own.
 
 The earlier documents took "inline adds exist" to mean "production bypasses the
 bus" without checking reachability. That is corrected in dated sections of
-[`residual-bus-lcp-1.md`](residual-bus-lcp-1.md) and
-[`residual-bus-0.md`](residual-bus-0.md).
+[`residual-bus-lcp-1.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/residual-bus-lcp-1.md) and
+[`residual-bus-0.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/residual-bus-0.md).
 
 **A side finding (not BUS-1).** The two hand paths sum Kimi's shared expert in
 different orders:
@@ -61,7 +61,7 @@ different orders:
 - **CPU:** routed experts first, then the shared expert
   (`kimi_moe_block.rs:214-231`).
 - **Metal `kimi_moe_combine`:** the shared expert is folded into the same loop
-  as slot `top_k` with weight 1.0 (`shaders/kimi_layer.rs:164-199`).
+  as slot `top_k` with weight 1.0 ([`shaders/kimi_layer.rs:164-199`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/shaders/kimi_layer.rs#L164-L199)).
 
 Both paths are gated against the Python oracle; neither is gated against the
 other. This belongs to whoever owns the Kimi Metal ladder.
@@ -148,7 +148,7 @@ A bus claim is honest only if what is outside it says so.
 
 | Path | Status | Refusal today |
 |---|---|---|
-| Lowered Metal (`lowering::stack`) | adds fused into kernels (`attention.rs:367-426`, `ffn.rs:118-202`, `moe_gpu_route/encode.rs:560`, `stack.rs:518-537`) | `observe`/`--intervene` refused before execution (`prepare.rs:246-254`, `tests/decode.rs:214-217`). **There is no automated lowered-vs-interpreter parity test**; the lowering tests compare against hand-transcribed references |
+| Lowered Metal (`lowering::stack`) | adds fused into kernels (`attention.rs:367-426`, `ffn.rs:118-202`, [`moe_gpu_route/encode.rs:560`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/moe_gpu_route/encode.rs#L560), [`stack.rs:518-537`](https://github.com/metavacua/larql-to-sparql/blob/fd38666857a1f6b2e740def57367f3a1ba3daeb5/crates/larql-compute-metal/src/lowering/stack.rs#L518-L537)) | `observe`/`--intervene` refused before execution (`prepare.rs:246-254`, `tests/decode.rs:214-217`). **There is no automated lowered-vs-interpreter parity test**; the lowering tests compare against hand-transcribed references |
 | Hand-composed Kimi stack / `HybridStack` | inline adds, `*Trace` structs | none needed; not registered as an execution path |
 | Legacy (`larql-compute` / `larql-compute-metal` decode) | many add sites, including fused kernels | migration target by programme rule |
 

@@ -26,7 +26,7 @@ The `quic` and `http3` features are explicit opt-ins. Identity, TLS pinning and
 message framing belong to these transports; enabling them does not enable an
 unsupported model, representation or router operation. Registration and
 capability announcements are interpreted by [larql-router](../larql-router/README.md)
-and [larql-server](../larql-server/README.md).
+and [larql-server](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/README.md).
 
 ```bash
 cargo test -p larql-router-protocol

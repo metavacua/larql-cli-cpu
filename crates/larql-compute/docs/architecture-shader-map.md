@@ -1,6 +1,6 @@
 # Architecture → Metal shader map
 
-**Class: ARCHIVE.** This family-routing map records an earlier backend design. Current [Metal implementation](../../larql-compute-metal/README.md) and [V3 lowering contracts](../../../docs/lowering-plane-inventory.md) own present dispatch support.
+**Class: ARCHIVE.** This family-routing map records an earlier backend design. Current [Metal implementation](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/README.md) and [V3 lowering contracts](../../../docs/lowering-plane-inventory.md) own present dispatch support.
 
 **Date**: 2026-05-09
 **Purpose**: Make obvious which Metal shaders each model architecture dispatches to. Bridges `crates/larql-models/src/architectures/{family}.rs` (architecture trait implementations) to `crates/larql-compute/src/metal/shaders/*.rs` (the kernels themselves), via the dispatch logic in `metal/decode/`, `metal/stages/`, `metal/ops/`, `metal/prefill.rs`, `metal/decode_hybrid.rs`.
@@ -197,7 +197,7 @@ done
 2. Add detection logic in `crates/larql-models/src/detect/`.
 3. Add at least one entry in `crates/larql-inference/tests/test_logits_goldens.rs` with the model's golden tokens.
 4. Bench with `./target/release/larql bench <vindex>` to verify dispatch works end-to-end.
-5. **If a new shader is needed**: add it under `crates/larql-compute-metal/src/shaders/`, document its applicability in `shader-inventory.md`, register in `metal/mod.rs::all_shaders`, and add a row to this doc's per-architecture table.
+5. **If a new shader is needed**: add it under [`crates/larql-compute-metal/src/shaders/`](https://github.com/metavacua/larql-to-sparql/tree/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/shaders), document its applicability in `shader-inventory.md`, register in `metal/mod.rs::all_shaders`, and add a row to this doc's per-architecture table.
 
 ## Related
 

@@ -110,7 +110,7 @@ partials accumulate in f32, the merge runs in f32. The only permitted
 difference from the serial kernel is reassociation of the weighted-V sum.
 Gated by `max_rel < 1e-4` against the serial f32 kernel, with negative
 controls calibrated at ~1e-1 and bitwise determinism across repeats — see
-`crates/larql-compute-metal/tests/test_kernel_kv_attention_seqpar.rs` and
+[`crates/larql-compute-metal/tests/test_kernel_kv_attention_seqpar.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/tests/test_kernel_kv_attention_seqpar.rs) and
 its two siblings. That tolerance separates reassociation from *defect*. It
 cannot separate reassociation from *approximation*, which is why no
 representation-width change is allowed inside B2.
@@ -187,7 +187,7 @@ env -u LARQL_KV_SEQPAR LARQL_GPU_ROUTE=1 ./target/release/larql bench ...
 The `off` arm is `LARQL_KV_SEQPAR=off` on the same binary.
 
 Both of those, the bracket ordering, and the two arithmetic preconditions
-are wrapped by [`scripts/kv-ladder-bracket.sh`](../scripts/kv-ladder-bracket.sh),
+are wrapped by [`scripts/kv-ladder-bracket.sh`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/scripts/kv-ladder-bracket.sh),
 which is the supported way to run a block:
 
 ```bash
@@ -336,7 +336,7 @@ The instrument hid this. `bracket_rested.sh`, the script that produced the
 readings recorded below, formatted the bench row as
 `prefill / mean / tok-s` — dropping both `n_steps` and the note column — so
 it was structurally incapable of displaying a truncated arm. The
-replacement, [`scripts/kv-ladder-bracket.sh`](../scripts/kv-ladder-bracket.sh),
+replacement, [`scripts/kv-ladder-bracket.sh`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/scripts/kv-ladder-bracket.sh),
 gates on the step count directly and voids the block when any arm falls
 short of `n-1`, instead of relying on a human to read a note. Note the
 general shape, which is the same one as the fixture rules above: *a gate
@@ -789,7 +789,7 @@ below.
 
 ### The fault is on main and predates seqpar
 
-Run 2026-08-16 with `scripts/kv-seqpar-tree-control.sh`: one **fresh
+Run 2026-08-16 with [`scripts/kv-seqpar-tree-control.sh`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/scripts/kv-seqpar-tree-control.sh): one **fresh
 process per row**, C prompt, `--warmup 0 -n 8`, arms interleaved, a
 watchdog on every process. Integrity only — the machine was on battery for
 the whole sweep, so no ms/token column below is a timing.
@@ -830,7 +830,7 @@ Read across the rows, not down the columns:
   discriminator is prompt A with `-n 2048`.
 
 **HANG is a fifth face.** The seqpar r3 process sat 6 min 55 s at 0 % CPU
-in `-[_MTLCommandBuffer waitUntilCompleted]` from `decode/token/finish.rs:55` (the wait whose site label still reads token.rs:761),
+in `-[_MTLCommandBuffer waitUntilCompleted]` from [`decode/token/finish.rs:55`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/decode/token/finish.rs#L55) (the wait whose site label still reads token.rs:761),
 inside `prefill_for_streaming`; the unified log shows no GPU reset or
 fault; `kill -9` was the only exit. A hang prints **no row**, so it is
 invisible to every row-based check — including preconditions 7–9 — and a
@@ -890,7 +890,7 @@ for every face from a different angle: garbage output whose argmax is EOS
 fault, "completing" at ~0.5 ms/step (CATASTROPHIC — and the ignored buffers
 begin whenever the fault does, hence the fast, slow and very-slow prefill
 signatures); a fault the GPU does not recover from (HANG, twice, both at
-`decode/token/finish.rs:55` inside the prompt pass); and, plausibly, #229's own
+[`decode/token/finish.rs:55`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/decode/token/finish.rs#L55) inside the prompt pass); and, plausibly, #229's own
 one-position-row NaN. What is not yet known is **which kernel and which
 buffer** — Metal shader validation names both, and that is the run after
 this one. Same-day controls: `LARQL_FUSED_DECODE_HEAD=0` (unfused head)
@@ -1109,7 +1109,7 @@ the planner.
 
 ### The Glimmer surface
 
-`scripts/glimmer-seqpar-surface.sh`, `bench/prompts/glimmer/span-*.ids`,
+[`scripts/glimmer-seqpar-surface.sh`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/scripts/glimmer-seqpar-surface.sh), `bench/prompts/glimmer/span-*.ids`,
 64 decode tokens, **300 s rest before every arm** — the first attempt ran
 arms back-to-back and read 76 → 74 → 79 → 121 → 159 → 148 across nine
 minutes: a monotone drift in *time* that a reader would score as a

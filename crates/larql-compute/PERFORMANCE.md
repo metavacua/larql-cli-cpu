@@ -254,7 +254,7 @@ shader-module constants while the bound pipeline has different geometry.
   "kernel-level drift" to "dispatch-geometry mismatch."
 - `crates/larql-compute/src/metal/trait_impl/quant_matvec.rs::q4k_matvec`
   — fixed dispatch site.
-- `crates/larql-compute-metal/src/moe_dispatch/` — three sibling sites
+- [`crates/larql-compute-metal/src/moe_dispatch/`](https://github.com/metavacua/larql-to-sparql/tree/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/moe_dispatch) — three sibling sites
   fixed in the same pass.
 
 ---

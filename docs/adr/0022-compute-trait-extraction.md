@@ -6,9 +6,9 @@ Steps 2–6 to follow in sequenced commits.
 **Depends on:** ADR-0019 (`larql-compute-metal` extracted as sibling crate).
 **Affects:**
 - `crates/larql-compute/` (gains forward-pass, residual, KvDispatch, AsyncComputeBackend),
-- `crates/larql-compute-metal/` (gains Metal trait impls),
+- [`crates/larql-compute-metal/`](https://github.com/metavacua/larql-to-sparql/tree/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal) (gains Metal trait impls),
 - `crates/larql-inference/` (loses substrate code; keeps engines, orchestration, FFN routing),
-- `crates/larql-kv/`, `crates/larql-cli/`, `crates/larql-server/` (re-import paths through inference re-exports — no caller changes required).
+- `crates/larql-kv/`, `crates/larql-cli/`, [`crates/larql-server/`](https://github.com/metavacua/larql-to-sparql/tree/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server) (re-import paths through inference re-exports — no caller changes required).
 
 ---
 
@@ -455,7 +455,7 @@ Concrete next-session steps:
    `crates/larql-compute/src/kv_dispatch/` with the same
    `Option<&VectorIndex>` → `Option<&dyn KvIndex>` substitution.
 5. Move `crates/larql-inference/src/kv_dispatch/metal.rs` to
-   `crates/larql-compute-metal/src/kv_dispatch_impl.rs` (orphan-rule
+   [`crates/larql-compute-metal/src/kv_dispatch_impl.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/kv_dispatch_impl.rs) (orphan-rule
    forced once the trait moves).
 6. Same dance for `AsyncComputeBackend` (smaller — kv_dispatch is the
    bulk of the work).
@@ -493,7 +493,7 @@ prep, since `cached.rs` already needed it.
 
 ### Step 3e: `KvDispatch` Metal impl to compute-metal
 Forced by orphan rule the moment the trait moved. ~580 LOC moved to
-`crates/larql-compute-metal/src/kv_dispatch_impl.rs`. The 4 `coarse_*`
+[`crates/larql-compute-metal/src/kv_dispatch_impl.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/kv_dispatch_impl.rs). The 4 `coarse_*`
 fused-dispatch methods stub out to `None` (their inference-side
 `fused_*` helpers can't be reached from compute-metal without a
 cycle; engines fall back to the CPU path). Real Metal fused dispatch
@@ -743,7 +743,7 @@ Step 7 fix:
    take `&dyn KvIndex` instead of `&VectorIndex`).
 4. Wired `MetalBackend::coarse_prefill` / `coarse_prefill_with_state`
    / `coarse_decode_step` / `coarse_decode_step_with_state` in
-   `crates/larql-compute-metal/src/kv_dispatch_impl.rs` to call the
+   [`crates/larql-compute-metal/src/kv_dispatch_impl.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/kv_dispatch_impl.rs) to call the
    moved `fused_*` helpers — restoring the Metal-fused fast path.
 
 ### Bench recovery (Gemma 3 4B Q4K Metal, 50 tokens)

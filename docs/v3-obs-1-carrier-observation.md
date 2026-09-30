@@ -259,7 +259,7 @@ Python V3 bindings, experiment runner, Metal per-layer instrumentation, closing 
 ## Housekeeping owed before V3 trace terminology becomes public
 
 Label the legacy residual trace as belonging to the pre-VINDEX3 walk path in
-`docs/residual-trace.md`, the TraceStore section of `docs/larql-python.md`, and
+`docs/residual-trace.md`, the TraceStore section of [`docs/larql-python.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/larql-python.md), and
 `crates/larql-inference/docs/trace-format.md`. The two trace concepts may coexist for
 now; their scopes may not be implicit.
 

@@ -106,7 +106,7 @@ From the whole-codebase review ([`docs/audits/codebase-review-2026-05-28.md`](..
 - **P0 — MoE forward panics on served paths.** `src/moe/forward.rs:191,211` use `unwrap_or_else(panic!)` — same fail-loud class as the inference paths; convert to `?` once `FfnBackend::forward` is fallible (tracked in larql-inference roadmap).
 - **Medium — `embed_tokens_pub`** skips the vocab bound that `vocab_proj` applies; OOV/unbounded token id → panic. Route through a bounds-checked helper.
 - **Low — debug-only FFI bounds check** at `q4_matvec.rs:29` (no check in release).
-- Note: the Metal KV-cache OOB bug lives in `larql-compute-metal` (no crate roadmap) — tracked at workspace [`ROADMAP.md`](../../ROADMAP.md) §"Codebase hardening" item 2.
+- Note: the Metal KV-cache OOB bug lives in `larql-compute-metal` (no crate roadmap) — tracked at workspace [`ROADMAP.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/ROADMAP.md) §"Codebase hardening" item 2.
 
 ## 2026-05-25 — Multi-modal Phase 2, Granite Vision (PR #144)
 
@@ -222,11 +222,11 @@ Closes the bug as "expected behaviour given PLE-not-in-Metal limitation". The ac
 
 ### D-CROSS-PARITY Phase 1 — cross-arch decode bench shipped
 
-`scripts/bench-cross-arch.sh` + `bench/baselines/cross-arch/` + `make bench-cross-arch[ ARGS=--save-baseline\|--compare]`. Captured first under-load run; cool-machine baseline pending. Operationalises ADR-017 model-agnosticity check; surfaces thermal artifacts (every-arch-regresses-simultaneously signature).
+`scripts/bench-cross-arch.sh` + [`bench/baselines/cross-arch/`](https://github.com/metavacua/larql-to-sparql/tree/f02693c90c1a9d51438dcc0a2479ba46959fb913/bench/baselines/cross-arch) + `make bench-cross-arch[ ARGS=--save-baseline\|--compare]`. Captured first under-load run; cool-machine baseline pending. Operationalises ADR-017 model-agnosticity check; surfaces thermal artifacts (every-arch-regresses-simultaneously signature).
 
 **Phase 2 (per-shader)** still open in ROADMAP — current sweep is end-to-end-only; per-shader parity tests (e.g. dispatching `q4k_ffn_gate_up_8sg` against synthetic input on multiple K dimensions to surface kernel-specific arch sensitivities) would catch deeper regressions earlier.
 
-Touched: `scripts/bench-cross-arch.sh`, `bench/baselines/cross-arch/README.md`. Phase 2: parametrised tests in `crates/larql-compute/tests/`.
+Touched: `scripts/bench-cross-arch.sh`, [`bench/baselines/cross-arch/README.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/bench/baselines/cross-arch/README.md). Phase 2: parametrised tests in `crates/larql-compute/tests/`.
 
 ## 2026-05-04 — Perf snapshot: M3 Max, real vindex
 

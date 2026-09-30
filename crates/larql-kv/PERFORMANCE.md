@@ -263,7 +263,7 @@ The falsifiable predictions:
 - `state_capture` (engine-side timer on the whole backend call) drops
   monotonically `Full → HOnly → None`. If it doesn't drop under
   `HOnly`, the kernel didn't honor the mask — re-check the `dump_kv`
-  branches in `crates/larql-compute-metal/src/decode/mod.rs`.
+  branches in [`crates/larql-compute-metal/src/decode/mod.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/decode/mod.rs).
 - `state_materialise` and `state_append` drop to ~0 under `None` (the
   engine drops handles without consuming them).
 - Total tok/s rises on Metal. The expected ceiling is `standard`'s

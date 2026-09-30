@@ -134,8 +134,8 @@ loop auditable; none independently grants a candidate behavioral approval.
 The implementation lives in
 [`represent/`](../../crates/larql-vindex/src/format/vindex3/represent/), including
 `candidate_authority`, `ingest`, `state`, `search_evidence` and `actuate`.
-The [REPRESENT contract index](../represent-v1-contract-index.md) and
-[optimizer contract index](../optimizer-contract-index.md) name the tests that
+The [REPRESENT contract index](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/represent-v1-contract-index.md) and
+[optimizer contract index](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/optimizer-contract-index.md) name the tests that
 protect their respective frozen contracts. They are stronger authorities than
 a blanket claim that the optimizer is finished.
 
@@ -144,7 +144,7 @@ decoding, compilation and execution support. The
 [optimizer MCP design](../represent-optimizer-mcp.md) is a design document,
 not an inventory of shipped commands.
 
-[REPRESENT-CAL-1](../represent-cal-1.md) is the calibrated-recipe implementation
+[REPRESENT-CAL-1](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/represent-cal-1.md) is the calibrated-recipe implementation
 contract. CAL-1.1 supplies content-bound calibration artifacts and exact dense
 projection input capture through the library API; GPTQ dispatch and its admission
 run remain later stages.
@@ -152,5 +152,5 @@ run remain later stages.
 
 CAL-1.2 adds explicit library nearest/GPTQ recipe dispatch, execution-ordered
 candidate-prefix evolution, and payload-bound derivation in `candidate.json`.
-See the [CAL-1.2 implementation record](../represent-cal-1.md#cal-12-implementation-record)
+See the [CAL-1.2 implementation record](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/represent-cal-1.md#cal-12-implementation-record)
 for supported sites and the boundary between integration and R4 admission.

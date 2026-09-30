@@ -4,7 +4,7 @@ Multi-agent deep review of the larql workspace (17 crates, ~415K LOC Rust):
 one reader per crate, adversarial verification of every high/critical finding,
 then synthesis. Two headline findings were additionally confirmed by hand
 (see ✅ markers). This document is the canonical record; the prioritized
-actions are tracked in [`ROADMAP.md`](../../ROADMAP.md) §"Codebase hardening
+actions are tracked in [`ROADMAP.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/ROADMAP.md) §"Codebase hardening
 (review 2026-05-28)" and in the affected crate-local roadmaps.
 
 ## Method
@@ -60,7 +60,7 @@ high/medium items worth clearing before the next serving release.
 
 ### Unsafe / soundness
 
-- ✅ **`larql-compute-metal/src/shaders/kv_attention.rs:186-187`** (and the hot
+- ✅ **[`larql-compute-metal/src/shaders/kv_attention.rs:186-187`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/shaders/kv_attention.rs#L186-L187)** (and the hot
   `attn_fused` / `kv_append_attend_fused` shaders) — KV append writes
   `K_cache[pos*total + tid]` guarded only by `if (tid >= total) return;` —
   **no `pos < max_seq` clamp anywhere in the kernel**. `ensure_prompt_fits`
@@ -73,7 +73,7 @@ high/medium items worth clearing before the next serving release.
   lifetime tie; `t = model.trace(p); del model; t.summary()` is
   **use-after-free** on mmap-backed weights. Fix: store `Py<PyWalkModel>` (or
   `Arc`-shared owned data).
-- **`larql-python/src/walk.rs:207-223`** (medium) — f32 embeddings
+- **[`larql-python/src/walk.rs:207-223`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-python/src/walk.rs#L207-L223)** (medium) — f32 embeddings
   `Vec::from_raw_parts` skips the `vocab_size*hidden_size*4 <= mmap.len()`
   length check its sibling tensor (:148) and gate (:234) paths both perform;
   triggered at model-load on a truncated/mismatched `embeddings.bin`.

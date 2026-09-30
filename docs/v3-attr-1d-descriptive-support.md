@@ -7,7 +7,7 @@
 (HEAD-OBS-1 merged)
 
 **Machine contract:**
-[`bench/attr-1d/attr1d-contract.json`](../bench/attr-1d/attr1d-contract.json)
+[`bench/attr-1d/attr1d-contract.json`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/bench/attr-1d/attr1d-contract.json)
 
 **Claim boundary:** descriptive attention-head and source support only; no causal
 claim, event selection from intervention evidence, or authorization to alter

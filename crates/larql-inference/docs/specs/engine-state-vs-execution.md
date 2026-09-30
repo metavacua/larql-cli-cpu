@@ -445,6 +445,6 @@ are this spec's principle made concrete:
 The cut held: every engine-side state-policy change in W10 lives in
 `crates/larql-kv/src/engines/*`, every execution-side change lives in
 `crates/larql-compute/src/kv_dispatch/`,
-`crates/larql-compute-metal/src/kv_dispatch_impl.rs`, and
-`crates/larql-compute-metal/src/decode/mod.rs`. No engine had to
+[`crates/larql-compute-metal/src/kv_dispatch_impl.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/kv_dispatch_impl.rs), and
+[`crates/larql-compute-metal/src/decode/mod.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/decode/mod.rs). No engine had to
 import Metal-specific types or branch on backend identity.

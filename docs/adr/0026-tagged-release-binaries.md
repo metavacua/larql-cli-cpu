@@ -7,7 +7,7 @@ crates.io as empty placeholders — 12 on 2026-07-24, the remaining 6
 after the rate-limit window reopened (see addendum below) — that is a
 distinct, narrower action from the publishing this ADR still declines.
 **Affects:** `.github/workflows/release.yml` (new), `crates/larql-cli`,
-`crates/larql-server`, workspace `Cargo.toml` (`[profile.release-dist]`).
+[`crates/larql-server`](https://github.com/metavacua/larql-to-sparql/tree/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server), workspace `Cargo.toml` (`[profile.release-dist]`).
 **Related:** DEC funnel v0.5 (`docs/dec-funnel.md`), which is the concrete
 pain this would remove; ADR-0019 (backend factory / `BackendKind`, relevant
 to what a release binary actually contains per platform).

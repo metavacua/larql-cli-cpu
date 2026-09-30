@@ -16,14 +16,14 @@ win and a ROADMAP correction.
 
 ### In-process: `MetalBackend::moe_scratch`
 
-`crates/larql-compute-metal/src/lib.rs` declares
+[`crates/larql-compute-metal/src/lib.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/lib.rs) declares
 
 ```rust
 moe_scratch: std::sync::Mutex<Option<moe_dispatch::MoeScratch>>,
 ```
 
 `MetalBackend::decode_token_q4k_moe` at
-`crates/larql-compute-metal/src/moe_dispatch/` holds the lock
+[`crates/larql-compute-metal/src/moe_dispatch/`](https://github.com/metavacua/larql-to-sparql/tree/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/moe_dispatch) holds the lock
 across the entire decode and only calls `MoeScratch::new` on a shape
 mismatch:
 
@@ -62,7 +62,7 @@ The only assignment is the shape-mismatch reallocation; no `.take()` or
 
 ### Server: `AppState::moe_scratches`
 
-`crates/larql-server/src/state/loaded_model.rs:120-122` declares
+[`crates/larql-server/src/state/loaded_model.rs:120-122`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/state/loaded_model.rs#L120-L122) declares
 
 ```rust
 pub moe_scratches: std::sync::Mutex<
@@ -70,7 +70,7 @@ pub moe_scratches: std::sync::Mutex<
 >,
 ```
 
-`crates/larql-server/src/routes/expert/metal.rs:131-136` looks the
+[`crates/larql-server/src/routes/expert/metal.rs:131-136`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/routes/expert/metal.rs#L131-L136) looks the
 scratch up by shape and inserts on miss:
 
 ```rust
@@ -207,7 +207,7 @@ Cold vs warm (warmup=0, MoE Phase 2 acceptance check):
 
 ### 6c. inter=704 accuracy bug (separate from allocation)
 
-`crates/larql-server/src/routes/expert/metal.rs:42-57` documents an
+[`crates/larql-server/src/routes/expert/metal.rs:42-57`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/routes/expert/metal.rs#L42-L57) documents an
 unresolved accuracy bug in the Metal MoE expert kernel for Gemma 4
 26B-A4B-it (inter=704, top_k=8): cosine similarity ≈ 0.7 vs CPU
 reference. The whole Metal expert path is therefore opt-in

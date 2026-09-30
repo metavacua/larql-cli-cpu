@@ -1231,7 +1231,7 @@ client sees. See the runtime document §5.
 
 ### 18.3 The `vindex` reader
 
-The format-native tool (`crates/vindex-cli`, binary `vindex`) answers
+The format-native tool ([`crates/vindex-cli`](https://github.com/metavacua/larql-to-sparql/tree/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/vindex-cli), binary `vindex`) answers
 **from the artifact alone** — `index.json`, the system graph, the
 segment headers — with no inference runtime attached:
 

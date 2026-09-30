@@ -48,7 +48,7 @@ FFN/expert fan-out distributes partial work. Static layer maps do not supply
 whole-model capability announcements. Continuation affinity, patch state and
 local sessions remain distinct from stateless request routing.
 
-The [server README](../crates/larql-server/README.md),
+The [server README](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/README.md),
 [router README](../crates/larql-router/README.md) and
 [protocol README](../crates/larql-router-protocol/README.md) link their source
 contracts. Transport options change delivery, not the artifact's semantics.
@@ -57,7 +57,7 @@ contracts. Transport options change delivery, not the artifact's semantics.
 
 Python sessions bind V2/V3 through LQL; `session.vindex` lazily opens a V2-only
 array view and explicitly refuses on V3. Rebinding with `USE` invalidates that
-view. See the [source build instructions](../crates/larql-python/README.md).
+view. See the [source build instructions](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-python/README.md).
 
 Factory build preflight refuses required reconstruction, logit-match and Hub
 verification that the driver cannot execute. A checksum pass cannot authorize

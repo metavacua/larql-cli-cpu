@@ -29,7 +29,7 @@ translate the artifact into a V2 `ModelWeights` object to make it executable.
 | Model-weight engine contract | [kv_engine](../crates/larql-inference/src/kv_engine/) |
 | V3 runtime/session/record composition | [vindex3](../crates/larql-inference/src/vindex3/) |
 | CPU intent and math | [larql-compute](../crates/larql-compute/README.md) |
-| Metal implementation and controls | [larql-compute-metal](../crates/larql-compute-metal/README.md) |
+| Metal implementation and controls | [larql-compute-metal](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/README.md) |
 | State implementations | [larql-kv](../crates/larql-kv/README.md) |
 
 ## Evidence and capabilities
@@ -47,7 +47,7 @@ be hidden as a backend preference. The shared
 residency, unsupported execution and invalid bindings.
 
 Use [the V3 runtime guide](vindex3-runtime.md) for state/serving details,
-[FFN documentation](ffn/README.md) for routing, and
+[FFN documentation](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/ffn/README.md) for routing, and
 [the KV state policy](../crates/larql-kv/docs/state-policy.md) for continuation
 contracts. The [archived engine guide](archive/README.md) preserves prior
 walkthroughs and measured results without presenting them as today's defaults.

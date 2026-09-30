@@ -1,7 +1,7 @@
 # DEC-readiness review — 2026-07-22
 
 > **Remediation status (2026-07-22):** Batch A (§1a–§1d, §2a first item) is
-> fixed — see [`ROADMAP.md`](../../ROADMAP.md) §"Codebase hardening" →
+> fixed — see [`ROADMAP.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/ROADMAP.md) §"Codebase hardening" →
 > "DEC-readiness review (2026-07-22)" for the per-item summary and the
 > commit that landed it. Batch B items 7 (backend factory + capability
 > dispatch, §3c) and 9 (`SKIP_MOE` name split, §3e) landed 2026-07-22
@@ -22,7 +22,7 @@ Kimi K3), over **network links with adversarial peers**.
 Four parallel readers (security, hardcoding/config, modularity, performance),
 each returning only findings verified against the code with `file:line`
 evidence. This document is the canonical record; prioritized actions are
-tracked in [`ROADMAP.md`](../../ROADMAP.md) §"Codebase hardening" under
+tracked in [`ROADMAP.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/ROADMAP.md) §"Codebase hardening" under
 "DEC-readiness review (2026-07-22)".
 
 ## Verdict
@@ -52,7 +52,7 @@ measurement or a generation.
 
 ### 1a. Q8K has no batched compute on the server [perf + modularity, HIGH] — ✅ FIXED
 
-`crates/larql-server/src/routes/walk_ffn/q8k.rs:199` maps each request entry
+[`crates/larql-server/src/routes/walk_ffn/q8k.rs:199`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/routes/walk_ffn/q8k.rs#L199) maps each request entry
 through `kquant_ffn_forward_layer_q8k`
 (`crates/larql-inference/src/vindex/kquant_forward/walk_ffn.rs:84`), which is
 strictly single-row (`Array2::from_shape_vec((1, …))`, matvec kernels). The
@@ -160,7 +160,7 @@ cli.api_key.is_some()`. The `--grid-key`/`LARQL_GRID_KEY` guards **only** the
 server→router announce bearer and the router's `join` check — it never guards
 the server's own FFN/expert HTTP surface. On a Vast host with adversarial
 peers, `/v1/walk-ffn`, `/v1/experts/*`, `/v1/expert/*` are open. In particular
-`GET /v1/shard/{model_id}/{range}` (`routes/shard.rs:50`) **streams the entire
+`GET /v1/shard/{model_id}/{range}` ([`routes/shard.rs:50`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/routes/shard.rs#L50)) **streams the entire
 on-disk vindex directory as a tar to any caller** — full model-weight
 exfiltration — with `model_id` discoverable via unauthenticated `/v1/models`
 and `/v1/stats`.
@@ -190,7 +190,7 @@ the gRPC grid path did not get it. Fix: hash-then-`ct_eq`.
 
 ### 2e. BF16-monolith expert stride overflow [security, LOW]
 
-`crates/larql-server/src/routes/expert/single.rs:93` and `expert/cpu.rs:115` —
+[`crates/larql-server/src/routes/expert/single.rs:93`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/routes/expert/single.rs#L93) and [`expert/cpu.rs:115`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/routes/expert/cpu.rs#L115) —
 `expert_id * gu_stride` can wrap in release builds, reading a different
 expert's weights (correctness/info) or panicking on a slice index (caught by
 `spawn_blocking` → 500, no process crash). Only the legacy non-`per_layer_ffn`
@@ -216,7 +216,7 @@ or detect the outbound-interface IP.
 `None` (`grid/remote_ffn.rs:64,134,408,502`); `CpuBackend` implements
 `DecodeBackend` with all defaults (`cpu/mod.rs:167`), so it returns `None`.
 The remote-**MoE** CPU path dodges this via a completely different decode stack
-(larql-kv engine + `RemoteMoeFfn`, `run_cmd.rs:751`) selected by an `if metal`
+(larql-kv engine + `RemoteMoeFfn`, [`run_cmd.rs:751`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-cli/src/commands/primary/run_cmd.rs#L751)) selected by an `if metal`
 CLI branch — two divergent decode stacks chosen by a flag, not by capability.
 
 **DEC impact:** `larql bench --ffn` (the DEC-0/DEC-1 single-stream *anchor*)
@@ -288,7 +288,7 @@ off-loopback. (Overlaps 2c.)
 
 ### 3j. Grid-LAN baselines keyed by model only [hardcoding, MED]
 
-`scripts/bench-grid-regress.sh:35` — `bench/baselines/grid-<model>.json` has no
+[`scripts/bench-grid-regress.sh:35`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/scripts/bench-grid-regress.sh#L35) — `bench/baselines/grid-<model>.json` has no
 host/arch dimension; an EPYC run compared against an M3 Max baseline yields a
 meaningless verdict, or silently seeds an EPYC baseline that later gates a Mac
 run. Fix: add an arch/host tag to the baseline key.
@@ -311,8 +311,8 @@ Consolidate at the first new wire format (DEC-6a decision point).
 
 ### 4b. Server-side expert dispatch is per-handler, three shapes [modularity, MED]
 
-`q8k.rs:107` inline Metal-vs-CPU cfg block; `grpc_expert.rs:178` a second,
-differently-shaped one; `expert/layer_batch.rs:105` + `expert/multi_layer_batch.rs:70`
+[`q8k.rs:107`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/routes/walk_ffn/q8k.rs#L107) inline Metal-vs-CPU cfg block; [`grpc_expert.rs:178`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/grpc_expert.rs#L178) a second,
+differently-shaped one; [`expert/layer_batch.rs:105`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/routes/expert/layer_batch.rs#L105) + [`expert/multi_layer_batch.rs:70`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/routes/expert/multi_layer_batch.rs#L70)
 hard-wire `run_experts_cpu_batch` with **no GPU path at all**. A CUDA expert
 backend (G4, "mirroring metal-experts") would be spliced into each handler.
 Extract one `run_experts(state, backend, …)` dispatcher — before G4.
@@ -344,7 +344,7 @@ with 4a.
 
 `build_moe_router_weights` is a **private** helper (`kquant_forward/hidden.rs:93`);
 the server hand-rolls the identical 10-field construction at
-`routes/walk_ffn/core.rs:111`, plus 3 more sites in a server example. The
+[`routes/walk_ffn/core.rs:111`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/routes/walk_ffn/core.rs#L111), plus 3 more sites in a server example. The
 outer-norm + residual combine is duplicated inline (`core.rs:153` vs
 `hidden.rs:121`) with no shared function or cross-test. K3's Stable LatentMoE
 routing changes this structure — make the helper `pub` and share the combine
@@ -352,7 +352,7 @@ before the DEC-6b KDA/LatentMoE port.
 
 ### 4f. Vestigial / asymmetric bits [modularity, SMALL each]
 
-- `/v1/expert/batch` labelled "pre-2026-05-01 legacy" (`routes/expert/mod.rs:12`)
+- `/v1/expert/batch` labelled "pre-2026-05-01 legacy" ([`routes/expert/mod.rs:12`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/routes/expert/mod.rs#L12))
   but still the only path used by `forward_moe_seq` prefill
   (`moe_remote/backend.rs:248`) and still mounted — a replay/CUDA implementer
   can target the wrong wire.
@@ -412,7 +412,7 @@ real (unprefixed) name, `LARQL_DISABLE_Q8K_WIRE`. (This overlaps the
 ## Performance findings not already covered
 
 - **No admission control on compute [perf, HIGH]:** every request is one
-  `spawn_blocking` (`handler.rs:79,115`, `q8k.rs:51`) on the stock 512-thread
+  `spawn_blocking` (`handler.rs:79,115`, [`q8k.rs:51`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/routes/walk_ffn/q8k.rs#L51)) on the stock 512-thread
   blocking pool; 4 clients × 48-layer fan-out = ~192 simultaneous
   multithreaded-BLAS tasks on 8–16 cores. **DEC-2's "≥80% linear at N=4"
   (C3) is exactly where this shows, and the failure looks like tier
@@ -421,7 +421,7 @@ real (unprefixed) name, `LARQL_DISABLE_Q8K_WIRE`. (This overlaps the
   bodies, and pin BLAS to 1 thread per call for the serving build
   (`OPENBLAS_NUM_THREADS=1`).
 - **`--release-mmap-after-request` thrashes concurrent requests [perf, HIGH
-  when set]:** `handler.rs:88`, `q8k.rs:183` call `release_mmap_pages()` after
+  when set]:** `handler.rs:88`, [`q8k.rs:183`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/routes/walk_ffn/q8k.rs#L183) call `release_mmap_pages()` after
   every request; with 4 clients each completing request evicts pages the other
   three are streaming → re-fault storm (the known madvise-churn class,
   per-request now), and in the q8k Metal path releases pages still referenced
@@ -429,7 +429,7 @@ real (unprefixed) name, `LARQL_DISABLE_Q8K_WIRE`. (This overlaps the
   any DEC point run with this flag is measuring page faults — flag in run-record
   hygiene.
 - **q8k endpoint invisible to drain / heartbeat / latency tracking [perf,
-  MED]:** `q8k.rs:41` bumps only `bump_requests()` — no `RifGuard`,
+  MED]:** [`q8k.rs:41`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/routes/walk_ffn/q8k.rs#L41) bumps only `bump_requests()` — no `RifGuard`,
   `requests_total`, or `layer_latency_tracker.record`. GT6 drain can conclude
   "no in-flight" during a q8k burst, and the C7 latency-EMA router
   (`HeartbeatMsg.layer_stats`) is blind to exactly the traffic DEC generates.
@@ -440,7 +440,7 @@ real (unprefixed) name, `LARQL_DISABLE_Q8K_WIRE`. (This overlaps the
   async `buffer_unordered`. The q8k grouping path already reduces spawns to one
   per shard — the f32 path should follow.
 - **`model.patched` fair RwLock held across FFN compute [perf, MED]:** a
-  queued patch/insert write (`patches.rs:155`) blocks all new readers across
+  queued patch/insert write ([`patches.rs:155`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/routes/patches.rs#L155)) blocks all new readers across
   all clients until every in-flight batch-64 compute drains — correlated p99
   spikes; a landmine for the shared-tier demo (C3 is precisely concurrent
   patch + serve). Arc-swap/epoch snapshot of the overlay.

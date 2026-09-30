@@ -183,7 +183,7 @@ cannot beat it on bytes.
 
 1. A `vindex3` export of one pack's per-tensor f32 reconstruction, with provenance (the pack payload digest
    and the source weight digest), used by control 1.
-2. The MLX harness under `bench/prompts/quality-bank-1/`: the copy of `estimate_sensitivities`, its
+2. The MLX harness under [`bench/prompts/quality-bank-1/`](https://github.com/metavacua/larql-to-sparql/tree/f02693c90c1a9d51438dcc0a2479ba46959fb913/bench/prompts/quality-bank-1): the copy of `estimate_sensitivities`, its
    committed upstream diff, pinned versions, the calibration sha256 and controls 2–4.
 3. Arm C's proposer, as a second `Proposer` next to the branch-and-bound (`docs/auto-rep-1.md` reserves
    that trait for this comparison). It must keep 1a's gates: every proposal passes `check_against`,
@@ -258,7 +258,7 @@ bar allows. That gap is a separate LARQL finding and is not investigated here.
 
 # Result, Part 1 (2026-09-28): MLX's score FAILS 1a and 1b, evidence `Unusable`
 
-Scored once, under Amendment 1. Records are in `bench/prompts/quality-bank-1/`: `granite-4.1-3b-prior1-scores.json`
+Scored once, under Amendment 1. Records are in [`bench/prompts/quality-bank-1/`](https://github.com/metavacua/larql-to-sparql/tree/f02693c90c1a9d51438dcc0a2479ba46959fb913/bench/prompts/quality-bank-1): `granite-4.1-3b-prior1-scores.json`
 (280 tensors, with provenance), `granite-4.1-3b-prior1-same-function.json` and `granite-4.1-3b-prior1-part1.json`.
 
 **Controls:**

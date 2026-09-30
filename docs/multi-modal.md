@@ -181,7 +181,7 @@ before editing this section):
 
 - `RunArgs` at `crates/larql-cli/src/commands/primary/run_cmd.rs:72`
   takes `prompt: Option<String>`. No file inputs.
-- Python `Session` at `crates/larql-python/src/session.rs:62–76` wraps
+- Python `Session` at [`crates/larql-python/src/session.rs:62–76`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-python/src/session.rs#L62-L76) wraps
   LQL text queries.
 - ChatTemplate handles Gemma / Mistral / Llama / ChatML / Plain
   (referenced from `docs/virtual-experts-dispatch.md`). Multi-modal
@@ -451,7 +451,7 @@ boundary is at `prefill_from_hidden()`, which receives the fully-spliced
 
 ### Metal encoder feasibility
 
-The existing Metal shader inventory in `crates/larql-compute-metal/src/shaders/`
+The existing Metal shader inventory in [`crates/larql-compute-metal/src/shaders/`](https://github.com/metavacua/larql-to-sparql/tree/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/shaders)
 already covers most of the SigLIP/SigLIP2 encoder pipeline:
 
 | Encoder op | Existing shader | Gap |

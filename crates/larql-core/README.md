@@ -37,5 +37,5 @@ features, not VINDEX3 representation codecs.
 cargo test -p larql-core
 ```
 
-Runnable examples live in [the core demo catalog](../larql-demos/examples/core/README.md).
+Runnable examples live in [the core demo catalog](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-demos/examples/core/README.md).
 For model structure and execution, use [the VINDEX3 architecture](../../docs/vindex3/architecture.md).

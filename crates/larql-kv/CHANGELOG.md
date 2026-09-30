@@ -127,7 +127,7 @@ through it — so when enabled the whole token runs on one hot pool.
 
 The 2026-06-11/12 CPU fast-path arc (Q4K-direct + int8 attention, q4k
 lm_head/dense residency, hand-asm kernels, KV append-in-place — see
-`bench/baselines/c10_gemma4-26b-a4b_cpu_reconciled.json`) initially landed
+[`bench/baselines/c10_gemma4-26b-a4b_cpu_reconciled.json`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/bench/baselines/c10_gemma4-26b-a4b_cpu_reconciled.json)) initially landed
 only on `StandardEngine`: the `KvEngine::decode_step_resident` trait default
 DROPPED the index (`let _ = index`), so every own-walk-loop engine stayed on
 f32 attention. **Fixed:**

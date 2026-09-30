@@ -148,9 +148,9 @@ larql serve
 | `crates/larql-router-protocol/src/transport/mod.rs` | Re-export; feature-gated |
 | `crates/larql-router-protocol/Cargo.toml` | Add `quinn` optional dep + `quic` feature |
 | `crates/larql-router/src/main.rs` | Spawn `QuicGridEndpoint` when `--quic-port` given |
-| `crates/larql-server/src/announce.rs` | Parse `quic://` scheme; use QUIC transport |
+| [`crates/larql-server/src/announce.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/announce.rs) | Parse `quic://` scheme; use QUIC transport |
 | `crates/larql-server/src/bootstrap.rs` | Accept `--quic-port`; generate self-signed cert |
-| `crates/larql-server/Cargo.toml` | Add `quinn` optional dep + `quic` feature |
+| [`crates/larql-server/Cargo.toml`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/Cargo.toml) | Add `quinn` optional dep + `quic` feature |
 | `crates/larql-router/Cargo.toml` | Add `quinn` optional dep + `quic` feature |
 
 ---

@@ -113,7 +113,7 @@ prompt A, never on B. Each tolerance is set by a rule frozen here, before C0 ran
 - **C0-e (end to end).** Teacher-force S_A (prompt A ids followed by the 24 ids C0-a
   generates) through `production` on `gemma3-4b-it.vindex3` (BF16) and through
   `production-q4k` on the Q4_K container, using `larql vindex3 exec --logit-dump`.
-  `scripts/q8k_act_1_logits.py` reports per-position KL(BF16 ‖ Q4_K) and top-1
+  [`scripts/q8k_act_1_logits.py`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/scripts/q8k_act_1_logits.py) reports per-position KL(BF16 ‖ Q4_K) and top-1
   agreement. This is the weight-quantisation budget, the approximation this
   pipeline already accepts.
 
@@ -165,7 +165,7 @@ target.
 ## Order
 
 1. Commit this document and the C0 instruments (`q8k_act_c0`, `Captured`
-   accessors, `scripts/q8k_act_1_logits.py`).
+   accessors, [`scripts/q8k_act_1_logits.py`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/scripts/q8k_act_1_logits.py)).
 2. Run C0, fill in the C0 results and thresholds below, and commit.
 3. Implement the arm and F0, and commit.
 4. Run P, M and F1–F3 on W, adjudicate against this document, and commit.

@@ -29,7 +29,7 @@ Metal Q4K on Gemma 3 4B, 18.9 tok/s on Gemma 4 26B-A4B MoE, 6.5 tok/s on the
 31B remote-FFN batch path — were measured on **2026-05-04** and have been
 superseded several times over (the spin-barrier CPU pool alone moved 26B decode
 by ~28% in June). Current figures live in the workspace
-[`ROADMAP_STATUS.md`](../../ROADMAP_STATUS.md); treat anything in this crate's
+[`ROADMAP_STATUS.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/ROADMAP_STATUS.md); treat anything in this crate's
 history as a dated baseline, not a current claim.
 
 ---
@@ -74,7 +74,7 @@ detail.
 
 2. **G-3 (= G-4) — flash-attention-style fused attention kernel** — highest
    GPU-fwd lever after G-1/G-2 missed. Stub at
-   `crates/larql-compute-metal/src/shaders/fused_attention.rs`; collapse
+   [`crates/larql-compute-metal/src/shaders/fused_attention.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/shaders/fused_attention.rs); collapse
    RoPE + QK_norm + KV_append + KV_attend into 1-2 dispatches → ~0.85 ms/tok
    recoverable, projects to 95-105 tok/s on Gemma 3 4B (ollama parity). See
    "Open: GPU-forward kernel utilization" → G-3 / G-4 (canonical entry: G-3).
@@ -473,7 +473,7 @@ KV_attend + O_proj fragments into 1-2 dispatches → ~6-7 per layer ×
 3. Online softmax (re-normalising incrementally) — avoids the
    per-position Q output allocation our current `kv_attend` materializes.
 
-**File**: `crates/larql-compute-metal/src/shaders/fused_attention.rs`
+**File**: [`crates/larql-compute-metal/src/shaders/fused_attention.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/src/shaders/fused_attention.rs)
 already exists as a stub — flesh out using llama.cpp's
 `kernel_flash_attn_ext_q4_K_f32` as the template (templated over Q
 quant type, K head_dim, V head_dim).
@@ -897,7 +897,7 @@ them.
 
 Tests: `forward::kv_generate::tests` — noop matches baseline; record fires
 on prefill + every decode step; α=5 steer changes generated tokens vs
-baseline. Demo: `crates/larql-demos/examples/inference/mech_interp_demo.rs` § [7] shows
+baseline. Demo: [`crates/larql-demos/examples/inference/mech_interp_demo.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-demos/examples/inference/mech_interp_demo.rs) § [7] shows
 `baseline_ids = [12, 30, 10, 29]` vs `steered_ids = [4, 4, 4, 4]`.
 
 ### M7 — `W_E` / `W_U` + `project_through_unembed`
@@ -947,7 +947,7 @@ Wired into `generate_with_sampling` via `eos.is_eos(id, &decoded)`. Greedy
 suffix on each `push`. Equivalent to llama.cpp `llama_token_to_piece` and HF
 Python `decode_stream`. Handles HF leading-space (`▁`) for SP tokenizers and
 multi-byte UTF-8 chars that straddle a token boundary. Demo at
-`crates/larql-demos/examples/inference/detok_demo.rs` shows the bug ("thecapitaloffranceisparis") and the
+[`crates/larql-demos/examples/inference/detok_demo.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-demos/examples/inference/detok_demo.rs) shows the bug ("thecapitaloffranceisparis") and the
 fix ("the capital of france is paris").
 
 ### Token streaming
@@ -956,7 +956,7 @@ fix ("the capital of france is paris").
 every emitted token, including the first (which comes out of prefill). Uses
 `Detokenizer::push` so streamed text preserves HF leading-space spacing.
 `generate_with_sampling` is a thin wrapper passing a no-op closure so
-non-streaming callers are unaffected. Demo at `crates/larql-demos/examples/inference/streaming_demo.rs`
+non-streaming callers are unaffected. Demo at [`crates/larql-demos/examples/inference/streaming_demo.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-demos/examples/inference/streaming_demo.rs)
 prints tokens live with stdout flushing.
 
 ### Sampling
@@ -974,7 +974,7 @@ overhead is <2µs/call at top-K=64 (<0.02% of decode budget). CLI flags
 `max_context`. Pluggable `TurnRenderer` covers Gemma / ChatML / Llama-3
 templates. The most recent turn is never dropped — eviction is a no-op
 when only one turn remains, so a long single prompt is preserved over
-silently truncating. `crates/larql-demos/examples/inference/chat_demo.rs` runs a 3-turn conversation.
+silently truncating. [`crates/larql-demos/examples/inference/chat_demo.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-demos/examples/inference/chat_demo.rs) runs a 3-turn conversation.
 
 True KV carryover across turns (so prefill on turn N+1 only processes
 the new tokens) is a follow-up — the API surface is in place; it's an
@@ -1035,7 +1035,7 @@ slice into the cached payload directly. No behavioural change; tests pass.
 
 ### M-CPU-2 — K=8 per-layer experts run in parallel + fold/reduce accumulator
 **Status**: ✅ Done 2026-05-01  
-**File**: `crates/larql-server/src/routes/expert/`  
+**File**: [`crates/larql-server/src/routes/expert/`](https://github.com/metavacua/larql-to-sparql/tree/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/routes/expert)  
 Confirmed the production gRPC path (`run_experts_cpu_batch`) already uses
 rayon `par_iter` over the K active experts with per-rayon-thread
 `ExpertScratch`. Refactored from `collect Vec<(Vec<f32>, weight)> + serial
@@ -1098,7 +1098,7 @@ for x86 hosts (`_mm256_maddubs_epi16`).
 
 ### M-CPU-5 — bench harness + per-fix tok/s attribution
 **Status**: ✅ Done 2026-05-01  
-**File**: `crates/larql-server/examples/bench_expert_server.rs` (+ pre-existing
+**File**: [`crates/larql-server/examples/bench_expert_server.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/examples/bench_expert_server.rs) (+ pre-existing
 `unit_filter` fixture compile fix; two-shard mode has a separate pre-existing
 expert-127 off-by-one).  
 Single-shard bench on `output/gemma4-26b-a4b-q4k.vindex` (M3 Max, 2026-05-01):
@@ -1331,7 +1331,7 @@ derive all deltas from the canonical runner.
 
 ### Python WalkModel.trace must use vindex FFN
 **Status**: Shipped 2026-05-02
-**Files**: `crates/larql-python/src/walk.rs`, `crates/larql-python/src/trace_py.rs`
+**Files**: [`crates/larql-python/src/walk.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-python/src/walk.rs), [`crates/larql-python/src/trace_py.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-python/src/trace_py.rs)
 `WalkModel.trace()` should construct a `WalkFfn` from `self.index` and preserve
 patch/overlay semantics. The current dense `WeightFfn` trace is useful as a
 baseline, but it is not the trace of the vindex-backed model the user is

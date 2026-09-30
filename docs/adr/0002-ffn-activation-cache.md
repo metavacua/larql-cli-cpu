@@ -95,7 +95,7 @@ Pre-seeded from 1,923 labelled features × 34 layers. Write-back from server on 
 - Patched session (after INSERT) → cache bypassed for that layer
 - Cost: a cache miss on every call to a patched layer — which is correct, since the output changes with the patch
 
-This is tested explicitly in `crates/larql-demos/examples/inference/ffn_cache_demo.rs` (Scenario 3).
+This is tested explicitly in [`crates/larql-demos/examples/inference/ffn_cache_demo.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-demos/examples/inference/ffn_cache_demo.rs) (Scenario 3).
 
 ---
 
@@ -126,12 +126,12 @@ The L2 gate-KNN call in `run_full_output` uses the request's `top_k` to derive t
 |---|---|
 | `crates/larql-inference/src/vindex/l1_cache.rs` | `FfnL1Cache` struct + unit tests |
 | `crates/larql-inference/src/vindex/walk_ffn.rs` | L1 wired into `walk_ffn_sparse` |
-| `crates/larql-server/src/ffn_l2_cache.rs` | `FfnL2Cache` struct + unit tests |
+| [`crates/larql-server/src/ffn_l2_cache.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/src/ffn_l2_cache.rs) | `FfnL2Cache` struct + unit tests |
 | `crates/larql-server/src/state.rs` | `LoadedModel.ffn_l2_cache` field |
 | `crates/larql-server/src/routes/walk_ffn.rs` | L2 wired into `run_full_output` |
-| `crates/larql-demos/examples/inference/ffn_cache_demo.rs` | Demo: hit rates + patch safety |
+| [`crates/larql-demos/examples/inference/ffn_cache_demo.rs`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-demos/examples/inference/ffn_cache_demo.rs) | Demo: hit rates + patch safety |
 | `crates/larql-inference/examples/bench_ffn_cache.rs` | Benchmark: latency delta |
-| `docs/ffn-cache.md` | User-facing guide |
+| [`docs/ffn-cache.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/ffn-cache.md) | User-facing guide |
 
 ---
 

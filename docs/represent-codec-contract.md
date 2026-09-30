@@ -128,7 +128,7 @@ what properties an executable representation must declare.
 Preregistered before any code in
 [`represent/forecasts/rung2-entropy-coded-bf16.json`](represent/forecasts/rung2-entropy-coded-bf16.json)
 (frozen, unedited); scored in
-[`represent/forecasts/rung2-execution-notes.json`](represent/forecasts/rung2-execution-notes.json).
+[`represent/forecasts/rung2-execution-notes.json`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/represent/forecasts/rung2-execution-notes.json).
 Code: `codec/codecs/bf16_zlib.rs`, the ninth registered codec.
 
 `BF16_ZLIB` is one RFC 1950 stream per tensor inflating to the row-major
@@ -185,7 +185,7 @@ external provider is expected to hit. Execution notes go in a sibling
 
 All four waves ran on branch `represent-rung3`; the execution record, wave by
 wave with every finding the forecast did not contain, is
-[`represent/forecasts/rung3-execution-notes.json`](represent/forecasts/rung3-execution-notes.json).
+[`represent/forecasts/rung3-execution-notes.json`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/represent/forecasts/rung3-execution-notes.json).
 What the rung leaves behind:
 
 - **A plan is a set of hardware-independent planned operands** (`PlannedOperand`:

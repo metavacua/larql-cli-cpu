@@ -57,7 +57,7 @@ cargo test -p larql-inference
 
 Use `--no-default-features` on non-macOS platforms. Model-backed ignored tests
 need their declared checkpoints and are separate from the ordinary crate
-suite. Runnable capability examples live in [larql-demos](../larql-demos/);
+suite. Runnable capability examples live in [larql-demos](https://github.com/metavacua/larql-to-sparql/tree/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-demos);
 benchmarks remain with the owning crates.
 
 For deeper references see [inference-engine.md](../../docs/inference-engine.md),

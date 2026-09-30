@@ -51,13 +51,13 @@ larql vindex3 observe model.vindex3 --backend production \
 `plan` and `encode` also accept `hf://org/repo@revision`. Admission and backend
 support are explicit gates, not a promise that every checkpoint executes.
 See [execution](docs/vindex3/execution.md) for generation and serving, and the
-[standalone vindex README](crates/vindex-cli/README.md) for format operations.
+[standalone vindex README](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/vindex-cli/README.md) for format operations.
 
 ## A model can leave an execution record
 
 The canonical decode path exposes carrier writes with site identity and
 provenance. Optional lenses read states through the model's normalization and
-head. The [Observatory](observatory/README.md) imports records for coordinated
+head. The [Observatory](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/observatory/README.md) imports records for coordinated
 inspection and replay. Head/source attribution and intervention research build
 on these records, with separate contracts for descriptive evidence and causal
 claims. A projected contribution is not a counterfactual.
@@ -98,7 +98,7 @@ use overlays and compilation produces a new artifact.
 For those workflows, use the [LQL guide](docs/lql-guide.md),
 [language specification](crates/larql-lql/docs/spec.md),
 [operations and patches](crates/larql-vindex/docs/operations-spec.md),
-[Factory](docs/vindex-factory.md), and [Python bindings](docs/larql-python.md).
+[Factory](docs/vindex-factory.md), and [Python bindings](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/larql-python.md).
 
 ## Architecture and development
 
@@ -123,7 +123,7 @@ model-wide fidelity or speed claim. [AGENTS.md](AGENTS.md) documents workspace
 invariants and build conventions.
 
 The [documentation index](docs/README.md) leads to specifications, runtime
-contracts, research records and ADRs. The [documentation policy](docs/documentation-policy.md)
+contracts, research records and ADRs. The [documentation policy](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/documentation-policy.md)
 keeps current explanations separate from versioned contracts and historical
 evidence. Historical benchmarks retain their original conditions in research
 records rather than serving as a universal performance promise.

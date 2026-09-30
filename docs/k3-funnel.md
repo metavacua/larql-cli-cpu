@@ -278,7 +278,7 @@ A sink logit of +8 dominates the softmax unless real attention logits exceed it.
 1. **Implement sinks** — `attn_sinks_key()` on `ModelArchitecture`, extraction into the attention slice, and the concat-softmax-truncate in both the CPU and Metal attention kernels. Scoped to R1, gated by GB.
 2. **Add an extraction tensor-coverage audit.** The general defect is that *a tensor the checkpoint has and the extractor does not recognise is silently discarded, and nothing anywhere reports it.* Every source tensor should be classifiable as extracted, deliberately dropped by a named rule (multimodal, MTP-preserved, …), or **unrecognised — which should be loud**. This is the extraction-side sibling of `larql capabilities` in [`vindex-factory.md` §15.2](vindex-factory.md), which checks architectures at PR time; this checks *tensors* at extraction time.
 
-   **Built 2026-07-31.** `extract::coverage` plus a `tensor_audit` stage that runs first in `build_vindex_streaming`, so an unaddressable checkpoint fails in seconds rather than after a multi-minute extraction. Reports always; fatal under `LARQL_EXTRACT_STRICT=1`, which is set in the `larql-vindex` CI workflow. Clean on ten checkpoints including Qwen3-30B-A3B at 18,867 tensors and Gemma 3's 439 SigLIP tensors (classified `non-text-tower`). It measures *naming* rather than consumption — the necessary condition, and where every silent drop found so far actually lived. Its first outputs: GPT-2 from HF safetensors is 1-of-160 addressable, and LayerNorm `β` was being dropped for GPT-2 and StarCoder2 (§4.7.9). Follow-ups in [`ROADMAP.md`](../ROADMAP.md) §"Extraction tensor-coverage audit".
+   **Built 2026-07-31.** `extract::coverage` plus a `tensor_audit` stage that runs first in `build_vindex_streaming`, so an unaddressable checkpoint fails in seconds rather than after a multi-minute extraction. Reports always; fatal under `LARQL_EXTRACT_STRICT=1`, which is set in the `larql-vindex` CI workflow. Clean on ten checkpoints including Qwen3-30B-A3B at 18,867 tensors and Gemma 3's 439 SigLIP tensors (classified `non-text-tower`). It measures *naming* rather than consumption — the necessary condition, and where every silent drop found so far actually lived. Its first outputs: GPT-2 from HF safetensors is 1-of-160 addressable, and LayerNorm `β` was being dropped for GPT-2 and StarCoder2 (§4.7.9). Follow-ups in [`ROADMAP.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/ROADMAP.md) §"Extraction tensor-coverage audit".
 
 **This is the ladder working exactly as designed.** A silently-dropped tensor class, on a novel architecture, discovered on a 13 GB model that runs locally — rather than at 2.8 T where the only oracle is an API and the symptom would have been "the outputs are subtly wrong and we don't know why". K3 is guaranteed to carry tensors larql has never seen (QB bias, AttnRes block state, LatentMoE projections); item 2 above is what turns that guarantee from a silent hazard into a startup error.
 
@@ -669,7 +669,7 @@ LayerNorm is `γ·x̂ + β`. The consequence was that raw-safetensors CPU infere
 
 Fixed by three additive accessors derived once from the weight key and gated on `NormType`, so RMSNorm families correctly claim nothing and an architecture that overrides its norm naming gets the matching bias for free. Extraction now writes them; `build_pipeline_layers` resolves them. Both weight writers also stopped hardcoding `"norm.weight"` in favour of `arch.final_norm_key()` — they had agreed with every reader only by coincidence.
 
-**Status is "the tensor flows end to end", not "the output is verified."** Restoring `β` changes numerics for GPT-2 and StarCoder2 and wants a GB-shaped measurement before it is called complete. Tracked in [`ROADMAP.md`](../ROADMAP.md) §"Extraction tensor-coverage audit + silent-drop follow-ups".
+**Status is "the tensor flows end to end", not "the output is verified."** Restoring `β` changes numerics for GPT-2 and StarCoder2 and wants a GB-shaped measurement before it is called complete. Tracked in [`ROADMAP.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/ROADMAP.md) §"Extraction tensor-coverage audit + silent-drop follow-ups".
 
 #### 4.7.10 Consequences to carry
 
@@ -764,7 +764,7 @@ The span-carrying entry points are the real ones; the existing unspanned names b
 
 #### 4.9.3 The residual attribution, measured — and the test that nearly got it wrong
 
-§4.9.2's explanation of the residual was *reasoned*: direction preserved, extremes on few elements, shallow layers flat, therefore MoE tie-breaking. That is a causal claim about which tokens diverge and why, and none of it had been measured. **Measured now**, via `LARQL_MOE_ROUTE_TRACE` on the larql side, `--router-trace` on the reference side, and `scripts/diff_moe_routing.py`.
+§4.9.2's explanation of the residual was *reasoned*: direction preserved, extremes on few elements, shallow layers flat, therefore MoE tie-breaking. That is a causal claim about which tokens diverge and why, and none of it had been measured. **Measured now**, via `LARQL_MOE_ROUTE_TRACE` on the larql side, `--router-trace` on the reference side, and [`scripts/diff_moe_routing.py`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/scripts/diff_moe_routing.py).
 
 **Expert selections disagree on 11 of 12,264 token-layer decisions (0.09 %), across just 4 of 511 tokens.**
 
@@ -825,7 +825,7 @@ That verdict was an artifact of **scoring a causal chain as independent draws.**
 
 **The GPU suite is what made this safe: 551 Metal tests pass, and they caught 16 distinct binding mistakes on the way.** Every one was a raw-dispatch site still writing a bare `rope_base` float into what had become a pointer slot; each showed up as `cos = 0.000000` against the CPU reference rather than as a compile error, because Metal bindings are untyped. Two more surfaced as `Command encoder released without endEncoding` — the geometry assert firing *inside* a live encoder, which Metal reports as an abort rather than a readable panic. One of those was a genuine latent hazard: a test mutating `layer.rotary_dim` after the plan was built, desynchronising the two. That now goes through `set_rotary_dim_unscaled`, which moves both together.
 
-**Still owed:** `residual_diff.rs` covers prefill only, so the CPU-vs-Metal *decode* comparison that would have caught this in the first place still does not exist — tracked as **M3/M5** in [`ROADMAP.md`](../ROADMAP.md). The kernel-level parity tests now pin each rope kernel against the CPU reference across Llama-2, Gemma 3, Gemma 4 sliding and Gemma 4 global-partial geometries, which is a sharper instrument than the end-to-end diff but not a substitute for it. `AttentionSpan` is still absent from the Metal attention kernels (**M4**).
+**Still owed:** `residual_diff.rs` covers prefill only, so the CPU-vs-Metal *decode* comparison that would have caught this in the first place still does not exist — tracked as **M3/M5** in [`ROADMAP.md`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/ROADMAP.md). The kernel-level parity tests now pin each rope kernel against the CPU reference across Llama-2, Gemma 3, Gemma 4 sliding and Gemma 4 global-partial geometries, which is a sharper instrument than the end-to-end diff but not a substitute for it. `AttentionSpan` is still absent from the Metal attention kernels (**M4**).
 
 ### 4.11 R1 P4/P5 closed — GPT-OSS served from its vindex, then made fast on Metal (2026-08-09/10)
 
@@ -912,7 +912,7 @@ lm_head → top-K into the decode CB). Full ladder + evidence: ROADMAP
 ### 4.13 K3-RESIDENCY-VERTICAL-1 — the real plan through selection, refusal, accounting and execution (2026-09-05)
 
 Preregistered in
-[`represent/forecasts/k3-residency-vertical.json`](represent/forecasts/k3-residency-vertical.json)
+[`represent/forecasts/k3-residency-vertical.json`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/represent/forecasts/k3-residency-vertical.json)
 after the REPRESENT codec contract closed at rung 3d (PR #425). The
 executable subject is Kimi-Linear-48B-A3B, the R2 rung, because K3 proper
 has no weights on this box; the machinery is what transfers. The baseline
@@ -963,7 +963,7 @@ at binding; the cold token paged in 0.976 GB through 59,670 major faults
 warm 0.14–0.43 s with 0 faults; the mapping's resident pages accumulate
 as reclaimable page cache (V3-N4). Greedy tokens had matched at 4 of 5
 positions BEFORE the fix (V3-N2): a token match is not a parity witness.
-Details: `docs/represent/forecasts/k3-residency-vertical-notes.json`
+Details: [`docs/represent/forecasts/k3-residency-vertical-notes.json`](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/represent/forecasts/k3-residency-vertical-notes.json)
 (`waves.V3_execution_and_residency_curve`).
 
 ### larql-vindex / larql-vindex-spec
