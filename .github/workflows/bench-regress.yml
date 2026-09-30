@@ -2,15 +2,15 @@
 # own base, BACK TO BACK ON ONE RUNNER, and fails if any cell in the
 # criterion bench suite regresses past Criterion's noise threshold.
 #
-# Surface covered (BENCHES in scripts/bench-regress.sh):
-#   - `quant_matvec`: Q4_0 / Q4_K / Q4_KF / Q6_K × 3 shapes × cpu/metal
-#   - `matmul`: f32 matmul + f32_gemv (lm-head) — cpu vs metal
-#   - `linalg`: cholesky + ridge solve (cpu only)
+# Surface covered (BENCHES in scripts/bench-regress.sh), all on the CPU
+# backend:
+#   - `q4k_q8k_matvec`: the Q4_K × Q8_K quantised matvec
+#   - `linalg`: cholesky + ridge solve
 #
 # That's the surface where the next throughput cliff would show up
-# first. The 75 %-row drop in `q4_matvec_v4` would have shown as a 4×
-# regression at `quant_matvec_q4_0/metal/lm_head_262144` weeks before
-# goldens caught it.
+# first: a kernel that silently drops rows (the 75 %-row drop in
+# `q4_matvec_v4` upstream) reads as a multi-× regression here weeks
+# before goldens catch it.
 
 name: bench-regress
 
@@ -116,9 +116,9 @@ on:
 
 jobs:
   bench:
-    # macos-14 = Apple Silicon (M1+). Required for the metal cells —
-    # without it, drop --features gpu from FEATURES to skip them
-    # and run only the CPU surface on any runner.
+    # macos-14 = Apple Silicon, where the CPU backend runs through
+    # Accelerate. The gate's qualification history was measured on this
+    # runner class; any runner with a BLAS would also work.
     runs-on: macos-14
     # Two bench arms plus a cold build for the base and an incremental
     # one for the head. The old single-arm job used 90.

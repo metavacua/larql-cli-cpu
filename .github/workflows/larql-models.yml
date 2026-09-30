@@ -54,7 +54,7 @@ jobs:
       # `cfg(target_os = ...)`, no `cfg(unix)`/`cfg(windows)` split that
       # Linux and Windows do not already cover between them, and no
       # `blas-src`/Accelerate linkage (contrast larql-compute, -inference,
-      # -kv, -demos and -cli, which take `features = ["accelerate"]` under
+      # -kv and -cli, which take `features = ["accelerate"]` under
       # a macOS cfg and therefore keep their macOS PR leg). The macOS leg
       # here was compiling the same portable code a third time.
       #

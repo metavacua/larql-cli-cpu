@@ -129,20 +129,6 @@ jobs:
       - name: Check examples
         run: cargo check -p larql-vindex --examples
 
-      # The `gpu` feature pulls in larql-compute-metal, so this can only
-      # build on macOS. It is a TYPE-CHECK, not a test run: the gate it
-      # guards (`opplan::exec::tests::kimi_moe_metal`) needs a ~245 MiB
-      # fixture that only exists on a developer machine, and skips
-      # everywhere else.
-      #
-      # Why it earns a CI step anyway: Kimi execution now depends on the
-      # bf16 Metal API, and nothing else in CI compiles this module. A
-      # rename or signature change in larql-compute-metal would break it
-      # silently and stay broken until someone next ran it by hand.
-      - name: Check gpu feature (macOS only)
-        if: runner.os == 'macOS'
-        run: cargo check -p larql-vindex --features gpu --all-targets
-
       - name: Clippy
         run: cargo clippy -p larql-vindex --all-targets -- -D warnings
 
@@ -158,20 +144,8 @@ jobs:
       - name: E0 - VINDEX2 preservation (generation boundary)
         run: cargo test -p larql-vindex --test e0_generation_boundary
 
-      # macOS runs the suite WITH `gpu`, a superset of the default one: the
-      # gpu-gated modules carry device-free unit tests that no other job
-      # runs — the Metal lowered session's (`opplan::exec::metal_lowered`,
-      # moved here from larql-cli, whose default features used to run
-      # them) plus 51 fixture-gated Metal tests that skip without their
-      # fixtures. Replacing the macOS test run rather than adding a second
-      # keeps the job's cost where it was.
       - name: Tests
-        if: runner.os != 'macOS'
         run: cargo test -p larql-vindex
-
-      - name: Tests (with gpu feature, macOS)
-        if: runner.os == 'macOS'
-        run: cargo test -p larql-vindex --features gpu
 
       # Linux only. These are generic criterion targets with no
       # platform-specific code path, so compiling them a second and third

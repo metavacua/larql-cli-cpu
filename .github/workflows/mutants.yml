@@ -55,13 +55,6 @@ jobs:
     continue-on-error: true
     strategy:
       fail-fast: false
-      # Same shape as `msrv` above, and for the same underlying reason:
-      # larql-compute-metal "compiles to an empty crate on non-macOS
-      # hosts" (its own doc comment) — every line inside its
-      # `#[cfg(target_os = "macos")]` modules is structurally invisible to
-      # a ubuntu runner, for every PR, forever. The macos-14 leg, scoped
-      # to `-p larql-compute-metal`, is the only way this workspace's
-      # mutation testing ever sees that code at all.
       matrix:
         include:
           - os: ubuntu-latest
@@ -69,21 +62,13 @@ jobs:
             package_args: ""
             diff_paths: "."
             openblas: true
-          - os: macos-14
-            label: " · larql-compute-metal"
-            package_args: "-p larql-compute-metal"
-            diff_paths: "crates/larql-compute-metal"
-            openblas: false
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
-      # Computed before any install so an empty diff (e.g. a PR that
-      # never touches crates/larql-compute-metal, on the macOS leg) skips
-      # the toolchain/cargo-mutants install entirely — macOS runner
-      # minutes cost roughly 10x a Linux minute, and most PRs will not
-      # touch this specific crate.
+      # Computed before any install so an empty diff skips the
+      # toolchain/cargo-mutants install entirely.
       - name: Compute PR diff
         id: diff
         run: |

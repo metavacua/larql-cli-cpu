@@ -2,8 +2,8 @@
 #
 # LQL parser, executor, and REPL. The crate is model/architecture
 # agnostic — parser tests are pure, executor integration tests use
-# `mockito` to fake the Remote backend, and the metal feature is opt-in
-# (default = []). Same surface runs on Linux, Windows, and macOS.
+# `mockito` to fake the Remote backend, and there is no GPU feature.
+# Same surface runs on Linux, Windows, and macOS.
 
 name: larql-lql
 

@@ -9,11 +9,9 @@
 #   audit       — RustSec advisory scan of Cargo.lock            (blocking)
 #   deny        — licences, advisories, sources, bans            (blocking)
 #   msrv        — the declared rust-version really compiles      (blocking)
-#   proto-lint  — buf lint over the four gRPC schemas            (blocking)
+#   proto-lint  — buf lint over the three gRPC schemas           (blocking)
 #   docs-integrity — Markdown links resolve, code references resolve,
 #                   and contract indexes name real tests       (blocking)
-#   research-contracts — GW-TS-1 preregistration, population and
-#                   capture-amendment tests                    (blocking)
 #
 # Mutation testing lives in `mutants.yml`, not here: it is informational,
 # and a job cancelled by `timeout-minutes` concludes the whole run as
@@ -103,21 +101,8 @@ jobs:
     name: MSRV · workspace
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    # Split by platform because no single runner can build the whole
-    # workspace. `larql-compute-metal` takes `blas-src` only under
-    # `cfg(target_os = "macos")` while its examples `extern crate blas_src`
-    # unconditionally, so on Linux they fail to resolve at *any* toolchain —
-    # nothing to do with the MSRV.
-    #
-    # So: this job checks the workspace minus that crate (covering the
-    # cfg(linux) OpenBLAS paths in larql-compute and larql-inference), and
-    # `msrv-metal.yml` checks the crate Linux cannot. Between them every
-    # member crate is still MSRV-gated with no silent hole.
-    #
-    # That second leg used to be a macos-14 entry in a matrix here. It was
-    # moved out because this workflow carries no `paths:` filter — the
-    # weekly `schedule:` needs to scan an unchanged lockfile — so a macOS
-    # runner was requested on every pull request, whatever it touched.
+    # One leg: every member crate builds on Linux, so the whole workspace
+    # is MSRV-gated here with no silent hole.
     steps:
       - uses: actions/checkout@v7
 
@@ -204,7 +189,7 @@ jobs:
       - name: Check at declared MSRV
         env:
           RUSTUP_TOOLCHAIN: ${{ steps.msrv.outputs.version }}
-        run: cargo check --workspace --all-targets --exclude larql-compute-metal --locked
+        run: cargo check --workspace --all-targets --locked
 
   docs-integrity:
     name: documentation integrity
@@ -308,20 +293,6 @@ jobs:
       - name: Instrument selftest
         run: python3 scripts/ci_throughput.py selftest
 
-      # The Metal tier classifier ships before the trigger change that will
-      # use it (CI-E2-D is designed, not activated). Its completeness check
-      # runs from the moment the manifest exists, not from activation:
-      # `parity-obligations.json` declares which upstream surfaces can
-      # invalidate Metal's behaviour, and its one real weakness is OMISSION.
-      # A new parity dependency added without a declaration would classify
-      # as compile-only once tiering is live, so the gate that notices has
-      # to predate the gate that acts.
-      - name: Metal tier classifier selftest
-        run: python3 scripts/metal_tier.py selftest
-
-      - name: Parity-obligation manifest is complete
-        run: python3 scripts/metal_tier.py check
-
       # The conformance sweep's cached plans are the evidence every
       # architecture verdict in `docs/arch-conformance` is derived from,
       # and a cache outlives the planner that wrote it. Until this guard
@@ -337,28 +308,6 @@ jobs:
       # not.
       - name: Conformance evidence guard selftest
         run: python3 scripts/conformance_evidence.py selftest
-
-  research-contracts:
-    name: research contracts (GW-TS-1)
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v7
-
-      # GW-TS-1's preregistration, population manifest and capture amendment
-      # are the authority a population capture runs under: they reproduce
-      # the sealed identities byte for byte, refuse a tampered or unbound
-      # authority, and decide whether a bridge witness authorizes capture.
-      # Until this job existed those tests ran only when someone typed them.
-      #
-      # The pattern is `test_gwts1_*` on purpose, not `test_gw*`: several
-      # older GW experiments' tests (gw4b, gwread1, ...) error on a clean
-      # checkout because they read inputs that are not committed. Widen the
-      # pattern only by name, never by prefix. These tests need no history
-      # beyond the checked-out commit and no model weights; the committed
-      # GW-0 census is their only input.
-      - name: GW-TS-1 contract tests
-        run: python3 -m unittest discover -s scripts -p 'test_gwts1_*.py'
 
   proto-lint:
     name: buf lint

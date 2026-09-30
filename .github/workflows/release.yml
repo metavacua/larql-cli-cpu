@@ -1,23 +1,20 @@
-# Tagged release binaries (ADR-0026). Cross-builds `larql` (CLI) +
-# `larql-server` for the platforms larql-cli.yml already validates on
-# every push, and attaches one archive per platform to a GitHub Release.
+# Tagged release binaries (ADR-0026). Cross-builds the CPU-only `larql`
+# CLI for the platforms larql-cli.yml already validates on every push, and
+# attaches one archive per platform to a GitHub Release.
 #
 # Deliberately NOT crates.io publishing — see ADR-0026 for why. These are
 # build artifacts, versioned by tag, with no semver/API-stability
 # commitment attached.
 #
-# Feature flags: `gpu` (Metal) on macOS, CPU-only on Linux/Windows, and
-# never larql-cli's `research` feature. `research` is a larql-cli default
-# (dev builds and CI keep the `larql dev` tree, k3-ledger, parity,
+# Feature flags: never larql-cli's `research` feature. `research` is a
+# larql-cli default (dev builds and CI keep the `larql dev` tree, k3-ledger,
 # moe-locality, optimizer-mcp and `shannon verify`), so every leg passes
-# --no-default-features and macOS re-adds only `larql-cli/gpu`. larql-server
-# has no default features, so this changes nothing for it. larql-cli.yml
-# carries a clippy step for exactly these release shapes.
+# --no-default-features. larql-cli.yml carries a clippy step for exactly
+# this release shape.
 #
-# `dec-bench` is deliberately NOT research-gated: the DEC drivers
-# (scripts/dec0-arm-l.sh, scripts/dec0p5-x86.sh) run `dec-bench replay`
-# from the archive this workflow publishes — that is what ADR-0026 exists
-# to serve.
+# `dec-bench` is deliberately NOT research-gated: upstream's DEC drivers
+# run `dec-bench replay` from a release archive. Those drivers, and the
+# `larql-server` they pair it with, are not part of this repository.
 
 name: release
 
@@ -38,7 +35,7 @@ jobs:
         include:
           - os: macos-14
             target: aarch64-apple-darwin
-            features: "--no-default-features --features larql-cli/gpu"
+            features: "--no-default-features"
           # Pinned to 22.04, NOT ubuntu-latest: the runner's glibc sets the
           # binary's minimum. 24.04 (glibc 2.39) emitted a GLIBC_2.38
           # requirement, which will not load on Colab or any 22.04-class rented
@@ -75,8 +72,7 @@ jobs:
           & "$vcpkgRoot\vcpkg.exe" install openblas:x64-windows
 
       # protoc on PATH satisfies the `cfg(not(windows))` skip in
-      # `larql-router-protocol` / `larql-server`. See those build.rs
-      # files for the rationale.
+      # `larql-router-protocol`. See its build.rs for the rationale.
       - name: Install protoc (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -105,7 +101,7 @@ jobs:
           fi
 
       - name: Build (release-dist profile)
-        run: cargo build --profile release-dist --target ${{ matrix.target }} -p larql-cli -p larql-server ${{ matrix.features }}
+        run: cargo build --profile release-dist --target ${{ matrix.target }} -p larql-cli ${{ matrix.features }}
 
       - name: Package (Unix)
         if: runner.os != 'Windows'
@@ -114,7 +110,6 @@ jobs:
           out="larql-${{ matrix.target }}"
           mkdir -p "$out"
           cp target/${{ matrix.target }}/release-dist/larql "$out/"
-          cp target/${{ matrix.target }}/release-dist/larql-server "$out/"
           tar czf "${out}.tar.gz" "$out"
 
       - name: Package (Windows)
@@ -124,7 +119,6 @@ jobs:
           $out = "larql-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path $out
           Copy-Item "target\${{ matrix.target }}\release-dist\larql.exe" "$out\"
-          Copy-Item "target\${{ matrix.target }}\release-dist\larql-server.exe" "$out\"
           Compress-Archive -Path $out -DestinationPath "$out.zip"
 
       - name: Upload artefact

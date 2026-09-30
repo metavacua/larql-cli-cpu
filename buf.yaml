@@ -1,15 +1,13 @@
 # buf configuration for the workspace's gRPC schemas.
 #
-# Linted in CI by `.github/workflows/quality.yml`. Two modules, one per crate
-# that owns .proto files:
+# Linted in CI by `.github/workflows/quality.yml`. One module, the only crate
+# here that owns .proto files:
 #   crates/larql-router-protocol/proto — larql.grid.v1, larql.shard.v1,
 #                                        larql.expert.v1
-#   crates/larql-server/proto          — vindex
 version: v2
 
 modules:
   - path: crates/larql-router-protocol/proto
-  - path: crates/larql-server/proto
 
 lint:
   use:
@@ -20,12 +18,12 @@ lint:
     # the .proto files:
     #
     #   PACKAGE_DIRECTORY_MATCH — wants larql/grid/v1/grid.proto rather than
-    #     proto/grid.proto, for all four schemas.
+    #     proto/grid.proto, for all three schemas.
     #   DIRECTORY_SAME_PACKAGE  — wants the three larql.*.v1 packages split
     #     into one directory each, instead of sharing proto/.
     #
-    # Moving them means rewriting the `tonic_build` include paths in both
-    # crates' build.rs, and the layout buf wants is only load-bearing if
+    # Moving them means rewriting the `tonic_build` include paths in the
+    # crate's build.rs, and the layout buf wants is only load-bearing if
     # these schemas are ever published to a buf registry. Nothing here
     # depends on it today.
     #

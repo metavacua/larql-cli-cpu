@@ -1,8 +1,7 @@
 # larql-compute cross-platform CI
 #
-# Validates the CPU baseline on Linux, Windows, and macOS.  After the
-# Metal extraction (ADR-019), this workflow is CPU-only — Metal GPU
-# validation lives in `.github/workflows/larql-compute-metal.yml`.
+# Validates the CPU backend on Linux, Windows, and macOS. This repository
+# carries no GPU backend.
 
 name: larql-compute
 
