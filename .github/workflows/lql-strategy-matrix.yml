@@ -13,7 +13,7 @@ name: lql-strategy-matrix
 
 on:
   push:
-    branches: [candidate/main-replacement]
+    branches: [main]
   workflow_dispatch:
     inputs:
       strict:
