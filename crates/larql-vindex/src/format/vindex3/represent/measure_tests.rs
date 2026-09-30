@@ -511,9 +511,8 @@ fn a_refusal_and_its_verified_facts_survive_json() {
 
 #[test]
 fn a_build_that_cannot_run_the_procedure_refuses_rather_than_missing_the_symbol() {
-    // The teacher-forced runner needs Metal and macOS. On any other
-    // build it does not exist, and that absence must reach a caller as
-    // a REFUSAL: `PreparedExperiment` has to decide whether something
+    // The teacher-forced runner needs Metal, which this CPU-only build
+    // does not carry, and that absence must reach a caller as a REFUSAL: `PreparedExperiment` has to decide whether something
     // is executable on the machine in front of it, and "the symbol is
     // missing" is not an answer it can act on.
     let (_dir, request) = artifacts();
@@ -524,7 +523,7 @@ fn a_build_that_cannot_run_the_procedure_refuses_rather_than_missing_the_symbol(
         "no measurement was attempted, so this is an execution failure"
     );
     assert!(
-        refusal.to_string().contains("gpu"),
+        refusal.to_string().contains("Metal"),
         "the refusal must say what the build lacks: {refusal}"
     );
     assert!(

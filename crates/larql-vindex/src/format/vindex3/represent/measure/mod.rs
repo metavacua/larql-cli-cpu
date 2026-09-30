@@ -42,11 +42,19 @@ pub mod plan;
 use outcome::ExecutionFailure;
 use outcome::MeasurementRefusal;
 
-/// The same entry point on a build that cannot perform it.
+/// **Run the procedure a request names, or refuse because this binary
+/// cannot.**
+///
+/// The teacher-forced runner is Metal-only, and this build carries no Metal
+/// backend, so every request is refused. That absence must reach a caller
+/// as a REFUSAL and not as a compile-time hole: `PreparedExperiment` has to
+/// decide whether something is executable on the machine in front of it,
+/// and "the symbol is missing" is not an answer it can act on.
 pub fn run(request: &TeacherForcedRequest) -> Result<(), MeasurementRefusal> {
     Err(ExecutionFailure::BackendUnavailable {
         detail: format!(
-            "`{}` needs a macOS build with the `gpu` feature, and this binary is neither",
+            "`{}` needs the Metal teacher-forced runner, which this CPU-only build does not \
+             include",
             request.procedure.name()
         ),
     }

@@ -171,7 +171,7 @@ fn execution_refusals() -> Vec<ExecutionRefusal> {
         },
         ExecutionRefusal::Measurement(MeasurementRefusal::Execution(
             ExecutionFailure::BackendUnavailable {
-                detail: "needs a macOS build with the `gpu` feature".into(),
+                detail: "needs the Metal teacher-forced runner".into(),
             },
         )),
         ExecutionRefusal::ObservedAnotherExperiment(Box::new(Misdirected {

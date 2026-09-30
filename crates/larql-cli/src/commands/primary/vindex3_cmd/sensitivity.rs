@@ -287,7 +287,7 @@ fn capture_moments(
         .collect::<Result<_, _>>()?;
     Err(format!(
         "--calibration parsed {} entries (token digest {}), but capturing \
-         moments needs the Metal executor: build with the `gpu` feature on macOS",
+         moments needs the Metal executor, which this CPU-only build does not include",
         entries.len(),
         calibration_digest(&entries),
     )

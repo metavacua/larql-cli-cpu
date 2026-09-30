@@ -477,7 +477,7 @@ fn a_build_without_the_instrument_refuses_after_instructing() {
         "no measurement was attempted, so this is an execution failure"
     );
     let said = refusal.to_string();
-    assert!(said.contains("gpu"), "{said}");
+    assert!(said.contains("Metal"), "{said}");
     assert!(said.contains(TEACHER_FORCED_TWO_ARM), "{said}");
 }
 
