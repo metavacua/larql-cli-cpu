@@ -8,13 +8,18 @@
 #
 #   1. For the two BINARY crates (larql-cli, larql-router), how far does
 #      compilation get as OS services are progressively taken away (down
-#      to none at all), and do the other three Tier-1 GNU targets
-#      (aarch64, i686, x86_64-pc-windows-gnu) - which nothing else here
-#      builds - still really pass? One deliberate Tier-1-only exception:
+#      to none at all), and do the other Tier-1 GNU targets (aarch64,
+#      x86_64-pc-windows-gnu) - which nothing else here builds - still
+#      really pass? One deliberate Tier-1-only exception:
 #      riscv64gc-unknown-linux-gnu (Tier 2 WITH host tools) is also a real
 #      gate here, not just a diagnostic rung - see binary-gnu-riscv64
 #      below for why this one non-Tier-1 target earns the same "must
-#      compile and run" bar as the Tier-1 legs.
+#      compile and run" bar as the Tier-1 legs. i686-unknown-linux-gnu is
+#      dropped for now (2026-09-30): confirmed `libopenblas-dev:i386`
+#      does not exist in Ubuntu noble's archives at all, and this crate's
+#      OpenBLAS linkage is unconditional system linking with no
+#      from-source fallback - a real dependency-graph gap (Cargo.toml,
+#      not this CI file) to close before i686 comes back.
 #   2. For the LIBRARY crates with no obviously-unconditional OS coupling,
 #      how far would a `#![no_std]` port get today, across both a
 #      "decomposition" set (wasm32v1-none, the riscv32/64-*-none-elf
@@ -37,6 +42,33 @@
 # target. If riscv64a23 - or any genuinely Tier-3 target - is ever worth
 # adding, it belongs in a separate, dedicated nightly-toolchain workflow,
 # never mixed into this stable-only file.
+#
+# Toolchain resolution: every job adds its cross target(s) with a plain
+# `rustup target add <target>` step, never `dtolnay/rust-toolchain@stable`
+# with a `targets:` input. Confirmed empirically (2026-09-30, across two
+# consecutive live dispatches) why that distinction matters here
+# specifically: this repo pins an EXACT toolchain via rust-toolchain.toml
+# (channel = "1.98.0"), but `dtolnay/rust-toolchain@stable`'s `targets:`
+# input runs `rustup toolchain install stable --target ...` against the
+# literal "stable" channel name - a DIFFERENT toolchain install than
+# whatever rust-toolchain.toml pins the moment "stable" drifts to a newer
+# patch (it had: stable was 1.98.1, the pin was 1.98.0). Every actual
+# `cargo`/`rustc` invocation inside this checked-out repo then resolves
+# the PINNED 1.98.0 toolchain (rustup's directory-override auto-install,
+# confirmed live in a run's own log: "the missing active toolchain
+# 1.98.0-... has been auto-installed"), which never got the extra cross
+# target added at all - a hard `error[E0463]: can't find crate for
+# 'core'` masquerading as "target not installed" on the windows-gnu leg,
+# and a SILENTLY IDENTICAL-LOOKING false negative on every no_std cell
+# (those cells' cargo invocations fail with "can't find crate for `std`"
+# either way - whether from this bug or from the crate genuinely not
+# being `#![no_std]` yet - so the policy script's exit-code-only check
+# could not tell the two apart). A plain `rustup target add <target>`
+# run from inside the checked-out directory (after `actions/checkout`)
+# instead resolves and auto-installs the PINNED toolchain (picking up
+# its declared `components = ["clippy", "rustfmt"]` for free) and adds
+# the target to that exact toolchain - there is only ever one toolchain
+# on the runner, matching what every later step actually uses.
 #
 # Scope note: this workflow was designed against this repository's own
 # 14-crate closure specifically (larql-cli-cpu, the CPU-only extraction),
@@ -63,7 +95,7 @@ on:
   #
   # It is also expensive in a way none of this repo's push/PR gates are:
   # four native runners (including one Windows and one arm64 leg) plus a
-  # 40-cell cross-compilation matrix across toolchains nothing else here
+  # 60-cell cross-compilation matrix across toolchains nothing else here
   # installs. So: no `push:`/`pull_request:` trigger here. A separate,
   # narrow, path-filtered workflow scoped to one crate at a time is the
   # right complement for PR-time feedback once a crate's no_std port is
@@ -83,6 +115,15 @@ on:
 permissions:
   contents: read
 
+# Matches what `dtolnay/rust-toolchain@stable` used to set per-job before
+# every job switched to a plain `rustup target add` step (see the file
+# header) - disable incremental compilation (CI never reuses a target/
+# across runs anyway, see the "No compiled workspace artefacts" step in
+# every job below) and force colored compiler output in step logs.
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+
 # Supersede in-flight pull-request runs: pushing a new commit to a PR
 # cancels the runs still compiling the previous one. Non-PR runs (main
 # pushes, schedules, manual dispatch) are keyed by `run_id`, unique per
@@ -95,16 +136,15 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  # ── Binary-crate ladder, leg 1: the three diagnostic rungs plus the
-  # two Tier-1 GNU targets that share this leg's host architecture
-  # (x86_64). Colocating x86_64-unknown-linux-gnu and
-  # i686-unknown-linux-gnu here is deliberate, not incidental: a cargo
-  # build script or proc-macro ALWAYS compiles for the HOST regardless of
-  # the `--target` being checked, and the host here is x86_64 Linux for
-  # all five of this job's targets. aarch64-unknown-linux-gnu and
-  # x86_64-pc-windows-gnu need a genuinely different host to even RUN
-  # their test binaries (see the two jobs below), so they gain nothing
-  # from being here and are kept out.
+  # ── Binary-crate ladder, leg 1: the three diagnostic wasm rungs plus
+  # the native x86_64-unknown-linux-gnu gate. All four targets share this
+  # leg's host architecture (x86_64) - a cargo build script or proc-macro
+  # ALWAYS compiles for the HOST regardless of the `--target` being
+  # checked, so nothing here needs a different runner.
+  # i686-unknown-linux-gnu is dropped for now (2026-09-30) - see the file
+  # header. aarch64-unknown-linux-gnu and x86_64-pc-windows-gnu need a
+  # genuinely different host to even RUN their test binaries (see the
+  # jobs below), so they gain nothing from being here either.
   binary-ladder-ubuntu-x86_64:
     name: binary ladder (x86_64 host) · ${{ matrix.crate }}
     runs-on: ubuntu-latest
@@ -132,18 +172,9 @@ jobs:
       # is required to link the final wasm binary); this job only ever
       # runs `cargo check` on it (see Rung 2 below), which never reaches
       # the linker, so emsdk is deliberately never installed anywhere in
-      # this job. i686-unknown-linux-gnu is added here too (not a
-      # separate job): an x86_64 CPU executes i686 code natively, so -
-      # unlike aarch64 or windows-gnu - it needs no separate runner, only
-      # the target and its 32-bit system libs (next step).
-      - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: >-
-            wasm32-unknown-unknown,
-            wasm32-unknown-emscripten,
-            wasm32-wasip1,
-            i686-unknown-linux-gnu
+      # this job.
+      - name: Add rustup targets (wasm32 diagnostic rungs)
+        run: rustup target add wasm32-unknown-unknown wasm32-unknown-emscripten wasm32-wasip1
 
       # OpenBLAS is a SYSTEM dependency here, not vendored:
       # `larql-compute`'s Linux target-cfg block pulls in
@@ -154,39 +185,10 @@ jobs:
       # through larql-inference; larql-router has no larql-compute
       # dependency at all - installing it unconditionally is simpler and
       # harmless).
-      #
-      # Native x86_64 OpenBLAS lives in its own step, separate from the
-      # i686 attempt below, on purpose - see that step's comment for why.
       - name: Install OpenBLAS (native, x86_64)
         run: |
           sudo apt-get update
           sudo apt-get install -y libopenblas-dev pkg-config
-
-      # Confirmed empirically (2026-09-30 CI run, not merely suspected):
-      # `libopenblas-dev:i386` does not exist in Ubuntu noble's archives at
-      # all - `apt-get install` fails with "Unable to locate package"
-      # even though the i386 Packages indices themselves fetch fine.
-      # OpenBLAS simply is not built for i386 there; this is the state of
-      # the archive, not a multiarch-plumbing mistake to fix. That first
-      # CI run also surfaced a second, more important bug this split
-      # fixes: this step used to install BOTH the native and i386
-      # packages together with no `continue-on-error`, so i386's failure
-      # ran under GitHub Actions' default `bash -e`, aborted the step
-      # before `PKG_CONFIG_ALLOW_CROSS` was even set, and - because the
-      # STEP itself had no continue-on-error - took the entire job down
-      # with it, skipping every rung including Rung 4/4's real,
-      # mandatory x86_64-unknown-linux-gnu gate. A speculative i686 leg
-      # must never be able to fail the one target in this job everything
-      # else depends on; isolating it here is what actually guarantees
-      # that.
-      - name: Install 32-bit i686 cross support (Linux)
-        id: i686_deps
-        continue-on-error: true
-        run: |
-          sudo dpkg --add-architecture i386
-          sudo apt-get update
-          sudo apt-get install -y gcc-multilib libc6-dev-i386 libopenblas-dev:i386 pkg-config:i386
-          echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
 
       - name: Cache cargo registry (downloads only, never target/)
         uses: actions/cache@v6
@@ -236,35 +238,16 @@ jobs:
         continue-on-error: true
         run: cargo check --target wasm32-wasip1 -p ${{ matrix.crate }} --bins ${{ matrix.extra_flags }}
 
-      # ── Rung 4/4 (gnu), x86_64-unknown-linux-gnu leg: the one target
-      # in this job with a full native OS underneath it. This is the
-      # first rung expected to actually pass, so - unlike Rungs 1-3 - it
-      # is a REAL gate: no continue-on-error, and a failure here fails
-      # the job.
+      # ── Rung 4/4 (gnu), x86_64-unknown-linux-gnu: the one target in
+      # this job with a full native OS underneath it. This is the first
+      # rung expected to actually pass, so - unlike Rungs 1-3 - it is a
+      # REAL gate: no continue-on-error, and a failure here fails the
+      # job.
       - name: 'Rung 4/4 (gnu, x86_64-unknown-linux-gnu): cargo check'
         run: cargo check --target x86_64-unknown-linux-gnu -p ${{ matrix.crate }} --bins ${{ matrix.extra_flags }}
 
       - name: 'Rung 4/4 (gnu, x86_64-unknown-linux-gnu): cargo test'
         run: cargo test --target x86_64-unknown-linux-gnu -p ${{ matrix.crate }} ${{ matrix.extra_flags }}
-
-      # ── Rung 4/4 (gnu), i686-unknown-linux-gnu leg: also a Tier-1 GNU
-      # target, and in principle also a real gate. It is marked
-      # continue-on-error here ONLY because of the 32-bit OpenBLAS
-      # cross-packaging risk flagged above, not because the target
-      # itself is any less "real" than x86_64 - an x86_64 CPU runs i686
-      # code natively, so this is not an emulation concern, purely a
-      # "will `libopenblas-dev:i386` resolve and link cleanly" one. Once
-      # a real run confirms the package set above, remove
-      # `continue-on-error` here to make it a full gate like x86_64's.
-      - name: 'Rung 4/4 (gnu, i686-unknown-linux-gnu): cargo check'
-        id: rung4_i686_check
-        continue-on-error: true
-        run: cargo check --target i686-unknown-linux-gnu -p ${{ matrix.crate }} --bins ${{ matrix.extra_flags }}
-
-      - name: 'Rung 4/4 (gnu, i686-unknown-linux-gnu): cargo test'
-        id: rung4_i686_test
-        continue-on-error: true
-        run: cargo test --target i686-unknown-linux-gnu -p ${{ matrix.crate }} ${{ matrix.extra_flags }}
 
       - name: Ladder summary
         if: always()
@@ -277,9 +260,7 @@ jobs:
             echo "| 2 | wasm32-unknown-emscripten | ${{ steps.rung2.outcome }} |"
             echo "| 3 | wasm32-wasip1 | ${{ steps.rung3.outcome }} |"
             echo "| 4 (gnu) | x86_64-unknown-linux-gnu | real gate above |"
-            echo "| - | i686 32-bit cross deps install | ${{ steps.i686_deps.outcome }} |"
-            echo "| 4 (gnu) | i686-unknown-linux-gnu (check) | ${{ steps.rung4_i686_check.outcome }} |"
-            echo "| 4 (gnu) | i686-unknown-linux-gnu (test) | ${{ steps.rung4_i686_test.outcome }} |"
+            echo "| - | i686-unknown-linux-gnu | dropped 2026-09-30, see file header |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ── Binary-crate ladder, leg 2: the Tier-1 GNU target that needs a
@@ -308,13 +289,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-gnu
+      # aarch64-unknown-linux-gnu is this runner's own native host
+      # target, so it is already present the moment the pinned toolchain
+      # auto-installs - this step exists for self-documentation and
+      # uniformity with the other jobs, not because it does real work.
+      - name: Add rustup target (aarch64-unknown-linux-gnu)
+        run: rustup target add aarch64-unknown-linux-gnu
 
       # A native arm64 machine, so this is the plain apt package - no
-      # multiarch/multilib dance like the i686 leg above.
+      # multiarch/multilib dance like the (now-dropped) i686 leg needed.
       - name: Install OpenBLAS (Linux, aarch64)
         run: |
           sudo apt-get update
@@ -367,10 +350,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-gnu
+      # x86_64-pc-windows-gnu is a cross target on this runner (its
+      # native host is x86_64-pc-windows-msvc), so it genuinely needs
+      # adding. This is exactly the job that first surfaced the
+      # toolchain-pin bug documented in the file header (confirmed
+      # 2026-09-30: `error[E0463]: can't find crate for 'core'`, "the
+      # x86_64-pc-windows-gnu target may not be installed" - the target
+      # had only ever been added to the "stable" channel, never to the
+      # rust-toolchain.toml-pinned 1.98.0 every actual cargo invocation
+      # here resolves) - plain `rustup target add` fixes it.
+      - name: Add rustup target (x86_64-pc-windows-gnu)
+        run: rustup target add x86_64-pc-windows-gnu
 
       # `windows-latest` defaults to the MSVC toolchain; rustc's gnu
       # targets still shell out to a real `gcc`/`ld` to link, which MSVC
@@ -476,10 +466,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: riscv64gc-unknown-linux-gnu
+      # riscv64gc-unknown-linux-gnu is a cross target from this runner's
+      # native x86_64-unknown-linux-gnu host. Plain `rustup target add`,
+      # not `dtolnay/rust-toolchain@stable` - see the file header: the
+      # same toolchain-pin mismatch confirmed broken on the windows-gnu
+      # leg applies identically here.
+      - name: Add rustup target (riscv64gc-unknown-linux-gnu)
+        run: rustup target add riscv64gc-unknown-linux-gnu
 
       # gcc-riscv64-linux-gnu/libc6-dev-riscv64-cross: the cross-compiler
       # and target sysroot rustc's riscv64gc-unknown-linux-gnu linker
@@ -497,10 +490,10 @@ jobs:
             gcc-riscv64-linux-gnu g++-riscv64-linux-gnu libc6-dev-riscv64-cross \
             qemu-user-static
 
-      # riscv64 is an Ubuntu "ports" architecture (unlike i386, which sits
+      # riscv64 is an Ubuntu "ports" architecture (unlike i386, which sat
       # on the main archive), so its packages live under ports.ubuntu.com,
       # not the default mirrors - `dpkg --add-architecture` alone is not
-      # enough here the way it was for the i686 leg's :i386 packages.
+      # enough here.
       #
       # Confirmed empirically (2026-09-30 CI run): a plain `apt-get
       # update` after adding riscv64 as a foreign architecture does NOT
@@ -508,17 +501,33 @@ jobs:
       # every OTHER already-configured source (azure.archive.ubuntu.com,
       # security.ubuntu.com, the runner's default main-archive mirrors)
       # for a riscv64 index too, since none of those source entries
-      # restrict `Architectures:` to amd64/i386. Those mirrors do not
-      # host riscv64 at all, so that update fails outright with a 404 on
-      # every one of them before ever reaching the ports.ubuntu.com
-      # fetch that would actually succeed. The fix is to scope the update
-      # to just the newly-added list file, leaving every other source's
-      # already-cached (amd64/i386) indices untouched.
+      # restrict `Architectures:` to amd64. Those mirrors do not host
+      # riscv64 at all, so that update fails outright with a 404 on every
+      # one of them before ever reaching the ports.ubuntu.com fetch that
+      # would actually succeed. The fix is to scope the update to just
+      # the newly-added list file, leaving every other source's
+      # already-cached (amd64) indices untouched.
+      #
+      # Confirmed empirically (second 2026-09-30 CI run, after the fix
+      # above landed): the scoped update itself then succeeds, but
+      # `libopenblas-dev:riscv64`'s real implementation packages
+      # (libopenblas-pthread-dev/-openmp-dev/-serial-dev, its Depends
+      # alternatives) came back "not installable" even though they do
+      # exist for riscv64 on Ubuntu noble (verified directly against
+      # packages.ubuntu.com/noble/riscv64/libopenblas-pthread-dev). The
+      # bug was narrower than "riscv64 lacks this package": the source
+      # line only added the bare `noble` suite/pocket, missing
+      # `noble-updates` and `noble-security` - the same pocket set every
+      # other source on this runner already carries for amd64.
       - name: Install OpenBLAS for riscv64 (ports archive)
         run: |
           sudo dpkg --add-architecture riscv64
-          echo "deb [arch=riscv64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -cs) main universe" \
-            | sudo tee /etc/apt/sources.list.d/ports-riscv64.list
+          CODENAME=$(lsb_release -cs)
+          {
+            echo "deb [arch=riscv64] http://ports.ubuntu.com/ubuntu-ports $CODENAME main universe"
+            echo "deb [arch=riscv64] http://ports.ubuntu.com/ubuntu-ports $CODENAME-updates main universe"
+            echo "deb [arch=riscv64] http://ports.ubuntu.com/ubuntu-ports $CODENAME-security main universe"
+          } | sudo tee /etc/apt/sources.list.d/ports-riscv64.list
           sudo apt-get update \
             -o Dir::Etc::sourcelist="sources.list.d/ports-riscv64.list" \
             -o Dir::Etc::sourceparts="-" \
@@ -676,19 +685,22 @@ jobs:
       - uses: actions/checkout@v7
 
       # All twelve targets are Tier 2 (without host tools) and ship
-      # prebuilt core+alloc rlibs through plain `rustup target add` on a
-      # STABLE toolchain - none of them need `-Zbuild-std` or a nightly
-      # switch. That is specifically what distinguishes wasm32v1-none
-      # from hand-rolling the same frozen feature set on
+      # prebuilt core+alloc rlibs through plain `rustup target add` on
+      # the pinned stable toolchain - none of them need `-Zbuild-std` or
+      # a nightly switch. That is specifically what distinguishes
+      # wasm32v1-none from hand-rolling the same frozen feature set on
       # wasm32-unknown-unknown (see the write-up), and it is also why
       # aarch64-unknown-uefi/x86_64-unknown-uefi fit here despite std
-      # itself being unavailable on stable for them - core+alloc, the only
-      # thing `cargo check --lib` needs, is.
-      - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-          targets: ${{ matrix.target }}
+      # itself being unavailable on stable for them - core+alloc, the
+      # only thing `cargo check --lib` needs, is. No `components:
+      # clippy` input needed here - rust-toolchain.toml already declares
+      # `components = ["clippy", "rustfmt"]`, so the pinned toolchain's
+      # auto-install (triggered by this very command - see the file
+      # header for why a plain `rustup target add` replaced
+      # `dtolnay/rust-toolchain@stable` in every job) brings clippy along
+      # for free.
+      - name: Add rustup target (${{ matrix.target }})
+        run: rustup target add ${{ matrix.target }}
 
       - name: Cache cargo registry (downloads only, never target/)
         uses: actions/cache@v6
@@ -800,7 +812,7 @@ jobs:
   # mirror image of why clippy above has to run once per target: clippy
   # only lints the cfg-resolved code a real compilation would produce,
   # fmt never resolves cfg at all, so there is exactly one fmt check to
-  # run, not eight.
+  # run, not one per target.
   #
   # The workspace-wide clippy-fix pass below is deliberately NOT scoped
   # to the five no_std-plausible crates: std-vs-core/alloc precision is
@@ -816,10 +828,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
+      # No extra target needed - this job only ever runs on the native
+      # host. This step exists purely to force+confirm the pinned
+      # toolchain's auto-install (with its declared clippy+rustfmt
+      # components) happens here, predictably, rather than as a side
+      # effect buried inside the first real cargo command below.
+      - name: Resolve pinned toolchain (rust-toolchain.toml)
+        run: rustc --version --verbose
 
       - name: Install OpenBLAS
         run: sudo apt-get update && sudo apt-get install -y libopenblas-dev pkg-config
