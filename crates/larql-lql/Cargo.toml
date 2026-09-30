@@ -9,7 +9,6 @@ description = "LQL parser, executor, and REPL for LARQL"
 
 [dependencies]
 larql-compute = { path = "../larql-compute" }
-larql-compute-metal = { path = "../larql-compute-metal", optional = true }
 larql-core = { path = "../larql-core" }
 larql-inference = { path = "../larql-inference" }
 larql-kv = { path = "../larql-kv" }
@@ -21,13 +20,6 @@ rustyline = "15"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-
-[features]
-default = []
-# Umbrella for GPU-backend support. Mirrors the `gpu` feature in
-# `larql-compute` / `larql-inference` / `larql-vindex` so workspace
-# tests can be built with `--features gpu` from this package.
-gpu = ["dep:larql-compute-metal", "larql-inference/gpu", "larql-vindex/gpu"]
 
 [dev-dependencies]
 criterion = "0.5"

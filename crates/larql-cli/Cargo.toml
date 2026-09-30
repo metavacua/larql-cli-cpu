@@ -15,7 +15,6 @@ path = "src/main.rs"
 larql-router = { path = "../larql-router", default-features = false }
 larql-core = { path = "../larql-core" }
 larql-compute = { path = "../larql-compute" }
-larql-compute-metal = { path = "../larql-compute-metal", optional = true }
 larql-inference = { path = "../larql-inference" }
 larql-kv = { path = "../larql-kv" }
 larql-models = { path = "../larql-models" }
@@ -47,18 +46,12 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 tempfile = "3"
 
 [features]
-default = ["gpu", "research"]
+default = ["research"]
 # Research / interpretability tooling: the `larql dev` tree (incl. ov-rd),
 # `k3-ledger`, `parity`, `moe-locality`, `optimizer-mcp` and
 # `shannon verify`. On for dev builds and CI; tagged release binaries
 # (.github/workflows/release.yml) are built without it.
 research = []
-gpu = [
-    "dep:larql-compute-metal",
-    "larql-inference/gpu",
-    "larql-kv/gpu",
-    "larql-vindex/gpu",
-]
 
 [dev-dependencies]
 # `test-utils` exposes `larql_models::test_fixtures::make_test_weights`,

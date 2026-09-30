@@ -12,7 +12,6 @@ description = "Pluggable KV-cache engines for larql-inference (markov-rs, unlimi
 larql-inference = { path = "../larql-inference" }
 larql-execution = { path = "../larql-execution" }
 larql-compute = { path = "../larql-compute" }
-larql-compute-metal = { path = "../larql-compute-metal", optional = true }
 larql-vindex = { path = "../larql-vindex" }
 larql-boundary = { path = "../larql-boundary" }
 
@@ -41,10 +40,6 @@ blas-src = { version = "0.10", features = ["accelerate"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 ndarray = "0.16"
 blas-src = { version = "0.10", default-features = false }
-
-[features]
-default = []
-gpu = ["dep:larql-compute-metal", "larql-inference/gpu"]
 
 [dev-dependencies]
 # CONTINUATION-MEM-1's harness reads KvView::backing_addresses (test-utils only).
