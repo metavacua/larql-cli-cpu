@@ -8,6 +8,10 @@
     "riscv32imafc-unknown-none-elf": "expected-fail",
     "riscv32imc-unknown-none-elf": "expected-fail",
     "riscv64gc-unknown-none-elf": "expected-fail",
-    "riscv64imac-unknown-none-elf": "expected-fail"
+    "riscv64imac-unknown-none-elf": "expected-fail",
+    "aarch64-unknown-none": "expected-fail",
+    "x86_64-unknown-none": "expected-fail",
+    "aarch64-unknown-uefi": "expected-fail",
+    "x86_64-unknown-uefi": "expected-fail"
   }
 }

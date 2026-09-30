@@ -10,9 +10,33 @@
 #      compilation get as OS services are progressively taken away (down
 #      to none at all), and do the other three Tier-1 GNU targets
 #      (aarch64, i686, x86_64-pc-windows-gnu) - which nothing else here
-#      builds - still really pass?
-#   2. For the five LIBRARY crates with no obviously-unconditional OS
-#      coupling, how far would a `#![no_std]` port get today?
+#      builds - still really pass? One deliberate Tier-1-only exception:
+#      riscv64gc-unknown-linux-gnu (Tier 2 WITH host tools) is also a real
+#      gate here, not just a diagnostic rung - see binary-gnu-riscv64
+#      below for why this one non-Tier-1 target earns the same "must
+#      compile and run" bar as the Tier-1 legs.
+#   2. For the LIBRARY crates with no obviously-unconditional OS coupling,
+#      how far would a `#![no_std]` port get today, across both a
+#      "decomposition" set (wasm32v1-none, the riscv32/64-*-none-elf
+#      family, aarch64-unknown-none, x86_64-unknown-none - freestanding
+#      core+alloc-only targets) and their "composition" partners (the
+#      full-OS GNU targets one architecture over, several of which are
+#      already real gates in question 1)? aarch64-unknown-uefi and
+#      x86_64-unknown-uefi ride the same mechanism (stable-shipped
+#      core+alloc, no host tools) but are included for a different
+#      reason - not a new failure class the -none family doesn't already
+#      catch, but a genuinely distinct deployment scenario (a
+#      bootloader-stage tool reading a vindex manifest before an OS
+#      loads).
+#
+# Considered and deliberately left out: riscv64a23-unknown-linux-gnu. It
+# is Tier 2 WITHOUT host tools with no stable prebuilt std today, so using
+# it at all needs `-Zbuild-std`, which is nightly-only. Every job in this
+# file runs on the same pinned-stable discipline as the rest of this repo
+# (rust-toolchain.toml); nothing here ever switches to nightly for one
+# target. If riscv64a23 - or any genuinely Tier-3 target - is ever worth
+# adding, it belongs in a separate, dedicated nightly-toolchain workflow,
+# never mixed into this stable-only file.
 #
 # Scope note: this workflow was designed against this repository's own
 # 14-crate closure specifically (larql-cli-cpu, the CPU-only extraction),
@@ -397,6 +421,113 @@ jobs:
       - name: 'Rung 4/4 (gnu, x86_64-pc-windows-gnu): cargo test'
         run: cargo test --target x86_64-pc-windows-gnu -p ${{ matrix.crate }} ${{ matrix.extra_flags }}
 
+  # ── Binary-crate ladder, leg 4: riscv64gc-unknown-linux-gnu. Not a
+  # Tier-1 target (Tier 2 WITH host tools), but explicitly promoted to the
+  # same "must compile AND run" bar as the Tier-1 legs above: the
+  # riscv32/64-*-none-elf family in library-no-std-check decomposes the
+  # RV64GC profile into its extension subsets (I/M/A/F/D/C, the "G"
+  # umbrella), and riscv64gc-unknown-linux-gnu is exactly their full-OS
+  # composition - the one target that recombines that whole extension set
+  # under a real kernel+libc. No native riscv64 GitHub-hosted runner
+  # exists, so this leg cross-compiles from an x86_64 host and RUNS the
+  # resulting binary under QEMU user-mode emulation (qemu-riscv64-static)
+  # rather than stopping at `cargo check` the way that would leave "must
+  # run" unchecked.
+  binary-gnu-riscv64:
+    name: binary gnu gate (riscv64gc, cross+qemu) · ${{ matrix.crate }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - crate: larql-cli
+            extra_flags: ''
+          - crate: larql-router
+            extra_flags: ''
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: riscv64gc-unknown-linux-gnu
+
+      # gcc-riscv64-linux-gnu/libc6-dev-riscv64-cross: the cross-compiler
+      # and target sysroot rustc's riscv64gc-unknown-linux-gnu linker
+      # needs. qemu-user-static - NOT the docs page's stated
+      # qemu-system-riscv64, which is a full-system emulator and does not
+      # provide qemu-riscv64-static at all (confirmed directly against the
+      # actual .deb file listing, not just the docs prose) - is what
+      # actually ships /usr/bin/qemu-riscv64-static, the user-mode
+      # emulator that runs a riscv64 ELF binary directly on this x86_64
+      # runner.
+      - name: Install riscv64 cross-toolchain + QEMU user-mode emulation
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-riscv64-linux-gnu g++-riscv64-linux-gnu libc6-dev-riscv64-cross \
+            qemu-user-static
+
+      # riscv64 is an Ubuntu "ports" architecture (unlike i386, which sits
+      # on the main archive), so its packages live under ports.ubuntu.com,
+      # not the default mirrors - `dpkg --add-architecture` alone is not
+      # enough here the way it was for the i686 leg's :i386 packages. This
+      # whole step is the least battle-tested part of this leg: no other
+      # workflow in this repo cross-links OpenBLAS for a ports-only
+      # architecture. If it does not resolve cleanly, the fix belongs
+      # here, not in the cargo invocation below.
+      - name: Install OpenBLAS for riscv64 (ports archive)
+        run: |
+          sudo dpkg --add-architecture riscv64
+          echo "deb [arch=riscv64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -cs) main universe" \
+            | sudo tee /etc/apt/sources.list.d/ports-riscv64.list
+          sudo apt-get update
+          sudo apt-get install -y libopenblas-dev:riscv64 pkg-config
+          echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH_riscv64_unknown_linux_gnu=/usr/lib/riscv64-linux-gnu/pkgconfig" >> "$GITHUB_ENV"
+
+      # A real linker (the cross-gcc above) for building, and a runner
+      # that hands the resulting binary to qemu-riscv64-static with the
+      # cross sysroot so dynamic linking resolves against riscv64
+      # libraries at test-run time, not this runner's native x86_64 ones.
+      - name: Configure cross linker + QEMU runner for riscv64gc-unknown-linux-gnu
+        run: |
+          {
+            echo "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER=riscv64-linux-gnu-gcc"
+            echo "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUNNER=qemu-riscv64-static -L /usr/riscv64-linux-gnu"
+          } >> "$GITHUB_ENV"
+
+      - name: Cache cargo registry (downloads only, never target/)
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-reg2-target-matrix-riscv64-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-reg2-target-matrix-riscv64-
+
+      - name: No compiled workspace artefacts may be restored
+        shell: bash
+        run: |
+          if [ -e target ]; then
+            echo "::error::target/ was restored from cache - the cache key or path is wrong"
+            exit 1
+          fi
+
+      # A REAL gate: "larql-cli must compile and run on
+      # riscv64gc-unknown-linux-gnu" is a hard requirement, not a
+      # diagnostic rung - unlike the wasm rungs in leg 1, there is no
+      # continue-on-error here.
+      - name: 'riscv64gc-unknown-linux-gnu: cargo check'
+        run: cargo check --target riscv64gc-unknown-linux-gnu -p ${{ matrix.crate }} --bins ${{ matrix.extra_flags }}
+
+      - name: 'riscv64gc-unknown-linux-gnu: cargo test (under QEMU user-mode emulation)'
+        run: cargo test --target riscv64gc-unknown-linux-gnu -p ${{ matrix.crate }} ${{ matrix.extra_flags }}
+
   # ── Library-crate conditional no_std check. ──
   #
   # Each cell's expected outcome is declared in that crate's own
@@ -462,11 +593,33 @@ jobs:
           - larql-vindex-spec
           - larql-models
           - larql-core
-        # wasm32v1-none plus every riscv32/64-*-none-elf target Tier 2
-        # covers - see the accompanying write-up for why this specific
-        # pairing (a frozen-feature-set wasm target plus a real hardware
-        # ISA with a mixed atomics story) catches more than either
-        # family alone.
+        # Two families here, on purpose:
+        #
+        #   Decomposition (12 targets): wasm32v1-none, every
+        #   riscv32/64-*-none-elf target Tier 2 covers, plus
+        #   aarch64-unknown-none and x86_64-unknown-none. Each is a
+        #   freestanding, core+alloc-only target with no OS underneath -
+        #   see the accompanying write-up for why pairing a
+        #   frozen-feature-set wasm target with a real hardware ISA's
+        #   mixed atomics story (riscv32i has none; riscv32imac/imafc do;
+        #   aarch64 always does - AArch64 mandates atomics in its base
+        #   ISA, unlike RISC-V's optional "A" extension) catches more than
+        #   either family alone. aarch64-unknown-none/x86_64-unknown-none
+        #   complete this decomposition for the two architectures whose
+        #   full-OS composition (aarch64-unknown-linux-gnu,
+        #   x86_64-unknown-linux-gnu) is already a real gate above, the
+        #   same pairing riscv64gc-unknown-linux-gnu completes for RV64GC.
+        #
+        #   UEFI (2 targets): aarch64-unknown-uefi, x86_64-unknown-uefi.
+        #   Mechanically identical to the decomposition set for what this
+        #   job actually runs - `cargo check --lib` only needs core+alloc,
+        #   and rustup's stable-shipped UEFI artifacts are no_std-only
+        #   today regardless of std's "work in progress" status (real std
+        #   support needs nightly + `-Zbuild-std`, which this job never
+        #   uses - see the file header). Included for a different reason
+        #   than the decomposition set: not a new failure class, but a
+        #   genuinely distinct real-world scenario (a bootloader-stage
+        #   tool reading a vindex manifest before an OS loads).
         target:
           - wasm32v1-none
           - riscv32i-unknown-none-elf
@@ -476,16 +629,23 @@ jobs:
           - riscv32imc-unknown-none-elf
           - riscv64gc-unknown-none-elf
           - riscv64imac-unknown-none-elf
+          - aarch64-unknown-none
+          - x86_64-unknown-none
+          - aarch64-unknown-uefi
+          - x86_64-unknown-uefi
 
     steps:
       - uses: actions/checkout@v7
 
-      # All eight targets are Tier 2 (without host tools) and ship
+      # All twelve targets are Tier 2 (without host tools) and ship
       # prebuilt core+alloc rlibs through plain `rustup target add` on a
       # STABLE toolchain - none of them need `-Zbuild-std` or a nightly
       # switch. That is specifically what distinguishes wasm32v1-none
       # from hand-rolling the same frozen feature set on
-      # wasm32-unknown-unknown (see the write-up).
+      # wasm32-unknown-unknown (see the write-up), and it is also why
+      # aarch64-unknown-uefi/x86_64-unknown-uefi fit here despite std
+      # itself being unavailable on stable for them - core+alloc, the only
+      # thing `cargo check --lib` needs, is.
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
         with:
