@@ -101,11 +101,18 @@ jobs:
       - name: Check default features
         run: cargo check -p larql-core --all-targets
 
+      # `io`/`engine` are structural (module-inclusion) features, not
+      # optional-third-party-dependency features like `http`/`msgpack` -
+      # they exist so target-matrix.yml can isolate `algo`+`core` alone
+      # via a genuine `--no-default-features` with nothing re-added (see
+      # crates/larql-core/Cargo.toml). This check's actual intent has
+      # always been "no optional third-party deps," not "no io/engine
+      # modules," so `io,engine` are re-added here to keep that meaning.
       - name: Check no default features
-        run: cargo check -p larql-core --no-default-features --all-targets
+        run: cargo check -p larql-core --no-default-features --features io,engine --all-targets
 
       - name: Check msgpack-only feature
-        run: cargo check -p larql-core --no-default-features --features msgpack --all-targets
+        run: cargo check -p larql-core --no-default-features --features msgpack,io,engine --all-targets
 
       - name: Clippy default features
         run: cargo clippy -p larql-core --all-targets -- -D warnings
@@ -115,8 +122,8 @@ jobs:
 
       - name: Feature matrix tests
         run: |
-          cargo test -p larql-core --no-default-features
-          cargo test -p larql-core --no-default-features --features msgpack
+          cargo test -p larql-core --no-default-features --features io,engine
+          cargo test -p larql-core --no-default-features --features msgpack,io,engine
 
       - name: Test benchmarks
         run: cargo test -p larql-core --benches
