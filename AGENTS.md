@@ -6,6 +6,8 @@ This file provides guidance to AI coding agents (Claude Code, Codex, opencode, e
 
 LARQL decompiles transformer model weights into a **vindex** — a directory of mmap'd files that can be queried like a graph database. **LQL** (Lazarus Query Language) is the SQL-like surface for browsing, mutating, and recompiling that knowledge. The core claim: the model *is* the database, so edits are structural (patch overlays on gate/down matrices), not fine-tuning.
 
+**This repository is the CPU-only `larql` CLI**, extracted from a larger upstream workspace ([README](README.md#where-this-came-from) has the provenance). There is no GPU backend crate and no `gpu` feature, and none should be added back: a backend belongs behind the registry described under *There is no GPU backend here*, below.
+
 Extraction tiers gate which LQL statements work: `browse` (DESCRIBE/WALK/SELECT), `inference` (+INFER), `all` (+COMPILE); `attention` is a tier for the client-only slice for `run --ffn URL`. Patches (`.vlp` JSON files) stack onto a readonly base vindex — INSERT/DELETE/UPDATE auto-start a patch; base files are never mutated.
 
 ## Workspace layout
@@ -35,15 +37,8 @@ larql-compute     CPU substrate: BLAS kernels, residual norms, attention spine
                   substrate callers), forward_overrides env-var registry,
                   PerLayerDecodeState, vision encoder CPU forward
                   (encoders/vision_tower.rs), projector CPU forward
-                  (connectors/projector.rs). CPU-only — Metal lives in the peer
-                  below (larql-compute ADR-019). ADR-0022 moved substrate down from
+                  (connectors/projector.rs). ADR-0022 moved substrate down from
                   larql-inference; the substrate is now self-contained.
-    ↓
-larql-compute-metal  Metal GPU backend (first-class PEER of larql-compute — same
-                     trait surface, owns its kernels, NOT downstream of it).
-                     Ships custom MSL shaders, multi-layer pipelining,
-                     stage-bisected kernels. Default features workspace-wide pull
-                     it in and it only compiles on macOS.
     ↓
 larql-vindex      vindex lifecycle: extract, load, query, mutate, patch, save,
                   Vindexfile. Implements `KvIndex for VectorIndex` (Step 3a).
@@ -78,13 +73,10 @@ larql-boundary    confidence-gated BOUNDARY ref codec (final-layer residuals
     ↓
 larql-lql         lexer/parser/executor/REPL + USE REMOTE client
     ↓
-larql-server      HTTP + gRPC server serving vindexes (V2 and VINDEX3
-                  containers — bootstrap::load_artifact forks on generation)
-larql-router      layer-shard router for distributed larql-server; pairs with
-                  larql-router-protocol (generated tonic/prost + QUIC wrapper)
-vindex-cli        format-native VINDEX3 tooling (`vindex` binary): plan, encode,
-                  inspect, describe, diff, verify, represent and export. Answers
-                  from the container's own declarations; execution lives in larql.
+larql-router      layer-shard router (library + `larql-router` binary) for
+                  distributed larql-server deployments; pairs with
+                  larql-router-protocol (generated tonic/prost + QUIC wrapper).
+                  larql-cli uses its VINDEX3 HTTP shard transports.
 larql-factory     Vindex Factory driver: recipe schema, build_id, structural
                   validation, capability manifest, card generator
 larql-cli         top-level `larql` binary (subcommands live in
@@ -95,46 +87,32 @@ larql-cli         top-level `larql` binary (subcommands live in
                   image decode/resize (image_input.rs), plan assembly
                   (run_cmd_image.rs). 3-image regression test in
                   tests/multimodal_e2e.rs (#[ignore], NOT FOR CI).
-larql-demos       runnable demos of shipped capabilities — every `--example`
-                  demo lives here (examples/{boundary,compute,core,inference,
-                  kv,lql,models,server,vindex}/); benches stay per-crate
+larql-continuation-fixture
+                  test-only cdylib: the C5 continuation provider as a plugin.
+                  Nothing links it; larql-cli's plugin gate builds it by
+                  package name and dlopens the result.
 larql-experts     nested workspace of WASM virtual experts (wasm32-wasip1
                   cdylibs, JSON ABI) the engine dispatches to
-larql-python      PyO3 bindings (maturin-built, module name `larql._native`)
 
-# Portable (no larql-* deps; extract to sibling repo later, name stable)
-model-compute         bounded native kernels (arithmetic/datetime) and optional
-                      wasmtime-hosted WASM modules (features: `native`/`wasm`)
+# Portable (no larql-* deps)
 larql-vindex-spec     public vindex on-disk contract: Rust types, JSON Schema,
                       validation thresholds (canonical home of ExtractLevel)
 larql-execution       execution-refusal semantics (RefusalKind) shared across
                       the runtime crates
 ```
 
-**`crates/larql-experts` is its own nested workspace** (own Cargo.toml with `[workspace]` members) — it builds the `wasm32-wasip1` expert modules that `model-compute`'s `wasm` feature hosts. Root `cargo build --workspace` does not include it — which also means the workspace-wide `clippy`, `coverage` and `test` sweeps miss it, so code there is not gated by `make ci`.
+Upstream also has `larql-compute-metal`, `larql-server`, `larql-demos`, `vindex-cli`, `larql-python` and `model-compute`. None of them is here, and nothing in `larql`'s build reaches them.
 
-**Metal is a first-class peer** (ADR-0022, 2026-05-18). Its crate has its own
-[README](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/README.md) — read that before changing kernels,
-dispatch policy or anything under `shaders/`; the operator controls and the
-measurement protocol are documented there and nowhere else. `larql-compute-metal`
-is the same shape as a future `larql-compute-vulkan` / `larql-compute-cuda` —
-its own crate, implements the same trait surface, owns its kernels. Inference
-factories (`default_engine_backend()`, `default_async_engine_backend()`,
-`default_compute_backend()` in `larql-inference/src/lib.rs`) compose Metal +
-CPU fallback explicitly; engine-level orchestration in `layer_graph/` still
-branches on `#[cfg(feature = "gpu", target_os = "macos")]` where the
-hybrid + GPU prefill paths take backend-specific actions.
+**`crates/larql-experts` is its own nested workspace** (own Cargo.toml with `[workspace]` members) — it builds the `wasm32-wasip1` expert modules that `larql-inference`'s WASM expert registry loads for `larql run --experts`. Root `cargo build --workspace` does not include it — which also means the workspace-wide `clippy`, `coverage` and `test` sweeps miss it, so code there is not gated by `make ci`.
+**There is no GPU backend here.** Backends are chosen through a registry, never a cfg: `larql-compute`'s `BackendKind` + `backend_from_spec`, fed by `larql-cli`'s `backend_select::backend_registry()` (empty in this build), and `larql-inference`'s `default_engine_backend()` / `default_async_engine_backend()` / `default_compute_backend()` factories. A backend crate added later (upstream's Metal backend is the model: its own crate, the same trait surface, its own kernels) implements the `ComputeBackend` traits and registers in those places, with no edits to callers. Code named `gpu` in `larql-inference` (for example `layer_graph/generate/gpu/`) is trait-generic dispatch that probes backend capabilities; it is not GPU code and compiles everywhere.
 
-**`model-compute` never imports `larql-*`.** Dependency flow is one-way:
-LARQL may consume it (e.g. for compile-time `sum(1..100)` resolution); it
-knows nothing about vindex or LQL. When it moves to a sibling repo, the
-name stays the same so imports don't churn. The `install_edge` primitive
+The `install_edge` primitive
 that stamps a compiled edge into gate/up/down tensors lives at
 [crates/larql-cli/src/commands/extraction/compile_cmd/edge.rs](crates/larql-cli/src/commands/extraction/compile_cmd/edge.rs) —
 it's the lowest-level step of the `COMPILE` verb and isn't a separate crate
 until a second consumer needs it.
 
-The CLI is a thin dispatcher: each `larql <cmd>` lives in [crates/larql-cli/src/commands/{primary,extraction,query,dev,diagnostics}/](crates/larql-cli/src/commands/) and is wired into the `Commands` enum in [crates/larql-cli/src/main.rs](crates/larql-cli/src/main.rs) under help headings (Run / Build / Query / LQL / Server / Research / Factory). The everyday verbs — `run`, `chat`, `bench`, `serve`, `vindex3`, `shannon` — are in `primary/`, not `extraction/` or `query/`; check where a command's siblings live before adding one. Research tooling — the `larql dev` tree (incl. `ov-rd`), `k3-ledger`, `parity`, `moe-locality`, `optimizer-mcp` and `shannon verify` — is compiled only with larql-cli's `research` cargo feature: on by default (dev builds, CI), off in the tagged release binaries (`release.yml`); a new research verb goes behind `#[cfg(feature = "research")]` and must keep the `--no-default-features` clippy shape clean. Legacy research subcommands (`larql walk`, `larql weight-extract`, …) trampoline to `larql dev <subcmd>` via an argv rewrite in [`trampoline.rs`](crates/larql-cli/src/trampoline.rs), and every name in that trampoline must resolve to a real `dev` subcommand — three did not until 2026-08-23, turning a clean error into a misleading one. Without `research`, the trampoline refuses every research name with an error naming the missing feature instead of letting clap produce a misleading one. `larql serve` exec's into `larql-server`. `larql repl` and `larql lql` delegate to `larql_lql::run_repl`/`run_statement`.
+The CLI is a thin dispatcher: each `larql <cmd>` lives in [crates/larql-cli/src/commands/{primary,extraction,query,dev,diagnostics}/](crates/larql-cli/src/commands/) and is wired into the `Commands` enum in [crates/larql-cli/src/main.rs](crates/larql-cli/src/main.rs) under help headings (Run / Build / Query / LQL / Server / Research / Factory). The everyday verbs — `run`, `chat`, `bench`, `serve`, `vindex3`, `shannon` — are in `primary/`, not `extraction/` or `query/`; check where a command's siblings live before adding one. Research tooling — the `larql dev` tree (incl. `ov-rd`), `k3-ledger`, `moe-locality`, `optimizer-mcp` and `shannon verify` — is compiled only with larql-cli's `research` cargo feature: on by default (dev builds, CI), off in the tagged release binaries (`release.yml`); a new research verb goes behind `#[cfg(feature = "research")]` and must keep the `--no-default-features` clippy shape clean. Legacy research subcommands (`larql walk`, `larql weight-extract`, …) trampoline to `larql dev <subcmd>` via an argv rewrite in [`trampoline.rs`](crates/larql-cli/src/trampoline.rs), and every name in that trampoline must resolve to a real `dev` subcommand — three did not until 2026-08-23, turning a clean error into a misleading one. Without `research`, the trampoline refuses every research name with an error naming the missing feature instead of letting clap produce a misleading one. `larql serve` exec's a separately installed `larql-server`, which this repository does not build. `larql repl` and `larql lql` delegate to `larql_lql::run_repl`/`run_batch`.
 
 LQL parser and executor are split: [crates/larql-lql/src/parser/](crates/larql-lql/src/parser/) and [crates/larql-lql/src/executor/](crates/larql-lql/src/executor/) both carry `lifecycle`, `query`, `mutation`, `introspection`, `trace` — though on the executor side several are now directories, and the executor additionally owns `vindex3.rs`, `compact.rs`, `knowledge.rs`, `tuning.rs`, `relation_resolver.rs` and `remote/` with no parser twin. The symmetry is a starting point, not an invariant. When adding a statement, touch the AST in [crates/larql-lql/src/ast.rs](crates/larql-lql/src/ast.rs), then both sides.
 
@@ -144,32 +122,19 @@ LQL parser and executor are split: [crates/larql-lql/src/parser/](crates/larql-l
 
 ```bash
 cargo build --release                             # optimised build
-cargo build --release --features gpu              # GPU backend (Metal today; Vulkan/CUDA later)
 cargo test                                        # entire workspace
 cargo test -p larql-lql                           # single crate
-cargo test -p larql-inference --features gpu      # +GPU tests (Metal on Apple Silicon)
 cargo test -p <crate> <test_name>                 # single test
 make ci                                           # fmt-check + clippy -D warnings + test-full
 make fmt                                          # cargo fmt --all
 make lint                                         # cargo clippy --workspace --tests -- -D warnings
 ```
 
-- Non-macOS builds need `--no-default-features`. The default gpu feature pulls in larql-compute-metal, which only compiles on macOS; CI uses `--no-default-features` on Linux/Windows.
+- No feature flags are needed on any OS: the default features are just larql-cli's `research`. `--no-default-features` gives the release shape. Linux needs a system OpenBLAS (`libopenblas-dev`); macOS uses Accelerate; Windows builds without a BLAS.
 - `make test` is intentionally fast — `cargo test --workspace --lib --bins` (no integration tests). Use `make test-full` for `cargo test --workspace`, `make test-models` for the `#[ignore]`d model-backed goldens in larql-inference (`-- --ignored`), and `make larql-<crate>-ci` for the per-crate gate CI runs (fmt-check + lint + test + bench-test + coverage). Beyond per-crate workflows, `.github/workflows/quality.yml` adds cargo-audit/deny, MSRV, buf lint, and a dead-doc-link gate (scripts/check_doc_links.py).
 - Re-bench across architectures before landing perf claims — `make bench-cross-arch` runs Gemma 3 4B, Gemma 4 31B, Llama 2, Mistral 7B, Gemma 4 26B (ADR-017): an A/B promoted on Gemma 3 4B alone must be re-bench'd here.
 
-CLI (after `cargo build --release`): `./target/release/larql extract-index … | repl | lql '…' | convert | hf | build | serve | verify`, plus the **`larql vindex3`** family (`plan`, `ops`, `exec`, `encode`, …) — the VINDEX3 container surface, and the home of the current perf instrument `vindex3 exec --backend metal-lowered --generate N --profile`. See [docs/cli.md](docs/cli.md) for the full surface, but note it does not yet document `vindex3`; read `crates/larql-cli/src/commands/primary/vindex3_cmd/` for that family.
-
-Python bindings are maturin-built under uv (not cargo-run):
-
-```bash
-cd crates/larql-python
-uv sync --no-install-project --group dev     # create .venv, install dev deps
-uv run --no-sync maturin develop --release   # build PyO3 extension into .venv
-uv run --no-sync pytest tests/               # run binding tests
-```
-
-Or via the Makefile: `make python-setup | python-build | python-test | python-clean`.
+CLI (after `cargo build --release`): `./target/release/larql extract-index … | repl | lql '…' | convert | hf | build | serve | verify`, plus the **`larql vindex3`** family (`plan`, `ops`, `exec`, `encode`, …) — the VINDEX3 container surface, and the home of the current perf instrument `vindex3 exec --backend production --generate N --profile`. See [docs/cli.md](docs/cli.md) for the full surface, but note it does not yet document `vindex3`; read `crates/larql-cli/src/commands/primary/vindex3_cmd/` for that family.
 
 ## Code standards
 
@@ -183,7 +148,7 @@ These are the release bar. They apply to every crate and to test code as well as
 
 **Decoupling**
 - **Respect the dependency chain above.** Lower crates never name higher ones. Cycles are broken with a trait in the lower crate (the `KvIndex` pattern), not with a dependency edge.
-- **Front-ends are thin.** `larql-cli`, `larql-server` and `larql-python` parse, dispatch and format. Forward passes, format parsing, quantisation and analysis live in library crates, so all three front-ends get the same behaviour.
+- **Front-ends are thin.** `larql-cli` parses, dispatches and formats. Forward passes, format parsing, quantisation and analysis live in library crates, so every front-end (here and upstream) gets the same behaviour.
 - **Use public APIs across module boundaries.** Don't reach into a sibling's internals or widen visibility (`pub` where `pub(crate)` suffices) to make that possible.
 
 **No hardcoding**
@@ -196,9 +161,8 @@ These are the release bar. They apply to every crate and to test code as well as
 **Correctness**
 - **Check defaults. Don't assume them.** Read a declared config value, then agree with it or refuse. An unread value that happens to match today is a latent wrong answer.
 - **Library code must not panic on untrusted input.** Vindex/GGUF/safetensors headers, `config.json`, LQL text and HTTP requests return errors. `unwrap`/`expect` need an invariant the code itself establishes, stated in the message. Use checked arithmetic on header-derived sizes and offsets.
-- **Fail loudly, never fall back silently.** A missing tensor, an unsupported declaration or a GPU failure is an error or a visible refusal, never a quiet CPU or default path.
+- **Fail loudly, never fall back silently.** A missing tensor, an unsupported declaration or a backend that is not compiled in is an error or a visible refusal, never a quiet default path.
 - **`unsafe` carries a `// SAFETY:` comment** stating the invariant it relies on.
-- **Metal tests must not skip.** Construct the backend with `.expect(…)` (or `common::get_metal()`), never `let Some(..) = MetalBackend::new() else { return }`. Shaders compile at runtime, so a skip reads as a pass.
 
 **Gates**
 - **Every file needs ≥90% line coverage**, enforced through each crate's `coverage-policy.json`. Raise debt baselines toward 90. Never ratchet them down.
@@ -232,5 +196,4 @@ These are the release bar. They apply to every crate and to test code as well as
 - Trace format (.bin/.bndx/.ctxt): [crates/larql-inference/docs/trace-format.md](crates/larql-inference/docs/trace-format.md), [docs/residual-trace.md](docs/residual-trace.md)
 - ADRs: [docs/adr/](docs/adr/) (0001–0026 — wire format, grid, compute-trait extraction ADR-0022, multimodal seam ADR-0023, ...). Some crates have their own specifc ADRs in `crates/<crate-name>/doc/adr`.
 - KV-cache engines: [crates/larql-kv/README.md](crates/larql-kv/README.md), [crates/larql-kv/docs/state-policy.md](crates/larql-kv/docs/state-policy.md); Vindex Factory: [docs/vindex-factory.md](docs/vindex-factory.md)
-- Experimental work: `~/chris-source/chris-experiments/` — numbered 01-45, grouped into foundations, compilation, routing, and shannon series
-- Python bindings docs: [crates/larql-python/README.md](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-python/README.md), [docs/larql-python.md](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/larql-python.md)
+- What this extraction changed: [README](README.md), [crates/larql-cli/CHANGELOG.md](crates/larql-cli/CHANGELOG.md) and the history after the import commit

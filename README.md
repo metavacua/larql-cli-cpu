@@ -1,133 +1,143 @@
-# LARQL
+# larql-cli-cpu
 
-**Execute, query and study a model as an artifact.**
+**The LARQL command-line interface, CPU-only.**
 
-LARQL is the reference implementation of **VINDEX3** and a research system for
-model execution, representation and evidence. VINDEX3 describes a model's
-logical objects, physical representations and executable semantics. LARQL can
-run that program, record its computation, inspect its structure, and test
-claims about its behavior.
+This repository is the `larql` binary from [LARQL](https://github.com/chrishayuk/larql)
+and exactly the crates it builds from, with the Metal GPU backend taken out.
+Nothing here needs a GPU, macOS or a server. The same code builds and tests
+on Linux, macOS and Windows.
 
-**Encode · Run · Represent · Observe · Intervene · Query** describes the
-project's scope. Each surface has its own maturity and evidence boundary;
-[status](docs/vindex3/status.md) distinguishes supported interfaces from active
-research. **Planned:** sharded/partial execution and multimodal embedding
-handoff; both are explicitly refused until their execution contracts and parity
-gates exist ([planned capabilities](docs/vindex3/status.md#planned-capabilities)).
-The graph-database thesis remains: the model itself is the object
-being queried, rather than a separate database of extracted facts.
+LARQL treats a transformer's weights as an artifact you can query. It
+decompiles them into a **vindex**, a directory of mmap'd files you browse,
+mutate and recompile with **LQL**, a SQL-like language. It is also the
+reference implementation of **VINDEX3**, a container that describes a
+model's logical objects, physical representations and executable semantics.
+LARQL can run that program, record its computation and test claims about its
+behavior. [What is VINDEX3?](docs/vindex3/what-is-vindex3.md) is the place to
+start, and [status](docs/vindex3/status.md) separates supported interfaces
+from active research.
 
-**Class: CURRENT.** Start with [What is VINDEX3?](docs/vindex3/what-is-vindex3.md).
-[Machine-derived facts](docs/generated/current-facts.md) give this checkout's
-versions, schemas and command inventory. [vindex3.org](https://vindex3.org)
-teaches the format; the [candidate specification](crates/larql-vindex/docs/vindex3-format-spec.md)
-is its versioned contract.
+## Where this came from
+
+This tree was extracted from
+[metavacua/larql-to-sparql](https://github.com/metavacua/larql-to-sparql)
+(a fork of chrishayuk/larql) at commit
+[`f02693c90`](https://github.com/metavacua/larql-to-sparql/commit/f02693c90c1a9d51438dcc0a2479ba46959fb913)
+with `git filter-repo`. The history of every file kept here survives,
+including files moved in from paths that were dropped. The commits after
+the import record each change the extraction made, one topic per commit.
+
+| Kept | Why |
+|---|---|
+| `larql-cli`, and the 13 crates `cargo tree -p larql-cli --no-default-features` reaches | the binary and its whole dependency closure |
+| `larql-continuation-fixture` | the CLI's plugin tests build it by package name |
+| `larql-experts` (nested workspace) | `larql run --experts` finds its WASM modules by path |
+| `registry/`, `data/`, test fixtures | compiled in with `include_str!`, or read by tests |
+| docs, scripts | kept when kept code cites them. Anything they link to that stayed behind is a permalink to the source commit |
+
+| Left out | Why |
+|---|---|
+| `larql-compute-metal` and every `gpu` feature | this is the CPU build |
+| `larql-server` | it would add 24 third-party crates, including `aws-lc-sys` and a build-time download, and would switch the CLI's rustls provider through feature unification. `larql serve` still runs a separately installed server |
+| `larql-demos`, `vindex-cli`, `larql-python`, `model-compute` | nothing in `larql`'s build reaches them |
 
 ## Build and try it
 
-Use the repository's pinned Rust toolchain:
+The toolchain is pinned in [`rust-toolchain.toml`](rust-toolchain.toml) and
+rustup fetches it automatically.
 
 ```bash
-cargo build --release -p vindex-cli -p larql-cli
+# Linux needs a system OpenBLAS: sudo apt-get install libopenblas-dev
+# macOS uses Accelerate; Windows builds without a BLAS.
+cargo build --release -p larql-cli
 ```
 
-On Linux and Windows add `--no-default-features`; the default GPU feature uses
-Metal on macOS. Invoke the binaries from Cargo's release target directory or
-add it to PATH. With a local, supported Hugging Face checkpoint:
+Encode and run a VINDEX3 container straight from the Hugging Face hub. `plan`
+and `encode` read the checkpoint's safetensors by byte range and never
+download the whole thing:
 
 ```bash
-# Admit the source, encode its declared structure, inspect the result.
-vindex plan /path/to/checkpoint --json
-vindex encode /path/to/checkpoint --output model.vindex3
-vindex inspect model.vindex3 --json
-vindex verify model.vindex3
-
-# Read its executable program and record a real decode.
-larql vindex3 ops model.vindex3
-larql vindex3 observe model.vindex3 --backend production \
-  --prompt "The capital of France is" --record run.jsonl
+larql vindex3 plan hf://HuggingFaceTB/SmolLM2-135M --output plan.json
+larql vindex3 encode hf://HuggingFaceTB/SmolLM2-135M --output smol.vindex3 \
+  --capability text-generation
+larql vindex3 inspect smol.vindex3
+larql vindex3 ops smol.vindex3
+larql run smol.vindex3 "The capital of France is"
 ```
 
-`plan` and `encode` also accept `hf://org/repo@revision`. Admission and backend
-support are explicit gates, not a promise that every checkpoint executes.
-See [execution](docs/vindex3/execution.md) for generation and serving, and the
-[standalone vindex README](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/vindex-cli/README.md) for format operations.
-
-## A model can leave an execution record
-
-The canonical decode path exposes carrier writes with site identity and
-provenance. Optional lenses read states through the model's normalization and
-head. The [Observatory](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/observatory/README.md) imports records for coordinated
-inspection and replay. Head/source attribution and intervention research build
-on these records, with separate contracts for descriptive evidence and causal
-claims. A projected contribution is not a counterfactual.
-
-[Observation and intervention](docs/vindex3/observation-and-intervention.md)
-explains those boundaries. [Current research](docs/vindex3/status.md#current-research)
-links the evidence and frozen protocols.
-
-## Representations with evidence
-
-VINDEX3 separates logical model identity from physical encodings. REPRESENT
-compiles alternate representations and provides accounting, candidate identity,
-evidence ingestion and measurement/search contracts. Smaller bytes, executable
-support and acceptable behavior are separately established claims.
+Extract a VINDEX2 vindex and query it with LQL:
 
 ```bash
-# Compile a 4-bit deployment image, then measure it against the source.
-larql vindex3 represent model.vindex3 --output deploy.vindex3 --encoding NVFP4 --deployment
-larql vindex3 token-bank export model.vindex3 \
-  --prompts bench/prompts/quality-bank-1/prompts.json --output bank/
-larql vindex3 measure --reference model.vindex3 --reference-backend production \
-  --candidate deploy.vindex3 --candidate-backend production-nvfp4 \
-  --bank bank/ --sequences 69 --label nvfp4 --output out/nvfp4
+larql extract HuggingFaceTB/SmolLM2-135M -o smol.vindex --level browse
+larql lql 'USE "smol.vindex"; DESCRIBE "France";'
 ```
 
-Start with [representation](docs/vindex3/representation.md) and its contract
-indexes. Encodings and execution providers this build does not ship load from
-shared libraries with `--plugin`; see [plugins](docs/vindex3/plugins.md).
+The [CLI reference](docs/cli.md) covers every command. The
+[LQL guide](docs/lql-guide.md) and [language specification](crates/larql-lql/docs/spec.md)
+cover the query language, and [operations and patches](crates/larql-vindex/docs/operations-spec.md)
+covers overlays and compilation. [Execution](docs/vindex3/execution.md),
+[representation](docs/vindex3/representation.md),
+[observation and intervention](docs/vindex3/observation-and-intervention.md)
+and [plugins](docs/vindex3/plugins.md) cover the VINDEX3 surfaces.
 
-## Existing vindexes and LQL
+## What is different from upstream
 
-VINDEX2 extraction, mmap gate queries, LQL, patch overlays and compilation
-remain part of LARQL. Default extraction still follows the
-[generation policy](docs/vindex-generation-policy.md); use an explicit V3
-encoding path for the workflow above. Base vindexes are immutable: mutations
-use overlays and compilation produces a new artifact.
+The GPU surface, and what referred to it. The
+[CLI changelog](crates/larql-cli/CHANGELOG.md) lists every user-visible
+change:
 
-For those workflows, use the [LQL guide](docs/lql-guide.md),
-[language specification](crates/larql-lql/docs/spec.md),
-[operations and patches](crates/larql-vindex/docs/operations-spec.md),
-[Factory](docs/vindex-factory.md), and [Python bindings](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/larql-python.md).
+- **Removed commands and flags.** `larql parity`, `larql shannon decode-diff`
+  and `shannon encode|decode --vindex` only ever worked with Metal, and on a
+  CPU build they could only refuse. `--metal` is gone from every command.
+- **`larql bench` defaults to `--backends cpu`**, and it refuses a backend
+  name it does not know rather than skipping it.
+- **Refusals name what the build lacks.** Nothing asks you to rebuild with a
+  `gpu` feature, because there is none.
 
-## Architecture and development
+Some things only ever worked with Metal and still do not work here. The
+commands exist and behave exactly as upstream CPU builds did:
 
-[Stack architecture](docs/architecture-stack.md) maps ownership across every crate;
-[generated workspace facts](docs/generated/workspace-facts.md) track dependencies
-and features. [VINDEX3 architecture](docs/vindex3/architecture.md) explains the
-container execution path.
-`larql-vindex` owns the container and canonical interpreter; CPU and Metal
-crates provide numerical backends; `larql-inference` owns runtime/session
-composition. CLI, LQL and server layers expose those capabilities.
+- `bench --ffn`, `run --ffn` and `dec-bench drift`: the remote-FFN decode
+  path needs a fused decode hook that only Metal implemented
+- `vindex3 measure`'s teacher-forced procedure and `vindex3 sensitivity`
+  moment capture: these refuse, and say why
+- `larql serve` execs a `larql-server` binary, which this repository does
+  not build
+
+## How it is verified
+
+No build ran on the machine that did the extraction. Every compile and test
+ran on GitHub Actions.
+
+- **Per-crate workflows and `quality`** run fmt, `clippy -D warnings`, tests,
+  coverage, MSRV, cargo-audit/deny, the proto lint and the documentation
+  gates, on Linux, macOS and Windows.
+- **Behavioral equivalence.** The [LQL strategy matrix](.github/workflows/lql-strategy-matrix.yml)
+  builds `larql`, produces vindexes from SmolLM2-135M through every extraction
+  recipe (VINDEX2 levels, quantisation transforms, and VINDEX3 plan/encode),
+  and runs the full LQL command corpus against each one. Its results here
+  are compared cell by cell with the source repository's run at the
+  extraction commit.
+
+## Development
 
 ```bash
-cargo test -p vindex-cli
-cargo test -p larql-vindex
-make ci
+make ci                  # fmt-check + clippy -D warnings + the full test suite
+make larql-cli-ci        # one crate's gate
+python3 scripts/check_doc_links.py
+python3 scripts/check_doc_references.py --strict
 python3 scripts/current_facts.py --check
 ```
 
-Use `--no-default-features` for portable Cargo builds/tests. Model-backed and
-performance experiments have additional controls; a fixture pass is not a
-model-wide fidelity or speed claim. [AGENTS.md](AGENTS.md) documents workspace
-invariants and build conventions.
-
-The [documentation index](docs/README.md) leads to specifications, runtime
-contracts, research records and ADRs. The [documentation policy](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/docs/documentation-policy.md)
-keeps current explanations separate from versioned contracts and historical
-evidence. Historical benchmarks retain their original conditions in research
-records rather than serving as a universal performance promise.
+[AGENTS.md](AGENTS.md) is the guide for working in this tree: the crate
+dependency chain, code standards and invariants.
+[Stack architecture](docs/architecture-stack.md) maps ownership across the
+crates. [Generated workspace facts](docs/generated/workspace-facts.md) track
+their dependencies and features. The [documentation index](docs/README.md)
+leads to specifications, runtime contracts, research records and ADRs.
 
 ## License
 
-See [LICENSE](LICENSE).
+Apache-2.0, as upstream. See [LICENSE](LICENSE). This is a modified version
+of LARQL. The files changed by the extraction are recorded in this
+repository's history, starting at the import commit.

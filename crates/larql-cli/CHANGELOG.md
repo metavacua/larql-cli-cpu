@@ -9,6 +9,40 @@ pre-1.0 phase. Forward-looking work lives in [`ROADMAP.md`](ROADMAP.md).
 Entries migrated from ROADMAP.md on 2026-05-10; pre-2026-05-10 entries
 preserve the date and voice they were originally written in.
 
+## [2026-09-30] — CPU-only: the GPU surface leaves the CLI
+
+This repository was extracted from metavacua/larql-to-sparql at `f02693c90`
+as the CPU-only `larql`. There is no `gpu` feature: the default features are
+just `research`, on every platform.
+
+**Removed, because on a CPU build they could only refuse:**
+
+- `larql parity`, the CPU-vs-Metal-vs-reference diff. Its implementation
+  only ever existed in the Metal build.
+- `larql shannon decode-diff`, CPU-vs-Metal parity across the
+  prefill/decode seam.
+- `larql shannon encode|decode --vindex`, the Q4K route, whose forced-token
+  scorer is Metal-only. Encode and decode keep their raw-weights path.
+- `--metal` on `run`, `walk`, `bench`, `dec-bench capture|drift` and
+  `dev ov-rd eval-program|induce-program`.
+
+**Changed:**
+
+- `larql bench --backends` defaults to `cpu` (it was `metal`, which made a
+  bare `larql bench <vindex>` fail on this build). A backend name the V2 path
+  does not know is refused instead of skipped.
+- `dev ov-rd eval-program` records `intervention_backend: "cpu"` instead of
+  `"cpu_fallback"`.
+- Refusals that told you to rebuild with the `gpu` feature now say what this
+  build lacks.
+
+**Still Metal-only, unchanged in behavior:** `run --ffn`, `bench --ffn` and
+`dec-bench drift` need a remote-FFN decode hook the CPU backend does not
+implement, and fail during prefill with a `… returned None during prefill`
+error. `vindex3 measure`'s teacher-forced procedure and `vindex3
+sensitivity` moment capture refuse. `larql serve` execs a separately
+installed `larql-server`.
+
 ## [2026-08-01] — `k3-ledger freq-mass`: grade a resident expert set on events, not support
 
 **`larql k3-ledger freq-mass --pool <capture>`** — frequency-mass coverage from
