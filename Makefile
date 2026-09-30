@@ -1,4 +1,4 @@
-.PHONY: build release test test-fast test-full test-integration test-models check clean fmt lint demos bench bench-core bench-inference bench-compute bench-wire bench-routing bench-grid bench-all bench-vindex bench-vindex-scaling bench-save bench-check coverage coverage-summary larql-core-ci larql-core-test larql-core-fmt-check larql-core-lint larql-core-feature-test larql-core-bench-test larql-core-bench larql-core-examples larql-core-coverage larql-core-coverage-html larql-models-ci larql-models-test larql-models-fmt-check larql-models-lint larql-models-coverage larql-models-coverage-summary larql-models-coverage-html larql-models-coverage-policy larql-models-bench-test larql-vindex-ci larql-vindex-test larql-vindex-fmt-check larql-vindex-lint larql-vindex-examples larql-vindex-bench-test larql-vindex-bench larql-vindex-coverage larql-vindex-coverage-summary larql-vindex-coverage-html larql-vindex-coverage-policy larql-factory-ci larql-factory-test larql-factory-fmt-check larql-factory-lint larql-factory-coverage larql-factory-coverage-summary larql-factory-coverage-html larql-factory-coverage-policy larql-compute-test larql-compute-test-fast larql-compute-test-integration larql-compute-check-fast larql-compute-check-tests larql-compute-check-all larql-compute-test-metal-decode larql-compute-test-metal-lib larql-compute-fmt-check larql-compute-lint larql-compute-coverage larql-compute-coverage-summary larql-compute-coverage-html larql-compute-coverage-policy larql-compute-ci larql-compute-metal-test larql-compute-metal-test-tests larql-compute-metal-check larql-compute-metal-check-tests larql-compute-metal-check-all larql-compute-metal-fmt-check larql-compute-metal-lint larql-compute-metal-coverage larql-compute-metal-coverage-summary larql-compute-metal-coverage-html larql-compute-metal-coverage-policy larql-compute-metal-ci larql-boundary-ci larql-boundary-test larql-boundary-fmt-check larql-boundary-lint larql-boundary-bench-test larql-boundary-examples larql-kv-ci larql-kv-test larql-kv-fmt-check larql-kv-lint larql-kv-examples larql-kv-bench-test larql-kv-bench larql-kv-coverage larql-kv-coverage-summary larql-kv-coverage-html larql-kv-coverage-policy larql-server-ci larql-server-test larql-server-fmt-check larql-server-lint larql-server-coverage larql-server-coverage-summary larql-server-coverage-html larql-server-coverage-policy larql-router-ci larql-router-test larql-router-fmt-check larql-router-lint larql-router-coverage larql-router-coverage-summary larql-router-coverage-html larql-router-coverage-policy larql-lql-ci larql-lql-test larql-lql-fmt-check larql-lql-lint larql-lql-examples larql-lql-bench-test larql-lql-coverage-summary larql-cli-ci larql-cli-test larql-cli-fmt-check larql-cli-lint larql-cli-coverage larql-cli-coverage-summary larql-cli-coverage-html larql-cli-coverage-policy larql-inference-ci larql-inference-test larql-inference-fmt-check larql-inference-lint larql-inference-bench-test larql-inference-coverage-summary
+.PHONY: build release test test-fast test-full test-integration test-models larql-core-test larql-core-feature-test larql-core-fmt-check larql-core-lint larql-core-bench-test larql-core-bench larql-core-coverage larql-core-coverage-html larql-core-ci larql-models-test larql-models-fmt-check larql-models-lint larql-models-bench-test larql-models-coverage-policy larql-models-coverage larql-models-coverage-summary larql-models-coverage-html larql-models-ci larql-vindex-test larql-vindex-fmt-check larql-vindex-lint larql-vindex-examples larql-vindex-bench-test larql-vindex-bench larql-vindex-coverage-policy larql-vindex-coverage larql-vindex-coverage-summary larql-vindex-coverage-html larql-vindex-ci larql-factory-test larql-factory-fmt-check larql-factory-lint larql-factory-coverage-policy larql-factory-coverage larql-factory-coverage-summary larql-factory-coverage-html larql-factory-ci larql-kv-test larql-kv-fmt-check larql-kv-lint larql-kv-examples larql-kv-bench-test larql-kv-bench larql-kv-coverage-policy larql-kv-coverage larql-kv-coverage-summary larql-kv-coverage-html larql-kv-ci larql-compute-test larql-compute-test-fast larql-compute-check-fast larql-compute-check-tests larql-compute-check-all larql-compute-test-integration larql-compute-fmt-check larql-compute-lint larql-compute-coverage-policy larql-compute-coverage larql-compute-coverage-summary larql-compute-coverage-html larql-compute-ci larql-boundary-test larql-boundary-fmt-check larql-boundary-lint larql-boundary-bench-test larql-boundary-examples larql-boundary-coverage larql-boundary-coverage-html larql-boundary-ci larql-router-test larql-router-fmt-check larql-router-lint larql-router-coverage-policy larql-router-coverage larql-router-coverage-summary larql-router-coverage-html larql-router-ci larql-router-protocol-test larql-router-protocol-fmt-check larql-router-protocol-lint larql-router-protocol-coverage-policy larql-router-protocol-coverage-summary larql-router-protocol-ci larql-lql-test larql-lql-fmt-check larql-lql-lint larql-lql-examples larql-lql-bench-test larql-lql-coverage-summary larql-lql-ci larql-cli-test larql-cli-fmt-check larql-cli-lint larql-cli-coverage-policy larql-cli-coverage-summary larql-cli-coverage larql-cli-coverage-html larql-cli-ci larql-inference-test larql-inference-fmt-check larql-inference-lint larql-inference-bench-test larql-inference-coverage-policy larql-inference-coverage larql-inference-coverage-summary larql-inference-coverage-html larql-inference-ci check fmt fmt-check lint ci clean bench bench-core bench-inference bench-compute bench-wire bench-routing bench-cross-arch bench-all bench-vindex bench-vindex-scaling bench-save bench-check coverage coverage-summary extract-test extract-full predict
 
 # Build
 build:
@@ -53,13 +53,6 @@ larql-core-bench-test:
 larql-core-bench:
 	cargo bench -p larql-core --bench graph
 
-larql-core-examples:
-	cargo run -p larql-demos --example edge_demo
-	cargo run -p larql-demos --example graph_demo
-	cargo run -p larql-demos --example algorithm_demo
-	cargo run -p larql-demos --example filter_demo
-	cargo run -p larql-demos --example serialization_demo
-
 larql-core-coverage:
 	@if ! command -v cargo-llvm-cov >/dev/null 2>&1; then \
 		echo "cargo-llvm-cov not installed. Install with:"; \
@@ -75,7 +68,7 @@ larql-core-coverage-html:
 	cargo llvm-cov --package larql-core --html --output-dir coverage/larql-core
 	@echo "Report: coverage/larql-core/html/index.html"
 
-larql-core-ci: larql-core-fmt-check larql-core-lint larql-core-test larql-core-feature-test larql-core-bench-test larql-core-examples
+larql-core-ci: larql-core-fmt-check larql-core-lint larql-core-test larql-core-feature-test larql-core-bench-test
 
 larql-models-test:
 	cargo test -p larql-models
@@ -331,75 +324,45 @@ larql-kv-coverage-html:
 
 larql-kv-ci: larql-kv-fmt-check larql-kv-lint larql-kv-test larql-kv-examples larql-kv-bench-test larql-kv-coverage-summary
 
-# larql-compute — CPU/Metal kernels and backend contracts
+# larql-compute — CPU kernels and backend contracts
 #
-# After the larql-compute-metal extraction (ADR-019), `larql-compute`
-# is CPU-only and clears the 90% per-file default on every file; the
+# `larql-compute` clears the 90% per-file default on every file; the
 # total is ~97%.  Keep this floor near current as a ratchet — raise
 # it whenever the per-file numbers move up.
 LARQL_COMPUTE_COVERAGE_MIN ?= 95
 LARQL_COMPUTE_COVERAGE_POLICY ?= crates/larql-compute/coverage-policy.json
 LARQL_COMPUTE_COVERAGE_REPORT ?= coverage/larql-compute/summary.json
 
-# Per-file floors for the Metal backend live in
-# crates/larql-compute-metal/coverage-policy.json with current debt
-# baselines locked at floor(measured) — see the policy_note for the
-# multi-day arc to ratchet these toward 90 (the goal).
-LARQL_COMPUTE_METAL_COVERAGE_MIN ?= 90
-LARQL_COMPUTE_METAL_COVERAGE_POLICY ?= crates/larql-compute-metal/coverage-policy.json
-LARQL_COMPUTE_METAL_COVERAGE_REPORT ?= coverage/larql-compute-metal/summary.json
-
 larql-compute-test: larql-compute-test-fast
 
 # Default fast path: library/unit tests only. This deliberately avoids
-# compiling every integration-test binary, including Metal-gated harnesses
-# that have zero runnable tests on default-feature builds.
+# compiling every integration-test binary.
 larql-compute-test-fast:
 	cargo test -p larql-compute --lib
 
 # ── Iteration loops for refactor work (no test execution, just type-check) ──
 #
-# These shave 1–3 minutes off the inner refactor loop versus
-# `cargo test --tests -p larql-compute-metal` by skipping codegen and execution.
-# Use the smallest one that catches the change you're making, then promote
-# to `larql-compute-test-metal-decode` (executes the synthetic decode
-# integration suite) only when ready to validate runtime behaviour.
+# These shave minutes off the inner refactor loop versus running the tests.
+# Use the smallest one that catches the change you're making.
 
-# Fastest type-check — `lib` only, with the `metal` feature on so Metal
-# code is type-checked too. ~5–30 s warm. The right loop for refactors
-# that don't change test signatures (registry sweeps, env-flag plumbing,
-# struct rearrangements that keep field names).
+# Fastest type-check — `lib` only. The right loop for refactors that don't
+# change test signatures.
 larql-compute-check-fast:
-	cargo check -p larql-compute-metal --lib
+	cargo check -p larql-compute --lib
 
-# Type-check `lib` + every integration-test binary under `tests/` with
-# the `metal` feature. ~30 s – 3 min depending on warm cache. Use when a
-# refactor renames or moves something that integration tests reach into
-# (e.g. `MetalBackend`'s public fields).
+# Type-check `lib` + every integration-test binary under `tests/`. Use when
+# a refactor renames or moves something the integration tests reach into.
 larql-compute-check-tests:
-	cargo check -p larql-compute-metal --tests
+	cargo check -p larql-compute --tests
 
 # Same but also walks examples + benches — the most thorough type check
-# short of building everything. Catches breakage in `examples/diag_*`
-# and `benches/quant_matvec` etc that the `--tests` form misses.
+# short of building everything.
 larql-compute-check-all:
-	cargo check -p larql-compute-metal --tests --benches --examples
+	cargo check -p larql-compute --tests --benches --examples
 
-# Run JUST the synthetic-decode integration test under `metal`. Smallest
-# end-to-end runtime validation — ~1–2 min cold, faster warm. Use after
-# `larql-compute-check-tests` passes, before declaring a refactor done.
-larql-compute-test-metal-decode:
-	cargo test -p larql-compute-metal --test test_metal_decode_synthetic
-
-# Metal lib-test execution (the kernels live in the sibling crate
-# per ADR-019).
-larql-compute-test-metal-lib:
-	cargo test -p larql-compute-metal --lib
-
-# Full integration suite — turns on `heavy_tests` for the slow non-Metal
+# Full integration suite — turns on `heavy_tests` for the slow
 # correctness/parity suites and walks every integration binary under
-# crates/larql-compute/tests. The Metal kernel tests live in the
-# larql-compute-metal sibling crate (ADR-019).
+# crates/larql-compute/tests.
 larql-compute-test-integration:
 	cargo test -p larql-compute --features heavy_tests --tests
 
@@ -450,78 +413,6 @@ larql-compute-coverage-html:
 
 larql-compute-ci: larql-compute-fmt-check larql-compute-lint larql-compute-test-fast larql-compute-coverage
 
-# ─────────────────────────────────────────────────────────────────
-# larql-compute-metal — Metal GPU backend (Apple Silicon).
-# Mirrors the larql-compute target shape but skips Linux/Windows CI
-# matrix entries.  Crate compiles to an empty lib on non-macOS.
-# ─────────────────────────────────────────────────────────────────
-
-larql-compute-metal-test:
-	cargo test -p larql-compute-metal --lib -- --test-threads=1
-
-larql-compute-metal-test-tests:
-	cargo test -p larql-compute-metal --tests -- --test-threads=1
-
-larql-compute-metal-check:
-	cargo check -p larql-compute-metal --lib
-
-larql-compute-metal-check-tests:
-	cargo check -p larql-compute-metal --tests
-
-larql-compute-metal-check-all:
-	cargo check -p larql-compute-metal --tests --benches --examples
-
-larql-compute-metal-fmt-check:
-	cargo fmt -p larql-compute-metal -- --check
-
-larql-compute-metal-lint:
-	cargo clippy -p larql-compute-metal --all-targets --no-deps -- -D warnings
-
-larql-compute-metal-coverage-policy:
-	@if [ ! -f "$(LARQL_COMPUTE_METAL_COVERAGE_REPORT)" ]; then \
-		echo "Coverage report not found: $(LARQL_COMPUTE_METAL_COVERAGE_REPORT)"; \
-		echo "Run: make larql-compute-metal-coverage-summary"; \
-		exit 1; \
-	fi
-	python3 scripts/check_coverage_policy.py $(LARQL_COMPUTE_METAL_COVERAGE_REPORT) $(LARQL_COMPUTE_METAL_COVERAGE_POLICY)
-
-larql-compute-metal-coverage:
-	@if ! command -v cargo-llvm-cov >/dev/null 2>&1; then \
-		echo "cargo-llvm-cov not installed. Install with:"; \
-		echo "  cargo install cargo-llvm-cov"; \
-		exit 1; \
-	fi
-	cargo llvm-cov --package larql-compute-metal --fail-under-lines $(LARQL_COMPUTE_METAL_COVERAGE_MIN) -- --test-threads=1
-	@mkdir -p coverage/larql-compute-metal
-	cargo llvm-cov report --package larql-compute-metal --json --summary-only --output-path $(LARQL_COMPUTE_METAL_COVERAGE_REPORT)
-	$(MAKE) larql-compute-metal-coverage-policy
-
-larql-compute-metal-coverage-summary:
-	@if ! command -v cargo-llvm-cov >/dev/null 2>&1; then \
-		echo "cargo-llvm-cov not installed. Install with:"; \
-		echo "  cargo install cargo-llvm-cov"; \
-		exit 1; \
-	fi
-	# `--test-threads=1` serialises env-sensitive tests across lib + tests/.
-	# Many flag tests (LARQL_QKV_FUSED, LARQL_GATE_UP_*, DECODE_DEBUG, etc.)
-	# touch process-global env vars; cargo's default parallel test runner
-	# races on them and drops a coverage binary per cycle.
-	cargo llvm-cov --package larql-compute-metal --summary-only --fail-under-lines $(LARQL_COMPUTE_METAL_COVERAGE_MIN) -- --test-threads=1
-	@mkdir -p coverage/larql-compute-metal
-	cargo llvm-cov report --package larql-compute-metal --json --summary-only --output-path $(LARQL_COMPUTE_METAL_COVERAGE_REPORT)
-	$(MAKE) larql-compute-metal-coverage-policy
-
-larql-compute-metal-coverage-html:
-	@if ! command -v cargo-llvm-cov >/dev/null 2>&1; then \
-		echo "cargo-llvm-cov not installed."; exit 1; \
-	fi
-	cargo llvm-cov --package larql-compute-metal --html --output-dir coverage/larql-compute-metal --fail-under-lines $(LARQL_COMPUTE_METAL_COVERAGE_MIN) -- --test-threads=1
-	cargo llvm-cov report --package larql-compute-metal --json --summary-only --output-path $(LARQL_COMPUTE_METAL_COVERAGE_REPORT)
-	$(MAKE) larql-compute-metal-coverage-policy
-	@echo "Report: coverage/larql-compute-metal/html/index.html"
-
-larql-compute-metal-ci: larql-compute-metal-fmt-check larql-compute-metal-lint larql-compute-metal-test larql-compute-metal-coverage
-
 # larql-boundary — confidence-gated BOUNDARY ref codec
 larql-boundary-test:
 	cargo test -p larql-boundary
@@ -536,8 +427,6 @@ larql-boundary-bench-test:
 	cargo test -p larql-boundary --benches
 
 larql-boundary-examples:
-	cargo run -p larql-demos --example encode_decode
-	cargo run -p larql-demos --example gate_decision
 	cargo run -p larql-boundary --example accuracy
 
 larql-boundary-coverage:
@@ -557,76 +446,11 @@ larql-boundary-coverage-html:
 
 larql-boundary-ci: larql-boundary-fmt-check larql-boundary-lint larql-boundary-test larql-boundary-bench-test larql-boundary-examples
 
-# larql-server — HTTP/gRPC inference server (vindex queries, OpenAI-compat,
-# remote MoE expert shards). The 90% per-file coverage floor (see
-# crates/larql-server/coverage-policy.json) is the goal; existing files
-# carry debt baselines that should ratchet upward, never down.
-#
-# 2026-05-10 measured baseline (post-REV1..REV5 review fixes):
-# **65.68% line / 72.18% function** with all integration tests compiling.
-# This is below the 2026-04-26 ROADMAP claim of 74.2% — coverage drifted
-# during the in-flight `larql-vindex` / `larql-inference` API refactor,
-# and several expert/* routes are 0% because they need a live grid to
-# exercise. Floor is set just below the current value to ratchet upward.
-LARQL_SERVER_COVERAGE_MIN ?= 65
-LARQL_SERVER_COVERAGE_POLICY ?= crates/larql-server/coverage-policy.json
-LARQL_SERVER_COVERAGE_REPORT ?= coverage/larql-server/summary.json
-
-larql-server-test:
-	cargo test -p larql-server
-
-larql-server-fmt-check:
-	cargo fmt -p larql-server -- --check
-
-larql-server-lint:
-	cargo clippy -p larql-server --all-targets -- -D warnings
-
-larql-server-coverage-policy:
-	@if [ ! -f "$(LARQL_SERVER_COVERAGE_REPORT)" ]; then \
-		echo "Coverage report not found: $(LARQL_SERVER_COVERAGE_REPORT)"; \
-		echo "Run: make larql-server-coverage-summary"; \
-		exit 1; \
-	fi
-	python3 scripts/check_coverage_policy.py $(LARQL_SERVER_COVERAGE_REPORT) $(LARQL_SERVER_COVERAGE_POLICY)
-
-larql-server-coverage:
-	@if ! command -v cargo-llvm-cov >/dev/null 2>&1; then \
-		echo "cargo-llvm-cov not installed. Install with:"; \
-		echo "  cargo install cargo-llvm-cov"; \
-		exit 1; \
-	fi
-	cargo llvm-cov --package larql-server --fail-under-lines $(LARQL_SERVER_COVERAGE_MIN) -- --test-threads=1
-	@mkdir -p coverage/larql-server
-	cargo llvm-cov report --package larql-server --json --summary-only --output-path $(LARQL_SERVER_COVERAGE_REPORT)
-	$(MAKE) larql-server-coverage-policy
-
-larql-server-coverage-summary:
-	@if ! command -v cargo-llvm-cov >/dev/null 2>&1; then \
-		echo "cargo-llvm-cov not installed. Install with:"; \
-		echo "  cargo install cargo-llvm-cov"; \
-		exit 1; \
-	fi
-	cargo llvm-cov --package larql-server --summary-only --fail-under-lines $(LARQL_SERVER_COVERAGE_MIN) -- --test-threads=1
-	@mkdir -p coverage/larql-server
-	cargo llvm-cov report --package larql-server --json --summary-only --output-path $(LARQL_SERVER_COVERAGE_REPORT)
-	$(MAKE) larql-server-coverage-policy
-
-larql-server-coverage-html:
-	@if ! command -v cargo-llvm-cov >/dev/null 2>&1; then \
-		echo "cargo-llvm-cov not installed."; exit 1; \
-	fi
-	cargo llvm-cov --package larql-server --html --output-dir coverage/larql-server --fail-under-lines $(LARQL_SERVER_COVERAGE_MIN) -- --test-threads=1
-	cargo llvm-cov report --package larql-server --json --summary-only --output-path $(LARQL_SERVER_COVERAGE_REPORT)
-	$(MAKE) larql-server-coverage-policy
-	@echo "Report: coverage/larql-server/html/index.html"
-
-larql-server-ci: larql-server-fmt-check larql-server-lint larql-server-test
-
 # larql-router — self-assembling grid router + protocol crate.
 # 2026-05-14 measured baseline:
-# **67.58% line / 70.21% function** for router-only test run (server-side
-# integration tests in `crates/larql-server/tests/` exercise additional
-# router code paths but are not counted under -p larql-router).
+# **67.58% line / 70.21% function** for router-only test run (upstream,
+# larql-server's integration tests also exercised router code paths; that
+# crate is not part of this repository).
 LARQL_ROUTER_COVERAGE_MIN ?= 91
 LARQL_ROUTER_COVERAGE_POLICY ?= crates/larql-router/coverage-policy.json
 LARQL_ROUTER_COVERAGE_REPORT ?= coverage/larql-router/summary.json
@@ -718,7 +542,7 @@ larql-router-protocol-coverage-summary:
 
 larql-router-protocol-ci: larql-router-protocol-fmt-check larql-router-protocol-lint larql-router-protocol-test
 
-# larql-lql — LQL parser, executor, REPL. Crate has no metal default;
+# larql-lql — LQL parser, executor, REPL. Crate has no GPU feature;
 # Remote-backend tests use `mockito`, no real model weights required.
 larql-lql-test:
 	cargo test -p larql-lql
@@ -745,10 +569,10 @@ larql-lql-coverage-summary:
 
 larql-lql-ci: larql-lql-fmt-check larql-lql-lint larql-lql-test larql-lql-examples larql-lql-bench-test
 
-# larql-cli — top-level `larql` binary. Default features are `gpu` (Metal
-# on every member crate) + `research`; the CPU-only matrix keeps `research`
-# on so the research tooling stays tested and measured, as in CI.
-LARQL_CLI_DEFAULT_FEATURES ?= --no-default-features --features research
+# larql-cli — top-level `larql` binary. Default features are just `research`,
+# so the research tooling stays tested and measured, as in CI. Override
+# with LARQL_CLI_DEFAULT_FEATURES=--no-default-features for the release shape.
+LARQL_CLI_DEFAULT_FEATURES ?=
 
 larql-cli-test:
 	cargo test -p larql-cli $(LARQL_CLI_DEFAULT_FEATURES)
@@ -847,7 +671,7 @@ larql-inference-coverage:
 		echo "  cargo install cargo-llvm-cov"; \
 		exit 1; \
 	fi
-	cargo llvm-cov --package larql-inference --features gpu --fail-under-lines $(LARQL_INFERENCE_COVERAGE_MIN)
+	cargo llvm-cov --package larql-inference --fail-under-lines $(LARQL_INFERENCE_COVERAGE_MIN)
 	@mkdir -p coverage/larql-inference
 	cargo llvm-cov report --package larql-inference --json --summary-only --output-path $(LARQL_INFERENCE_COVERAGE_REPORT)
 	$(MAKE) larql-inference-coverage-policy
@@ -858,7 +682,7 @@ larql-inference-coverage-summary:
 		echo "  cargo install cargo-llvm-cov"; \
 		exit 1; \
 	fi
-	cargo llvm-cov --package larql-inference --features gpu --summary-only --fail-under-lines $(LARQL_INFERENCE_COVERAGE_MIN)
+	cargo llvm-cov --package larql-inference --summary-only --fail-under-lines $(LARQL_INFERENCE_COVERAGE_MIN)
 	@mkdir -p coverage/larql-inference
 	cargo llvm-cov report --package larql-inference --json --summary-only --output-path $(LARQL_INFERENCE_COVERAGE_REPORT)
 	$(MAKE) larql-inference-coverage-policy
@@ -867,7 +691,7 @@ larql-inference-coverage-html:
 	@if ! command -v cargo-llvm-cov >/dev/null 2>&1; then \
 		echo "cargo-llvm-cov not installed."; exit 1; \
 	fi
-	cargo llvm-cov --package larql-inference --features gpu --html --output-dir coverage/larql-inference
+	cargo llvm-cov --package larql-inference --html --output-dir coverage/larql-inference
 	@echo "Report: coverage/larql-inference/html/index.html"
 
 larql-inference-ci: larql-inference-fmt-check larql-inference-lint larql-inference-test larql-inference-bench-test larql-inference-coverage-summary
@@ -907,12 +731,9 @@ bench-core:
 bench-inference:
 	cargo run --release -p larql-inference --example bench_inference
 
-# Compute kernel criterion bench (quant_matvec — Metal GPU, lives in
-# the larql-compute-metal sibling crate per ADR-019). That crate has no
-# `metal` feature either — it is gated on target_os = "macos" — so the
-# pre-ADR form failed on both counts and took `bench-all` down with it.
+# Compute kernel criterion bench: the CPU Q4_K × Q8_K quantised matvec.
 bench-compute:
-	cargo bench -p larql-compute-metal --bench quant_matvec
+	cargo bench -p larql-compute --bench q4k_q8k_matvec
 
 # Wire codec criterion bench (encode/decode f32/f16/i8 throughput).
 bench-wire:
@@ -921,14 +742,6 @@ bench-wire:
 # Router routing hot-path criterion bench (route/heartbeat/rebuild ns/op).
 bench-routing:
 	cargo bench -p larql-router --bench routing
-
-# Exp 53 ShardService KNN hot-path criterion bench (cache + vindex variants).
-bench-shard-query:
-	cargo bench -p larql-server --bench shard_query
-
-# Grid end-to-end regression gate (requires LARQL_BENCH_FFN_URL env var).
-bench-grid:
-	./scripts/bench-grid-regress.sh $(MODEL)
 
 # Cross-architecture decode bench — runs `larql bench` on Gemma 3 4B,
 # Gemma 4 31B dense, Llama 2 7B, Mistral 7B, Gemma 4 26B A4B in
@@ -988,22 +801,6 @@ coverage-summary:
 		exit 1; \
 	fi
 	cargo llvm-cov --package $(COVERAGE_CRATE) --summary-only
-
-# Python extension (managed via uv)
-python-setup:
-	cd crates/larql-python && uv sync --no-install-project --group dev
-
-python-build: python-setup
-	cd crates/larql-python && uv run --no-sync maturin develop --release
-
-python-test: python-build
-	cd crates/larql-python && uv run --no-sync pytest tests/ -v
-
-python-check:
-	cargo check -p larql-python
-
-python-clean:
-	rm -rf crates/larql-python/.venv crates/larql-python/uv.lock
 
 # Extraction
 extract-test:

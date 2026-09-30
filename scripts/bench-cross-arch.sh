@@ -108,9 +108,9 @@ import json, sys
 out_json, short, family, note = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 with open(out_json) as f:
     data = json.load(f)
-row = next((r for r in data['results'] if r['backend'] == 'larql-metal'), None)
+row = next((r for r in data['results'] if r['backend'] == 'larql-cpu'), None)
 if row is None:
-    print(f"  {short:<32s}  {family:<10s}  (no larql-metal row)")
+    print(f"  {short:<32s}  {family:<10s}  (no larql-cpu row)")
     sys.exit(0)
 tps = row['tok_per_s']
 mean_ms = row['ms_per_tok']['mean']
@@ -139,10 +139,10 @@ baseline_path, current_path, threshold_str, short = sys.argv[1], sys.argv[2], sy
 threshold = float(threshold_str)
 with open(baseline_path) as f: bl = json.load(f)
 with open(current_path) as f: cu = json.load(f)
-b_row = next((r for r in bl['results'] if r['backend'] == 'larql-metal'), None)
-c_row = next((r for r in cu['results'] if r['backend'] == 'larql-metal'), None)
+b_row = next((r for r in bl['results'] if r['backend'] == 'larql-cpu'), None)
+c_row = next((r for r in cu['results'] if r['backend'] == 'larql-cpu'), None)
 if b_row is None or c_row is None:
-    print(f"  {short:<32s}  (missing larql-metal in one of the JSONs)")
+    print(f"  {short:<32s}  (missing larql-cpu in one of the JSONs)")
     sys.exit(0)
 b_tps, c_tps = b_row['tok_per_s'], c_row['tok_per_s']
 delta_pct = (c_tps - b_tps) / b_tps * 100.0
