@@ -452,7 +452,7 @@ fn resolve_lm_head_path(
             label: "Q4 matvec (fast, default)",
             will_fire: q4_will_fire,
             note: format!(
-                "lm_head_q4 mmap/synth = {}, backend.supports_quant(Q4_K) = {}, skip_q4k override = {}  → default Metal lm_head path post 2026-05-02 dispatch fix",
+                "lm_head_q4 mmap/synth = {}, backend.supports_quant(Q4_K) = {}, skip_q4k override = {}  → default lm_head path post 2026-05-02 dispatch fix",
                 has_q4_data,
                 backend.supports_quant(::larql_compute::QuantFormat::Q4_K),
                 skip_q4k,

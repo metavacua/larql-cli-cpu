@@ -248,8 +248,8 @@ pub fn formats(as_json: bool) -> R {
         sf::affine_levels_required() - Container::Q4K.grid_levels().unwrap()
     );
     println!("  Q6_K is the cheapest exact container that can SERVE today.");
-    println!("  MXFP4 has Metal kernels (K1 standalone, K2 grouped) but is absent");
-    println!("  from QuantMatVec dispatch, so kernels != servable. (* = cannot serve)");
+    println!("  MXFP4 is absent from QuantMatVec dispatch, so it cannot serve here.");
+    println!("  (* = cannot serve)");
     println!("  Q5_K is exact but needs a kernel written AND ships more bytes");
     println!("  than native MXFP4 would — strictly dominated, never build it.");
     println!();

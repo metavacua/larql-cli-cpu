@@ -2,7 +2,7 @@
 //!
 //! Two roles:
 //!
-//! - **Inference**: prefill, decode, sampling, KV engines, Metal GPU path,
+//! - **Inference**: prefill, decode, sampling, KV engines on the CPU backend,
 //!   chat templates. `predict`, `generate`, `predict_with_temperature`.
 //! - **Mechanistic interp**: programmatic hooks at every layer boundary,
 //!   logit lens, embedding-neighbor lookups, activation patching, KV-cache
@@ -104,9 +104,10 @@ pub fn cpu_engine_backend() -> Box<dyn EngineBackend> {
     Box::new(larql_compute::CpuBackend)
 }
 
-/// Default backend as `Box<dyn EngineBackend>` — Metal on macOS when
-/// the `gpu` feature is enabled, CPU otherwise. Parallel to
-/// `default_backend()` but returns the wider trait object.
+/// Default backend as `Box<dyn EngineBackend>`: the CPU backend, the only
+/// one this build carries. Parallel to `default_backend()` but returns the
+/// wider trait object. Callers ask for "the default" here rather than
+/// naming `CpuBackend`, so a backend added later composes in this one place.
 pub fn default_engine_backend() -> Box<dyn EngineBackend> {
     cpu_engine_backend()
 }
@@ -120,29 +121,17 @@ pub fn cpu_async_engine_backend() -> Box<dyn AsyncComputeBackend> {
     Box::new(larql_compute::CpuBackend)
 }
 
-/// Default async backend as `Box<dyn AsyncComputeBackend>` — Metal on
-/// macOS when the `gpu` feature is enabled, CPU otherwise. Parallel
-/// to [`default_engine_backend`].
-///
-/// At A3 (scaffolding), the Metal variant delegates every async call
-/// to `CpuBackend`'s async impl — same cost as the sync path. The
-/// tok/s shape changes at A4 when `MetalBackend` lands real deferred
-/// dispatch (one `MTLCommandBuffer` per session).
+/// Default async backend as `Box<dyn AsyncComputeBackend>`: the CPU
+/// backend's degenerate `Ready*`-wrapped impl, the only one this build
+/// carries. Parallel to [`default_engine_backend`].
 pub fn default_async_engine_backend() -> Box<dyn AsyncComputeBackend> {
     cpu_async_engine_backend()
 }
 
-/// Default compute backend as `Box<dyn ComputeBackend>` — Metal on
-/// macOS when the `gpu` feature is enabled, CPU otherwise.
-///
-/// `larql_compute::default_backend()` lost its Metal auto-detection
-/// after the `larql-compute-metal` extraction (the comment in that
-/// function recommends callers construct `MetalBackend` directly).
-/// This factory restores the convenience for callers that want a
-/// runtime-detected GPU backend without `#[cfg(feature = "gpu")]`
-/// gating in every call site — `larql bench --backends metal` uses it,
-/// engines that want a compute backend for `fused_prefill` /
-/// `fused_decode_step` use it.
+/// Default compute backend as `Box<dyn ComputeBackend>`: the CPU backend,
+/// the only one this build carries. Engines that want a compute backend
+/// for `fused_prefill` / `fused_decode_step` go through it, parallel to
+/// [`default_engine_backend`].
 pub fn default_compute_backend() -> Box<dyn larql_compute::ComputeBackend> {
     larql_compute::cpu_backend()
 }
@@ -344,17 +333,11 @@ mod factory_tests {
     //! Coverage for the engine/backend factory functions at the crate root.
     //!
     //! Each factory exists so engines can construct themselves without the
-    //! caller branching on `#[cfg(feature = "gpu")]`. The tests verify
-    //! that the returned trait object is the CPU backend on the default
-    //! build (no `metal` feature on the test runner CI matrix) and that
-    //! each factory's pipeline-back name plumbs through.
-    //!
-    //! On Apple Silicon with the `metal` feature these tests still pass —
-    //! the factories fall back to CPU when `MetalBackend::new()` returns
-    //! `None`, and on metal-capable hardware the returned backend just
-    //! reports a different name. The assertions are deliberately scoped
-    //! to "factory returned a usable backend" rather than "the backend is
-    //! CPU" so both build configurations pass.
+    //! caller naming a backend. The tests verify that the returned trait
+    //! object is usable and that each factory's name plumbs through. The
+    //! `default_*` assertions are scoped to "factory returned a usable
+    //! backend" rather than "the backend is CPU", so a backend composed into
+    //! a factory later does not have to rewrite them.
     use super::*;
     use larql_models::Activation as ArchActivation;
 
@@ -375,9 +358,8 @@ mod factory_tests {
 
     #[test]
     fn default_engine_backend_constructs() {
-        // Returns Metal when the feature + hardware align, CPU otherwise.
-        // The factory is exercised either way — we only check it returns
-        // a backend with a non-empty name.
+        // The factory is exercised whatever it composes — we only check it
+        // returns a backend with a non-empty name.
         let backend = default_engine_backend();
         assert!(!backend.as_compute().name().is_empty());
     }

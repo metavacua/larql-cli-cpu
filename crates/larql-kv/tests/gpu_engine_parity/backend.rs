@@ -56,7 +56,7 @@ fn reports_whether_this_run_actually_exercised_a_gpu_backend() {
     } else {
         eprintln!(
             "[gpu_engine_parity] default backend is {name:?} — this run covered \
-             the CPU path only. Build with `--features gpu` on macOS for GPU coverage."
+             the CPU path only; this build carries no GPU backend."
         );
     }
 }
