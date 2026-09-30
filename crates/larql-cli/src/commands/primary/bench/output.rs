@@ -26,7 +26,6 @@ pub(super) fn render_table(rows: &[BenchRow]) -> Vec<String> {
     }
     out.extend(format_stage_breakdown(rows));
     out.extend(format_remote_ffn_breakdown(rows));
-    out.extend(format_metal_vs_ollama_summary(rows));
     out
 }
 
@@ -209,36 +208,6 @@ pub(super) fn format_remote_ffn_breakdown(rows: &[BenchRow]) -> Vec<String> {
         format!(
             "    total/tok        {:>7.2}ms  →  {:.1} tok/s",
             total, r.tok_per_s
-        ),
-    ]
-}
-
-pub(super) fn format_metal_vs_ollama_summary(rows: &[BenchRow]) -> Vec<String> {
-    let metal = rows
-        .iter()
-        .find(|r| r.backend == "larql-metal" && r.tok_per_s > 0.0);
-    let ollama = rows
-        .iter()
-        .find(|r| r.backend.starts_with("ollama") && r.tok_per_s > 0.0);
-    let (Some(m), Some(o)) = (metal, ollama) else {
-        return Vec::new();
-    };
-    let ratio = m.tok_per_s / o.tok_per_s;
-    let (verb, sign) = if ratio >= 1.0 {
-        ("faster", '>')
-    } else {
-        ("slower", '<')
-    };
-    vec![
-        String::new(),
-        format!(
-            "  → larql-metal is {:.2}× {} {} ollama ({:.1} {} {:.1} tok/s)",
-            if ratio >= 1.0 { ratio } else { 1.0 / ratio },
-            verb,
-            sign,
-            m.tok_per_s,
-            sign,
-            o.tok_per_s,
         ),
     ]
 }
@@ -486,68 +455,6 @@ mod tests {
         let lines = format_remote_ffn_breakdown(&[r]);
         // attn fallback should be the total decode value.
         assert!(lines.iter().any(|l| l.contains("200.00")));
-    }
-
-    #[test]
-    fn metal_vs_ollama_summary_silent_when_either_missing() {
-        let only_metal = vec![{
-            let mut r = empty_row("larql-metal", 100.0);
-            r.tok_per_s = 100.0;
-            r
-        }];
-        assert!(format_metal_vs_ollama_summary(&only_metal).is_empty());
-
-        let only_ollama = vec![{
-            let mut r = empty_row("ollama gemma3:4b", 50.0);
-            r.tok_per_s = 50.0;
-            r
-        }];
-        assert!(format_metal_vs_ollama_summary(&only_ollama).is_empty());
-    }
-
-    #[test]
-    fn metal_vs_ollama_summary_renders_when_both_present() {
-        let rows = vec![
-            {
-                let mut r = empty_row("larql-metal", 80.0);
-                r.tok_per_s = 80.0;
-                r
-            },
-            {
-                let mut r = empty_row("ollama gemma3:4b", 40.0);
-                r.tok_per_s = 40.0;
-                r
-            },
-        ];
-        let lines = format_metal_vs_ollama_summary(&rows);
-        assert!(!lines.is_empty());
-        let summary = lines.last().unwrap();
-        // 80 / 40 = 2.0x faster
-        assert!(summary.contains("2.00×"), "got: {summary}");
-        assert!(summary.contains("faster"));
-    }
-
-    #[test]
-    fn metal_vs_ollama_summary_inverts_when_metal_slower() {
-        let rows = vec![
-            {
-                let mut r = empty_row("larql-metal", 40.0);
-                r.tok_per_s = 40.0;
-                r
-            },
-            {
-                let mut r = empty_row("ollama gemma3:4b", 80.0);
-                r.tok_per_s = 80.0;
-                r
-            },
-        ];
-        let summary = format_metal_vs_ollama_summary(&rows)
-            .last()
-            .cloned()
-            .unwrap();
-        // Should still be displayed as 2.00× slower.
-        assert!(summary.contains("2.00×"), "got: {summary}");
-        assert!(summary.contains("slower"));
     }
 
     #[test]

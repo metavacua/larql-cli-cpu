@@ -249,16 +249,11 @@ fn pick_strategy(quant: larql_vindex::QuantFormat) -> Strategy {
 fn load_runtime(vindex_path: &Path, args: &RunArgs) -> Result<Runtime, BoxErr> {
     let mut cb = SilentLoadCallbacks;
     let cfg = larql_vindex::load_vindex_config(vindex_path)?;
-    let backend = crate::backend_select::backend_for_metal_flag(args.metal)?;
+    let backend = crate::backend_select::cpu_backend()?;
     let strategy = pick_strategy(cfg.quant);
 
     if args.verbose {
-        eprintln!(
-            "strategy: {} (quant={:?}, metal_requested={})",
-            strategy.name(),
-            cfg.quant,
-            args.metal
-        );
+        eprintln!("strategy: {} (quant={:?})", strategy.name(), cfg.quant);
     }
 
     let (weights, index) = match strategy {

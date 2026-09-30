@@ -68,14 +68,13 @@ pub(super) fn run_remote_ffn_bench(
     }
 
     let timeout = Duration::from_secs(args.ffn_timeout_secs);
-    // The dense remote-FFN walk dispatches through the GPU-only
-    // `decode_token_with_moe`; the CPU backend ignores the remote hook and
-    // returns `None` during prefill, so `--metal` is the working
-    // configuration here. An explicit `--metal` with no usable device is a
-    // loud error (see `backend_select`). Each concurrent worker builds its
-    // own backend (this fn runs per spawned thread).
-    let backend: Box<dyn larql_compute::ComputeBackend> =
-        crate::backend_select::backend_for_metal_flag(args.metal)?;
+    // Known gap: the dense remote-FFN walk dispatches through
+    // `decode_token_with_moe`, which only the Metal backend implemented.
+    // The CPU backend ignores the remote hook and returns `None` during
+    // prefill, so this path does not produce tokens in a CPU-only build.
+    // Each concurrent worker builds its own backend (this fn runs per
+    // spawned thread).
+    let backend: Box<dyn larql_compute::ComputeBackend> = crate::backend_select::cpu_backend()?;
 
     let mut cb = larql_vindex::SilentLoadCallbacks;
     let weights = larql_vindex::load_model_weights_kquant(vindex_path, &mut cb)

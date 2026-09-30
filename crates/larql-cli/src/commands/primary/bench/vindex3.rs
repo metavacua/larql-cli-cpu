@@ -3,7 +3,7 @@
 //! model:
 //!   * `resolve_backends` — `--backends` names → V3 execution backends
 //!   * `refuse_inapplicable_flags` — the V2-only flags, refused by name
-//!   * `row_label` / `is_device_backend` — row identity and warm-up policy
+//!   * `row_label` — row identity
 //!   * `summarise` — one timed run → a `BenchRow`
 //!
 //! The row is built from the same statistic the V2 rows use — mean, p50
@@ -21,23 +21,16 @@ use crate::commands::primary::vindex3_cmd::ExecBackend;
 /// Row label prefix, so a V3 row can never be mistaken for a V2 one.
 const ROW_PREFIX: &str = "vindex3";
 
-/// Backend names that realise the plan on a device rather than the CPU.
-const DEVICE_PREFIX: &str = "metal";
-
 /// The V2 bench's CPU name.
 const CPU_ALIAS: &str = "cpu";
 
-/// The V2 bench's GPU name.
-const METAL_ALIAS: &str = "metal";
-
 /// Map `--backends` entries onto V3 execution backends.
 ///
-/// The V2 names keep their meaning: `cpu` is the `larql-compute` kernels
-/// (`production`, what `larql run` and `larql serve` execute) and `metal`
-/// is the Metal realisation (`larql run --metal`). Any other entry must
-/// name a V3 backend exactly as `larql vindex3 exec --backend` spells it,
-/// so a representation arm (`production-q4k`, `metal-lowered`, …) is
-/// benchable without a second vocabulary.
+/// The V2 name keeps its meaning: `cpu` is the `larql-compute` kernels
+/// (`production`, what `larql run` and `larql serve` execute). Any other
+/// entry must name a V3 backend exactly as `larql vindex3 exec --backend`
+/// spells it, so a representation arm (`production-q4k`, …) is benchable
+/// without a second vocabulary.
 pub(super) fn resolve_backends(names: &[&str]) -> Result<Vec<ExecBackend>, String> {
     names.iter().map(|name| resolve_backend(name)).collect()
 }
@@ -46,23 +39,13 @@ fn resolve_backend(name: &str) -> Result<ExecBackend, String> {
     if name == CPU_ALIAS {
         return Ok(ExecBackend::Production);
     }
-    if name == METAL_ALIAS {
-        return metal_backend();
-    }
     ExecBackend::from_str(name, false).map_err(|_| {
         format!(
-            "unknown VINDEX3 bench backend {name:?} — use `{CPU_ALIAS}`, `{METAL_ALIAS}`, or a \
+            "unknown VINDEX3 bench backend {name:?} — use `{CPU_ALIAS}` or a \
              `larql vindex3 exec --backend` name: {}",
             backend_names().join(", ")
         )
     })
-}
-
-fn metal_backend() -> Result<ExecBackend, String> {
-    Err(format!(
-        "`{METAL_ALIAS}` needs the `gpu` feature on macOS; this build has neither — \
-         use `--backends {CPU_ALIAS}`"
-    ))
 }
 
 /// Every name `larql vindex3 exec --backend` accepts in this build.
@@ -87,13 +70,6 @@ pub(super) fn row_label(backend: ExecBackend) -> String {
     format!("{ROW_PREFIX}-{}", backend_name(backend))
 }
 
-/// Whether the backend executes on a device. The V2 bench pre-warms only
-/// its Metal path (buffer caches, pipeline state); the V3 arm follows the
-/// same policy so the prefill columns stay comparable.
-pub(super) fn is_device_backend(backend: ExecBackend) -> bool {
-    backend_name(backend).starts_with(DEVICE_PREFIX)
-}
-
 /// Refuse every flag the V3 arm cannot honour, together and by name.
 ///
 /// They configure the V2 engine, its composition or its remote paths. A
@@ -111,7 +87,6 @@ pub(super) fn refuse_inapplicable_flags(args: &BenchArgs) -> Result<(), String> 
         ("--bench-grid", args.bench_grid),
         ("--via-executor", args.via_executor),
         ("--profile", args.profile),
-        ("--metal", args.metal),
         ("--concurrent", args.concurrent > 1),
     ]
     .into_iter()
@@ -355,13 +330,6 @@ mod tests {
         let resolved = resolve_backends(&["cpu"]).unwrap();
         assert_eq!(backend_name(resolved[0]), "production");
         assert_eq!(row_label(resolved[0]), "vindex3-production");
-        assert!(!is_device_backend(resolved[0]));
-    }
-
-    #[test]
-    fn metal_alias_refuses_without_the_gpu_build() {
-        let err = resolve_backends(&["metal"]).unwrap_err();
-        assert!(err.contains("gpu"), "{err}");
     }
 
     #[test]
@@ -401,7 +369,6 @@ mod tests {
             "--bench-grid",
             "--via-executor",
             "--profile",
-            "--metal",
             "--concurrent",
             "2",
         ]);
@@ -416,7 +383,6 @@ mod tests {
             "--bench-grid",
             "--via-executor",
             "--profile",
-            "--metal",
             "--concurrent",
         ] {
             assert!(err.contains(flag), "{flag} missing from: {err}");

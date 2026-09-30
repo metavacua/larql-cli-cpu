@@ -1,7 +1,7 @@
 //! CLI surface tests for `larql run --experts`.
 //!
 //! Covers argument-validation contract only — the end-to-end happy path
-//! requires a 4B model on disk and a Metal GPU and is exercised manually.
+//! requires a 4B model on disk and is exercised manually.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -106,7 +106,7 @@ fn find_wasm_dir() -> Option<PathBuf> {
 }
 
 #[test]
-#[ignore = "loads a 4B model + runs full Metal decode; minutes per call. Run with --ignored."]
+#[ignore = "loads a 4B model + runs a full CPU decode; minutes per call. Run with --ignored."]
 fn experts_chat_mode_dispatches_via_stdin() {
     let Some(vindex_path) = find_test_vindex() else {
         eprintln!("skip: no Q4_K vindex found. Set LARQL_TEST_VINDEX=<path> to override.");
@@ -127,7 +127,6 @@ fn experts_chat_mode_dispatches_via_stdin() {
             "--experts",
             "--experts-dir",
             wasm_dir.to_str().unwrap(),
-            "--metal",
             "--max-tokens",
             "64",
             // Narrow the op set so the model isn't drowning in 126 choices.
@@ -195,7 +194,6 @@ fn experts_dir_override_validates_existence() {
         "run",
         vindex_path.to_str().unwrap(),
         "--experts",
-        "--metal",
         "--experts-dir",
         "/nonexistent/path/for/test",
         "what is 2+2?",

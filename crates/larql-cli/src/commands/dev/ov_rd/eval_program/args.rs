@@ -31,9 +31,4 @@ pub struct EvalProgramArgs {
 
     #[arg(long, default_value_t = 25)]
     pub pq_iters: usize,
-
-    /// Use Metal GPU for forward passes (requires --features gpu on macOS).
-    /// ~10× faster than CPU for the Mode D injection evaluations.
-    #[arg(long, default_value_t = false)]
-    pub metal: bool,
 }

@@ -222,15 +222,6 @@ fn a_container_without_a_tokenizer_is_refused() {
     assert!(err.contains(TOKENIZER_JSON), "{err}");
 }
 
-#[test]
-fn metal_is_refused_where_there_is_no_metal() {
-    let root = tempfile::tempdir().unwrap();
-    let container = fixture_container(root.path(), true);
-    let err = run_capturing(&container, &[PROMPT, "--metal"], "")
-        .expect_err("--metal cannot be honoured on this build");
-    assert!(err.contains("--metal"), "{err}");
-}
-
 /// Point the container's `generation_config.json` at a stop.
 fn declare_stop(container: &Path, config: serde_json::Value) {
     std::fs::write(container.join(GENERATION_CONFIG_JSON), config.to_string()).unwrap();
@@ -406,11 +397,7 @@ fn multimodal_plan_preserves_position_order_and_precomputed_scaling() {
 fn dense_ffn_placement_refuses_conflicting_execution_flags_before_connecting() {
     let root = tempfile::tempdir().unwrap();
     let container = fixture_container(root.path(), true);
-    for extra in [
-        vec!["--metal"],
-        vec!["--engine", "row"],
-        vec!["--kv-cache", "none"],
-    ] {
+    for extra in [vec!["--engine", "row"], vec!["--kv-cache", "none"]] {
         let mut flags = vec![PROMPT, "--v3-ffn-shards", "http://127.0.0.1:1"];
         flags.extend(extra);
         let error = run_capturing(&container, &flags, "").unwrap_err();

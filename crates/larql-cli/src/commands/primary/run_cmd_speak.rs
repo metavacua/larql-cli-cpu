@@ -97,14 +97,8 @@ pub fn run_speak(args: &RunArgs) -> Result<(), BoxErr> {
     );
 
     // ── Generate, timing every frame ──
-    // `--metal` routes the backbone through the default backend
-    // composition (Metal + CPU fallback when built with the gpu
-    // feature); the depth transformer stays on CPU either way for now.
-    let backend = if args.metal {
-        larql_inference::default_engine_backend()
-    } else {
-        larql_inference::cpu_engine_backend()
-    };
+    // Backbone and depth transformer both run on the CPU backend.
+    let backend = larql_inference::cpu_engine_backend();
     let backbone_dense = WeightFfn { weights: &weights };
     let depth_dense = WeightFfn {
         weights: &depth.weights,

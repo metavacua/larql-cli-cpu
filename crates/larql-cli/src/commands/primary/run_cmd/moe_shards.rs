@@ -5,8 +5,8 @@ use super::*;
 
 /// `--moe-shards` dispatch path.
 ///
-/// Metal runs attention + dense FFN on GPU (same as normal `larql run --metal`).
-/// MoE expert blocks are dispatched to remote mini-processes via binary
+/// Attention and the dense FFN run locally on the CPU, as in a normal
+/// `larql run`. MoE expert blocks are dispatched to remote mini-processes via binary
 /// `POST /v1/expert/batch` instead of running locally.
 pub(super) fn run_with_moe_shards(
     vindex_path: &std::path::Path,
@@ -16,7 +16,6 @@ pub(super) fn run_with_moe_shards(
     max_tokens: usize,
     dispatch: &str,
     predispatch_iters: usize,
-    metal: bool,
     engine_spec: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Remote MoE needs an engine that dispatches FFN per-layer through the
@@ -99,10 +98,7 @@ pub(super) fn run_with_moe_shards(
 
     let num_shards = configs.len();
     // Initialise compute backend early so we can report it in the topology banner.
-    // An explicit `--metal` with no usable Metal device is a loud error, not a
-    // CPU fallback — see `backend_select`.
-    let backend: Box<dyn larql_compute::ComputeBackend> =
-        crate::backend_select::backend_for_metal_flag(metal)?;
+    let backend: Box<dyn larql_compute::ComputeBackend> = crate::backend_select::cpu_backend()?;
     eprintln!("Connecting to {} MoE shard(s)…", num_shards);
     let remote = RemoteMoeBackend::connect(configs)
         .map_err(|e| format!("failed to connect to MoE shards: {e}"))?;

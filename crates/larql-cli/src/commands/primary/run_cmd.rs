@@ -20,7 +20,7 @@
 //!   --experts-dir   directory of `.wasm` experts (overrides default lookup).
 //!   -v, --verbose
 //!
-//! All other walk tuning (top-K, layers, compare, metal opt-in) lives
+//! All other walk tuning (top-K, layers, compare) lives
 //! under `larql dev walk` for power users.
 
 use larql_vindex::format::filenames::*;
@@ -96,8 +96,7 @@ pub struct RunArgs {
     /// Uses a CPU KV cache (prefill captures K/V per layer, decode
     /// step attends new Q against cached K/V + new K/V). On
     /// Gemma 3 4B f32 that's ~0.5-0.6 s/token — ollama-shaped.
-    /// Q4K CPU path still uses the no-cache loop (slow); prefer
-    /// `--metal` for Q4K speed.
+    /// Q4K CPU path still uses the no-cache loop (slow).
     #[arg(short = 'n', long = "max-tokens", default_value = "64")]
     pub max_tokens: usize,
 
@@ -177,10 +176,10 @@ pub struct RunArgs {
     #[arg(long, value_name = "DIR")]
     pub routed_from: Option<String>,
 
-    /// With `--routed-from --metal`: print the exact prompt token ids (after
-    /// chat wrapping) and the generated token ids to stderr, so the run can
-    /// serve as an id-level oracle for `larql vindex3 exec --tokens ...`
-    /// on the same model. Text output is unchanged.
+    /// With `--routed-from`: print the exact prompt token ids (after chat
+    /// wrapping) to stderr, so the run can serve as an id-level oracle for
+    /// `larql vindex3 exec --tokens ...` on the same model. Text output is
+    /// unchanged.
     #[arg(long, default_value_t = false)]
     pub emit_ids: bool,
 
@@ -208,10 +207,6 @@ pub struct RunArgs {
     #[arg(long, default_value = "1", value_name = "N")]
     pub ffn_predispatch_iters: usize,
 
-    /// Use Metal GPU backend for Q4K inference (macOS only).
-    #[arg(long)]
-    pub metal: bool,
-
     /// Verbose load / timing output.
     #[arg(short, long)]
     pub verbose: bool,
@@ -220,8 +215,8 @@ pub struct RunArgs {
     /// op-call (`{"op":"...","args":{...}}`); the parser extracts it and the
     /// matching expert (gcd, base64, sql, …) computes the answer.
     ///
-    /// Requires Metal (`--metal`) on macOS. Use `--experts-dir` to point at a
-    /// custom WASM build directory; otherwise the default lookup is used.
+    /// Use `--experts-dir` to point at a custom WASM build directory;
+    /// otherwise the default lookup is used.
     #[arg(long)]
     pub experts: bool,
 
@@ -468,7 +463,6 @@ pub fn run(mut args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
             routed_dir,
             prompt,
             args.max_tokens,
-            args.metal,
             args.emit_ids,
         );
     }
@@ -485,7 +479,6 @@ pub fn run(mut args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
             args.max_tokens,
             &args.ffn_dispatch,
             args.ffn_predispatch_iters,
-            args.metal,
         );
     }
 
@@ -510,7 +503,6 @@ pub fn run(mut args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
             args.max_tokens,
             &args.moe_dispatch,
             args.moe_predispatch_iters,
-            args.metal,
             args.engine.as_deref(),
         );
     }
@@ -620,7 +612,6 @@ fn build_walk_args(
         compare: false,
         down_top_k: 5,
         verbose: args.verbose,
-        metal: args.metal,
         ffn_remote: args.ffn.clone(),
         ffn_remote_timeout_secs: args.ffn_timeout_secs,
         ffn_dispatch: args.ffn_dispatch.clone(),

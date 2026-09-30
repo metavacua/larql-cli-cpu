@@ -73,17 +73,8 @@ pub(super) fn run_engine(
 
     // Compute backend used for `pick_next` on the quant path (lm_head
     // top-k against the vindex) and as the `&dyn ComputeBackend` argument
-    // for `prefill_quant`. The Metal factory is required when the user
-    // asked for `--backends metal` and the index is Q4K — Engines that
-    // probe `backend.supports_quant(Q4_K)` would otherwise see a
-    // CpuBackend that advertises support but silently falls back to
-    // the slow CPU path on `decode_token`.
-    let want_metal = args.backends.contains("metal");
-    let compute_backend: Box<dyn larql_inference::ComputeBackend> = if want_metal {
-        larql_inference::default_compute_backend()
-    } else {
-        larql_inference::cpu_backend()
-    };
+    // for `prefill_quant`.
+    let compute_backend: Box<dyn larql_inference::ComputeBackend> = larql_inference::cpu_backend();
     let be = compute_backend.as_ref();
 
     let executor = if args.via_executor {

@@ -122,14 +122,6 @@ pub struct WalkArgs {
     #[arg(short, long)]
     pub verbose: bool,
 
-    /// Run autoregressive generation through the Metal Q4K pipeline:
-    /// fused `full_pipeline_q4` prefill + `decode_token` KV-cached decode.
-    /// Works for pre-norm (Llama, Mistral) and post-norm + QK-norm
-    /// (Gemma 3, Gemma 4) architectures. Requires a Q4K vindex and a
-    /// build with `--features gpu` on an M-series Mac.
-    #[arg(long)]
-    pub metal: bool,
-
     /// Route the FFN to a remote `larql-server` via `POST /v1/walk-ffn`
     /// (with `full_output: true`). Attention still runs locally; the FFN
     /// per-layer call lands on the server. Incompatible with `--compare`
@@ -498,8 +490,7 @@ fn engine_unsupported_on_uncached_path(spec: &str) -> String {
     format!(
         "--engine {spec:?} is not honoured on the CPU Q4K generation path, \
          which is not token-cached and so has no KV engine to select. \
-         Use --metal for the KV-cached path, or `larql bench --engine` \
-         to compare engines."
+         Use `larql bench --engine` to compare engines."
     )
 }
 

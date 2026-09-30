@@ -40,11 +40,7 @@ pub(super) fn run_capture(args: &CaptureArgs) -> Result<(), Box<dyn std::error::
         .into());
     }
 
-    // An explicit `--metal` with no usable device is a loud error, not a CPU
-    // fallback — a DEC capture pool must not silently come off the wrong
-    // substrate (see `backend_select`).
-    let backend: Box<dyn larql_compute::ComputeBackend> =
-        crate::backend_select::backend_for_metal_flag(args.metal)?;
+    let backend: Box<dyn larql_compute::ComputeBackend> = crate::backend_select::cpu_backend()?;
 
     let mut cb = larql_vindex::SilentLoadCallbacks;
     let weights = larql_vindex::load_model_weights_kquant(&vindex_path, &mut cb)

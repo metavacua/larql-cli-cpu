@@ -57,6 +57,5 @@ fn the_uncached_path_refusal_names_the_spec_and_a_way_forward() {
     // behaviour and learns where the engines are actually comparable.
     let msg = engine_unsupported_on_uncached_path("markov-rs");
     assert!(msg.contains("markov-rs"), "{msg}");
-    assert!(msg.contains("--metal"), "{msg}");
     assert!(msg.contains("larql bench"), "{msg}");
 }

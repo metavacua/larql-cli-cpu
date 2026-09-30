@@ -1,18 +1,17 @@
-//! I/O-bound runtime for the local Metal/CPU bench. Excluded from the
-//! per-file coverage gate — every call here hits real vindex mmaps, real
-//! model weights, and (when `metal`) the Metal pipeline. Pure helpers live
-//! in `local.rs`.
+//! I/O-bound runtime for the local CPU bench. Excluded from the
+//! per-file coverage gate — every call here hits real vindex mmaps and real
+//! model weights. Pure helpers live in `local.rs`.
 
 use std::time::Instant;
 
 use super::args::BenchArgs;
 use super::local::{
-    append_cpu_fallback_note, append_repeat_note, backend_name_for, format_early_stop_note,
-    format_q4k_cache_log, generation_fingerprint,
+    append_cpu_fallback_note, append_repeat_note, format_early_stop_note, format_q4k_cache_log,
+    generation_fingerprint, LOCAL_BACKEND,
 };
 use super::row::{compute_percentiles, BenchRow};
 
-/// Run the larql generate loop with the selected backend, once per
+/// Run the larql generate loop on the CPU backend, once per
 /// `--repeat`, returning one row per repeat.
 ///
 /// Warmup runs are discarded; the measured window is `args.tokens` steps
@@ -21,16 +20,12 @@ use super::row::{compute_percentiles, BenchRow};
 pub(super) fn run_larql(
     vindex_path: &std::path::Path,
     args: &BenchArgs,
-    metal: bool,
 ) -> Result<Vec<BenchRow>, Box<dyn std::error::Error>> {
     use larql_inference::layer_graph::generate::generate;
     use larql_inference::layer_graph::CachedLayerGraph;
 
     if args.verbose {
-        eprintln!(
-            "[bench] loading vindex for {}…",
-            if metal { "metal" } else { "cpu" }
-        );
+        eprintln!("[bench] loading vindex for cpu…");
     }
 
     let mut cb = larql_vindex::SilentLoadCallbacks;
@@ -67,8 +62,7 @@ pub(super) fn run_larql(
         larql_inference::encode_prompt(&tokenizer, &*weights.arch, &wrapped_prompt)
             .map_err(|e| format!("tokenize: {e}"))?;
 
-    let backend: Box<dyn larql_compute::ComputeBackend> =
-        crate::backend_select::backend_for_metal_flag(metal)?;
+    let backend: Box<dyn larql_compute::ComputeBackend> = crate::backend_select::cpu_backend()?;
 
     let cached_layers = CachedLayerGraph::from_residuals(Vec::new());
 
@@ -113,18 +107,6 @@ pub(super) fn run_larql(
         ),
     };
 
-    // Pre-warm: one generate call to allocate the KV cache and populate the
-    // Metal buffer caches. The prefill timer would otherwise include this
-    // one-time allocation cost.
-    if metal {
-        let warm = generate_n(&mut weights, 1);
-        if let Some(e) = &warm.error {
-            // A pre-warm that failed is a row-shaped lie waiting to happen:
-            // say so, rather than let the timed run inherit the state.
-            eprintln!("[bench] pre-warm generate failed: {e}");
-        }
-    }
-
     // NOTE: `--profile` enables engine-side stage timers
     // (`EngineProfiler`) only — cheap, just per-step `Instant::now()`
     // records. The kernel-side per-stage GPU-timestamp breakdown
@@ -150,16 +132,13 @@ pub(super) fn run_larql(
             let text: String = result.tokens.iter().map(|(t, _)| t.as_str()).collect();
             eprintln!(
                 "[bench] {} prompt ids ({}): {:?}",
-                backend_name_for(metal),
+                LOCAL_BACKEND,
                 token_ids.len(),
                 token_ids
             );
-            eprintln!("[bench] {} generated: {text:?}", backend_name_for(metal));
+            eprintln!("[bench] {LOCAL_BACKEND} generated: {text:?}");
             let (slots, bytes) = index.kquant_ffn_cache_stats();
-            eprintln!(
-                "{}",
-                format_q4k_cache_log(backend_name_for(metal), slots, bytes)
-            );
+            eprintln!("{}", format_q4k_cache_log(LOCAL_BACKEND, slots, bytes));
         }
 
         let n_warm = args.warmup.min(result.decode_ms.len());
@@ -172,12 +151,9 @@ pub(super) fn run_larql(
             (result.prefill_ms, avg, p50, p99, 1000.0 / avg)
         };
 
-        let backend_name = backend_name_for(metal);
         let mut note = format_early_stop_note(measured_n, args.tokens, wall_ms);
-        if !metal {
-            let cached = larql_inference::vindex::supports_cached_decode(&weights);
-            note = append_cpu_fallback_note(note, cached);
-        }
+        let cached = larql_inference::vindex::supports_cached_decode(&weights);
+        note = append_cpu_fallback_note(note, cached);
         note = append_repeat_note(
             note,
             repeat_idx,
@@ -187,7 +163,7 @@ pub(super) fn run_larql(
         let stages = Some(result.stage_timings.avg_per_step(result.decode_ms.len()));
 
         rows.push(BenchRow {
-            backend: backend_name.to_string(),
+            backend: LOCAL_BACKEND.to_string(),
             prefill_ms,
             avg_decode_ms,
             p50_ms,

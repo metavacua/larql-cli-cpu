@@ -294,7 +294,6 @@ impl From<ChatArgs> for run_cmd::RunArgs {
             routed_from: c.routed_from,
             emit_ids: false,
             ffn_timeout_secs: c.ffn_timeout_secs,
-            metal: false,
             verbose: c.verbose,
             experts: false,
             experts_dir: None,

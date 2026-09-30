@@ -1,27 +1,23 @@
 //! The one place this binary knows which compute-backend crates it was
 //! compiled with.
 //!
-//! Every command that used to inline the
-//! `if metal { #[cfg(all(feature = "gpu", target_os = "macos"))] … }`
-//! block now goes through [`backend_for_metal_flag`] (legacy `--metal`
-//! bool surface) or [`backend_for_kind`]. Adding a backend (CUDA — the
-//! DEC G-ladder) means adding one ctor entry to [`backend_registry`],
-//! not editing every command.
+//! This build carries none beyond the CPU backend that lives in
+//! `larql-compute`, so [`backend_registry`] is empty and every command
+//! constructs its backend through [`cpu_backend`] or [`backend_for_kind`].
+//! Adding a backend crate (CUDA — the DEC G-ladder, Vulkan) means adding
+//! one ctor entry to [`backend_registry`], not editing every command.
 //!
 //! Semantics: an *explicitly requested* backend that is unavailable is a
 //! loud error, never a silent CPU fallback — a DEC bench number must
-//! not quietly land on the wrong substrate. (This tightens the old
-//! run_cmd/bench sites, which fell back to CPU when Metal init failed;
-//! the shannon/walk/local_runtime sites already hard-failed.)
+//! not quietly land on the wrong substrate.
 
 use larql_compute::{backend_from_spec, BackendCtor, BackendKind, ComputeBackend};
 
-/// Constructors for the GPU backend crates compiled into this binary,
-/// in `BackendKind::Auto` preference order.
+/// Constructors for the backend crates compiled into this binary, in
+/// `BackendKind::Auto` preference order. The CPU backend is built by
+/// `larql-compute` itself and needs no entry.
 pub fn backend_registry() -> Vec<(BackendKind, BackendCtor)> {
-    {
-        Vec::new()
-    }
+    Vec::new()
 }
 
 /// Build the backend for a [`BackendKind`].
@@ -31,11 +27,9 @@ pub fn backend_for_kind(
     Ok(backend_from_spec(kind, &backend_registry())?)
 }
 
-/// Build the backend for a legacy `--metal` bool flag.
-pub fn backend_for_metal_flag(
-    metal: bool,
-) -> Result<Box<dyn ComputeBackend>, Box<dyn std::error::Error>> {
-    backend_for_kind(BackendKind::from_metal_flag(metal))
+/// Build the CPU backend, through the same registry as every other kind.
+pub fn cpu_backend() -> Result<Box<dyn ComputeBackend>, Box<dyn std::error::Error>> {
+    backend_for_kind(BackendKind::Cpu)
 }
 
 #[cfg(test)]
@@ -43,18 +37,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cpu_flag_always_resolves() {
-        let backend = backend_for_metal_flag(false).unwrap();
+    fn cpu_always_resolves() {
+        let backend = cpu_backend().unwrap();
         assert!(backend.name().starts_with("cpu"));
     }
 
     #[test]
-    fn metal_flag_errors_loudly_when_not_compiled_in() {
+    fn a_backend_not_compiled_in_is_refused_loudly() {
         // `unwrap_err` needs `Ok: Debug`, which `Box<dyn ComputeBackend>` isn't.
-        let err = match backend_for_metal_flag(true) {
+        let err = match backend_for_kind(BackendKind::Cuda) {
             Err(e) => e,
-            Ok(_) => panic!("expected NotCompiledIn without the gpu feature"),
+            Ok(_) => panic!("expected NotCompiledIn: this build registers no CUDA backend"),
         };
-        assert!(err.to_string().contains("metal"));
+        assert!(err.to_string().contains("cuda"), "{err}");
     }
 }

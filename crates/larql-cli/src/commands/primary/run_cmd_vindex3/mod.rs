@@ -162,7 +162,7 @@ fn run_inner(
     out: &mut dyn Write,
     status: &mut dyn Write,
 ) -> Result<(), BoxErr> {
-    let backend = select_backend(args.metal)?;
+    let backend = ExecBackend::Production;
     let tokenizer_path = container.join(TOKENIZER_JSON);
     if !tokenizer_path.is_file() {
         return Err(format!(
@@ -208,7 +208,6 @@ fn run_inner(
 fn refuse_inapplicable_flags(args: &RunArgs) -> Result<(), BoxErr> {
     if args.v3_profile.is_some()
         && (args.prompt.is_none()
-            || args.metal
             || args.continuation.is_some()
             || !args.v3_shards.is_empty()
             || args.kv_cache != KvCacheKind::Standard
@@ -217,7 +216,7 @@ fn refuse_inapplicable_flags(args: &RunArgs) -> Result<(), BoxErr> {
                 .as_deref()
                 .is_some_and(|e| !matches!(e, "row" | "standard")))
     {
-        return Err("--v3-profile requires a prompt and CPU row/standard KV; layer replay, Metal and explicit --continuation are not covered".into());
+        return Err("--v3-profile requires a prompt and CPU row/standard KV; layer replay and explicit --continuation are not covered".into());
     }
 
     if args.v3_shard_token_env.is_some()
@@ -227,21 +226,19 @@ fn refuse_inapplicable_flags(args: &RunArgs) -> Result<(), BoxErr> {
         return Err("--v3-shard-token-env requires --v3-shards or --v3-ffn-shards".into());
     }
     if !args.v3_ffn_shards.is_empty()
-        && (args.metal
-            || args.engine.is_some()
+        && (args.engine.is_some()
             || args.continuation.is_some()
             || args.kv_cache != KvCacheKind::Standard
             || !args.v3_shards.is_empty())
     {
-        return Err("--v3-ffn-shards uses CPU with local row KV; do not combine with --metal, --engine, --continuation, --kv-cache or --v3-shards".into());
+        return Err("--v3-ffn-shards uses CPU with local row KV; do not combine with --engine, --continuation, --kv-cache or --v3-shards".into());
     }
     if !args.v3_shards.is_empty()
-        && (args.metal
-            || args.engine.is_some()
+        && (args.engine.is_some()
             || args.continuation.is_some()
             || args.kv_cache != KvCacheKind::Standard)
     {
-        return Err("--v3-shards uses CPU stateless prefix replay; do not combine with --metal, --engine, --continuation or --kv-cache".into());
+        return Err("--v3-shards uses CPU stateless prefix replay; do not combine with --engine, --continuation or --kv-cache".into());
     }
     if args.continuation.is_none() && !args.continuation_options.is_empty() {
         return Err(
@@ -290,13 +287,6 @@ fn refuse_inapplicable_flags(args: &RunArgs) -> Result<(), BoxErr> {
         set.join(", ")
     )
     .into())
-}
-
-fn select_backend(metal: bool) -> Result<ExecBackend, BoxErr> {
-    if metal {
-        return Err("--metal needs the `gpu` feature on macOS; this build has neither".into());
-    }
-    Ok(ExecBackend::Production)
 }
 
 /// The run, once the backend is a concrete type.

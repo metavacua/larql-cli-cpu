@@ -13,15 +13,12 @@
 //! collapses to one [`backend_from_spec`] call.
 //!
 //! ```rust,ignore
-//! // In the binary, once:
+//! // In the binary, once — one entry per backend crate it links:
 //! fn registry() -> Vec<(BackendKind, BackendCtor)> {
-//!     let mut r: Vec<(BackendKind, BackendCtor)> = Vec::new();
-//!     #[cfg(all(feature = "gpu", target_os = "macos"))]
-//!     r.push((BackendKind::Metal, || {
-//!         larql_compute_metal::metal_backend()
-//!             .map(|m| Box::new(m) as Box<dyn ComputeBackend>)
-//!     }));
-//!     r
+//!     vec![(BackendKind::Cuda, || {
+//!         larql_compute_cuda::cuda_backend()
+//!             .map(|b| Box::new(b) as Box<dyn ComputeBackend>)
+//!     })]
 //! }
 //!
 //! // At each construction site:
@@ -46,13 +43,13 @@ use std::str::FromStr;
 /// Which backend a caller is asking for.
 ///
 /// Parsed from user-facing strings (`--backend cpu|metal|cuda|vulkan|auto`,
-/// `DEC0_BACKEND`); the legacy `--metal` bool maps via
-/// [`BackendKind::from_metal_flag`].
+/// `DEC0_BACKEND`). Every kind but `Cpu` needs a backend crate registered
+/// by the binary; this build registers none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BackendKind {
     /// The always-available BLAS/NEON CPU backend in this crate.
     Cpu,
-    /// `larql-compute-metal` (macOS + `gpu` feature).
+    /// `larql-compute-metal` (upstream LARQL; not part of this build).
     Metal,
     /// `larql-compute-cuda` (planned — G-ladder).
     Cuda,
@@ -72,17 +69,6 @@ impl BackendKind {
             BackendKind::Cuda => "cuda",
             BackendKind::Vulkan => "vulkan",
             BackendKind::Auto => "auto",
-        }
-    }
-
-    /// Bridge for the legacy `--metal: bool` CLI flags: `true` → `Metal`
-    /// (requested explicitly, so an unavailable Metal is an error, not a
-    /// silent CPU fallback), `false` → `Cpu`.
-    pub fn from_metal_flag(metal: bool) -> Self {
-        if metal {
-            BackendKind::Metal
-        } else {
-            BackendKind::Cpu
         }
     }
 }
@@ -149,8 +135,8 @@ impl fmt::Display for BackendSelectError {
             BackendSelectError::NotCompiledIn(kind) => write!(
                 f,
                 "backend `{kind}` is not compiled into this binary \
-                 (rebuild with the matching feature — e.g. `--features gpu` \
-                 for metal on an Apple-silicon Mac)"
+                 (only backends whose crates the binary links and registers \
+                 are available)"
             ),
             BackendSelectError::NoDevice(kind) => {
                 write!(f, "backend `{kind}` found no usable device on this host")
@@ -218,12 +204,6 @@ mod tests {
         assert_eq!("METAL".parse::<BackendKind>().unwrap(), BackendKind::Metal);
         let err = "tpu".parse::<BackendKind>().unwrap_err();
         assert!(err.to_string().contains("tpu"));
-    }
-
-    #[test]
-    fn metal_flag_bridges_to_kind() {
-        assert_eq!(BackendKind::from_metal_flag(true), BackendKind::Metal);
-        assert_eq!(BackendKind::from_metal_flag(false), BackendKind::Cpu);
     }
 
     #[test]

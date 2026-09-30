@@ -156,9 +156,6 @@ pub(super) fn image_inputs<B: PlanBackend>(
     model: &ResidentModel<'_, B>,
     ids: &[u32],
 ) -> Result<Vec<InputPosition>, BoxErr> {
-    if model.args.metal {
-        return Err("V3 image input currently requires CPU execution".into());
-    }
     let dir = model
         .args
         .mm_weights
