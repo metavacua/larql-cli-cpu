@@ -14,26 +14,20 @@ target conditions, default-feature choices and explicit example targets.
 | Package | Version | Normal local dependencies | Default features |
 |---|---|---|---|
 | [larql-boundary](../../crates/larql-boundary/Cargo.toml) | `0.2.0` | None | None |
-| [larql-cli](../../crates/larql-cli/Cargo.toml) | `0.2.0` | `larql-compute`, `larql-compute-metal` (optional), `larql-core`, `larql-factory`, `larql-inference`, `larql-kv`, `larql-lql`, `larql-models`, `larql-router`, `larql-vindex`, `larql-vindex-spec` | `gpu`, `research` |
+| [larql-cli](../../crates/larql-cli/Cargo.toml) | `0.2.0` | `larql-compute`, `larql-core`, `larql-factory`, `larql-inference`, `larql-kv`, `larql-lql`, `larql-models`, `larql-router`, `larql-vindex`, `larql-vindex-spec` | `research` |
 | [larql-compute](../../crates/larql-compute/Cargo.toml) | `0.2.0` | `larql-execution`, `larql-models` | None |
-| [larql-compute-metal](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-compute-metal/Cargo.toml) | `0.2.0` | `larql-compute`, `larql-models` | None |
 | [larql-continuation-fixture](../../crates/larql-continuation-fixture/Cargo.toml) | `0.2.0` | `larql-vindex` | None |
 | [larql-core](../../crates/larql-core/Cargo.toml) | `0.2.0` | None | `http`, `msgpack` |
-| [larql-demos](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-demos/Cargo.toml) | `0.2.0` | `larql-boundary`, `larql-compute`, `larql-core`, `larql-inference`, `larql-kv`, `larql-lql`, `larql-models`, `larql-router-protocol`, `larql-server`, `larql-vindex` | None |
 | [larql-execution](../../crates/larql-execution/Cargo.toml) | `0.2.0` | None | None |
 | [larql-factory](../../crates/larql-factory/Cargo.toml) | `0.2.0` | `larql-models`, `larql-vindex-spec` | None |
-| [larql-inference](../../crates/larql-inference/Cargo.toml) | `0.2.0` | `larql-compute`, `larql-compute-metal` (optional), `larql-core`, `larql-execution`, `larql-models`, `larql-router-protocol`, `larql-vindex` | None |
-| [larql-kv](../../crates/larql-kv/Cargo.toml) | `0.2.0` | `larql-boundary`, `larql-compute`, `larql-compute-metal` (optional), `larql-execution`, `larql-inference`, `larql-vindex` | None |
-| [larql-lql](../../crates/larql-lql/Cargo.toml) | `0.2.0` | `larql-compute`, `larql-compute-metal` (optional), `larql-core`, `larql-inference`, `larql-kv`, `larql-models`, `larql-vindex` | None |
+| [larql-inference](../../crates/larql-inference/Cargo.toml) | `0.2.0` | `larql-compute`, `larql-core`, `larql-execution`, `larql-models`, `larql-router-protocol`, `larql-vindex` | None |
+| [larql-kv](../../crates/larql-kv/Cargo.toml) | `0.2.0` | `larql-boundary`, `larql-compute`, `larql-execution`, `larql-inference`, `larql-vindex` | None |
+| [larql-lql](../../crates/larql-lql/Cargo.toml) | `0.2.0` | `larql-compute`, `larql-core`, `larql-inference`, `larql-kv`, `larql-models`, `larql-vindex` | None |
 | [larql-models](../../crates/larql-models/Cargo.toml) | `0.2.0` | `larql-vindex-spec` | None |
-| [larql-python](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-python/Cargo.toml) | `0.2.0` | `larql-core`, `larql-inference`, `larql-kv`, `larql-lql`, `larql-models`, `larql-vindex` | None |
 | [larql-router](../../crates/larql-router/Cargo.toml) | `0.2.0` | `larql-router-protocol` | None |
 | [larql-router-protocol](../../crates/larql-router-protocol/Cargo.toml) | `0.2.0` | None | None |
-| [larql-server](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/larql-server/Cargo.toml) | `0.2.0` | `larql-compute`, `larql-inference`, `larql-kv`, `larql-lql`, `larql-models`, `larql-router-protocol`, `larql-vindex`, `larql-compute-metal` (optional) (cfg(target_os = "macos")) | None |
-| [larql-vindex](../../crates/larql-vindex/Cargo.toml) | `0.2.0` | `larql-compute`, `larql-compute-metal` (optional), `larql-core`, `larql-execution`, `larql-models`, `larql-vindex-spec` | None |
+| [larql-vindex](../../crates/larql-vindex/Cargo.toml) | `0.2.0` | `larql-compute`, `larql-core`, `larql-execution`, `larql-models`, `larql-vindex-spec` | None |
 | [larql-vindex-spec](../../crates/larql-vindex-spec/Cargo.toml) | `0.2.0` | None | None |
-| [model-compute](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/model-compute/Cargo.toml) | `0.2.0` | None | `native` |
-| [vindex-cli](https://github.com/metavacua/larql-to-sparql/blob/f02693c90c1a9d51438dcc0a2479ba46959fb913/crates/vindex-cli/Cargo.toml) | `0.8.0` | `larql-models`, `larql-vindex` | None |
 
 ## `crates/larql-experts/Cargo.toml`
 
