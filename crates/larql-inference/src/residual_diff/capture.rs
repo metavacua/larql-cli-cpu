@@ -563,37 +563,6 @@ mod tests {
         }
     }
 
-    /// `metal_prefill` on the same synthetic Q4K fixture.
-    ///
-    /// Gated on macOS because it needs a real Metal device; the three
-    /// `metal_*` constructors are why this file cannot reach the 90% floor in
-    /// a Linux CI coverage run, and why it sits outside `include_globs`. The
-    /// test still earns its place — it means the constructor is exercised
-    /// somewhere rather than nowhere.
-    #[test]
-    #[cfg(all(feature = "gpu", target_os = "macos"))]
-    fn metal_prefill_captures_every_layer() {
-        let Some(backend) = larql_compute_metal::MetalBackend::new() else {
-            eprintln!("skip: no Metal device");
-            return;
-        };
-        let mut weights = crate::test_utils::make_test_q4k_weights();
-        let index = crate::test_utils::make_test_q4k_vindex(&weights);
-        let ids: Vec<u32> = vec![1, 2, 3];
-
-        let capture = ResidualCapture::metal_prefill(&mut weights, &ids, &index, &backend)
-            .expect("metal prefill capture on the synthetic Q4K fixture");
-
-        assert_eq!(capture.num_layers(), weights.num_layers);
-        assert_eq!(capture.hidden_size, weights.hidden_size);
-        for (l, layer) in capture.layers.iter().enumerate() {
-            assert!(
-                layer.iter().all(|v| v.is_finite()),
-                "layer {l} has non-finite values"
-            );
-        }
-    }
-
     /// Concurrent callers must each observe **their own** tempdir for the
     /// whole of `f`, never a sibling's.
     ///

@@ -208,37 +208,7 @@ pub fn run(args: MeasureArgs) -> Result<(), BoxErr> {
     report(&request, outcome)
 }
 
-/// Build both arms and run the procedure while they are alive. A lowered
-/// arm borrows its device and loaded weights, so they are owned here.
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-fn with_arms(
-    reference: (&ArmSpec<'_>, &OpenedComponent),
-    candidate: (&ArmSpec<'_>, &OpenedComponent),
-    request: &PlanMeasureRequest,
-) -> Result<Result<PlanReceipt, PlanRefusal>, BoxErr> {
-    {
-        use larql_vindex::format::vindex3::represent::token_bank::TokenBank;
-        let max_positions = TokenBank::open(&request.bank)?
-            .manifest()
-            .samples
-            .iter()
-            .map(|s| s.tokens)
-            .max()
-            .unwrap_or(1);
-        let gpus = [
-            lowered::device_for(reference.0.backend)?,
-            lowered::device_for(candidate.0.backend)?,
-        ];
-        let mut keep = [Vec::new(), Vec::new()];
-        let [keep_r, keep_c] = &mut keep;
-        let mut r = build_arm(reference, gpus[0].as_ref(), max_positions, keep_r)?;
-        let mut c = build_arm(candidate, gpus[1].as_ref(), max_positions, keep_c)?;
-        Ok(run_procedure(request, r.as_mut(), c.as_mut()))
-    }
-}
-
 /// Without a Metal build every arm is an interpreter arm.
-#[cfg(not(all(feature = "gpu", target_os = "macos")))]
 fn with_arms(
     reference: (&ArmSpec<'_>, &OpenedComponent),
     candidate: (&ArmSpec<'_>, &OpenedComponent),
@@ -265,60 +235,6 @@ fn interpreter_arm(
         provider,
         crate::commands::primary::continuation::select_for(&opened.plan, None)?,
     )?))
-}
-
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-fn build_arm<'a>(
-    arm: (&ArmSpec<'_>, &'a OpenedComponent),
-    gpu: Option<&'a larql_compute_metal::MetalBackend>,
-    max_positions: usize,
-    keep: &mut Vec<larql_vindex::format::vindex3::opplan::exec::weights::LoadedWeight>,
-) -> Result<Box<dyn TeacherForcedArm + 'a>, BoxErr> {
-    let (spec, opened) = arm;
-    let Some(formats) = super::prepare::lowered_formats(spec.backend).map(|(f, _)| f) else {
-        return interpreter_arm(arm);
-    };
-    if spec.plugins.select.is_some() || spec.plugins.want.is_some() {
-        return Err(format!(
-            "lowering and representation overrides do not apply to `{:?}`: a lowered arm \
-             executes its own formats, not through a lowering provider",
-            spec.backend
-        )
-        .into());
-    }
-    let gpu = gpu.ok_or("a lowered arm needs a Metal device")?;
-    let session = super::lowered::LoweredSession::new(
-        gpu,
-        &opened.plan,
-        &opened.store,
-        formats,
-        max_positions,
-        keep,
-    )?;
-    Ok(Box::new(super::lowered::measure_arm::LoweredArm::new(
-        session,
-        &opened.store,
-        &arm_name(spec),
-        spec.container.clone(),
-        opened.want.clone(),
-        spec.source == RepresentationSource::Stored,
-    )))
-}
-
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-mod lowered {
-    use super::{BoxErr, ExecBackend};
-    use larql_compute_metal::MetalBackend;
-
-    /// A Metal device for a lowered backend, `None` for any other.
-    pub(super) fn device_for(backend: ExecBackend) -> Result<Option<MetalBackend>, BoxErr> {
-        if super::super::prepare::lowered_formats(backend).is_none() {
-            return Ok(None);
-        }
-        Ok(Some(
-            MetalBackend::new().ok_or("no Metal device available for a lowered arm")?,
-        ))
-    }
 }
 
 /// The arm name the procedure records: the backend's CLI spelling, and the

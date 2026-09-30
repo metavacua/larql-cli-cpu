@@ -52,15 +52,6 @@ default-members = [
 # dedicated mechanical cleanup.
 chunks_exact_to_as_chunks = "allow"
 
-[workspace.lints.rust]
-# TEMPORARY, removed by the last GPU-excision commit. The Metal backend and
-# every `gpu` feature are gone from the manifests, but the source still
-# carries `#[cfg(feature = "gpu")]` code until the excision deletes it.
-# Declaring the name keeps that dormant code from tripping `unexpected_cfgs`
-# under `clippy -D warnings`; dropping this declaration afterwards is the
-# proof that no `gpu` cfg survives.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("gpu"))'] }
-
 [workspace.package]
 version = "0.2.0"
 edition = "2021"

@@ -509,7 +509,6 @@ fn a_refusal_and_its_verified_facts_survive_json() {
 
 // --------------------------- a build that cannot perform the procedure
 
-#[cfg(not(all(feature = "gpu", target_os = "macos")))]
 #[test]
 fn a_build_that_cannot_run_the_procedure_refuses_rather_than_missing_the_symbol() {
     // The teacher-forced runner needs Metal and macOS. On any other

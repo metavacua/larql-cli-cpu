@@ -222,7 +222,6 @@ fn a_container_without_a_tokenizer_is_refused() {
     assert!(err.contains(TOKENIZER_JSON), "{err}");
 }
 
-#[cfg(not(all(feature = "gpu", target_os = "macos")))]
 #[test]
 fn metal_is_refused_where_there_is_no_metal() {
     let root = tempfile::tempdir().unwrap();
@@ -230,15 +229,6 @@ fn metal_is_refused_where_there_is_no_metal() {
     let err = run_capturing(&container, &[PROMPT, "--metal"], "")
         .expect_err("--metal cannot be honoured on this build");
     assert!(err.contains("--metal"), "{err}");
-}
-
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-#[test]
-fn metal_serves_the_fixture_through_the_same_shell() {
-    let root = tempfile::tempdir().unwrap();
-    let container = fixture_container(root.path(), true);
-    let out = run_capturing(&container, &[PROMPT, "--max-tokens", "3", "--metal"], "").unwrap();
-    assert_fixture_tokens(out.trim_end(), 3);
 }
 
 /// Point the container's `generation_config.json` at a stop.

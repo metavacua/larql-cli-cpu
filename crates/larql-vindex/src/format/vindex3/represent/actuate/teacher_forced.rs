@@ -154,36 +154,6 @@ impl ExperimentExecutor for TeacherForcedExecutor {
         TEACHER_FORCED_TWO_ARM
     }
 
-    #[cfg(all(feature = "gpu", target_os = "macos"))]
-    fn execute(
-        &self,
-        request: &MeasurementRequest,
-        artifacts: &dyn ArtifactLocator,
-    ) -> Result<Observed, ExecutionRefusal> {
-        let instructed = self.instruct(request, artifacts)?;
-        let receipt = measure::run(&instructed).map_err(ExecutionRefusal::Measurement)?;
-        let execution_note = format!(
-            "{TEACHER_FORCED_TWO_ARM}: {} positions over {} sequences in {:.1}s; closure \
-             report at {}",
-            receipt.verified.positions,
-            instructed.sequences,
-            receipt.wall_seconds,
-            receipt.report_path
-        );
-        Ok(Observed {
-            // The experiment as REQUESTED. The executor performed the
-            // instruction derived from it and has no authority to say it
-            // measured anything else; the registry checks this against
-            // what it handed over, so restating it is a claim rather
-            // than a formality.
-            key: request.key().clone(),
-            observation: receipt.bank.into(),
-            verified: receipt.verified.into(),
-            execution_note,
-        })
-    }
-
-    #[cfg(not(all(feature = "gpu", target_os = "macos")))]
     fn execute(
         &self,
         request: &MeasurementRequest,

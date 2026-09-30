@@ -44,21 +44,15 @@ pub mod identity;
 pub mod intervene;
 pub mod intervene_heads;
 pub mod kda;
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-pub mod kda_metal;
 pub mod kernels;
 pub mod kimi_kda_layer;
 pub mod kimi_mla_layer;
 pub mod kimi_moe_block;
 pub mod kimi_router;
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-pub mod kimi_source;
 pub mod kv;
 pub mod kv_view;
 pub mod lowering;
 pub mod mamba2;
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-pub mod metal_lowered;
 pub mod mla;
 pub mod narrow;
 pub mod observe;
@@ -82,8 +76,6 @@ pub mod routed_experts;
 pub mod routing_trace;
 pub mod sequence;
 pub mod stack;
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-pub mod stack_metal;
 pub mod stages;
 pub mod timing;
 pub mod token;

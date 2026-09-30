@@ -12,20 +12,6 @@ pub(super) fn init(use_metal: bool) -> Option<Backend> {
         return None;
     }
 
-    #[cfg(all(feature = "gpu", target_os = "macos"))]
-    {
-        match larql_compute_metal::MetalBackend::new() {
-            Some(b) => {
-                eprintln!("Metal backend: initialized (GPU-accelerated forward passes)");
-                Some(Box::new(b))
-            }
-            None => {
-                eprintln!("Metal backend: MetalBackend::new() returned None — falling back to CPU");
-                None
-            }
-        }
-    }
-    #[cfg(not(all(feature = "gpu", target_os = "macos")))]
     {
         eprintln!(
             "Metal backend: not compiled in — rebuild with `--features gpu` on macOS. \

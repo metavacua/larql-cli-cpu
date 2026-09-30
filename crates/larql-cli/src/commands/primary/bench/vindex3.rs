@@ -58,12 +58,6 @@ fn resolve_backend(name: &str) -> Result<ExecBackend, String> {
     })
 }
 
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-fn metal_backend() -> Result<ExecBackend, String> {
-    Ok(ExecBackend::Metal)
-}
-
-#[cfg(not(all(feature = "gpu", target_os = "macos")))]
 fn metal_backend() -> Result<ExecBackend, String> {
     Err(format!(
         "`{METAL_ALIAS}` needs the `gpu` feature on macOS; this build has neither — \
@@ -238,7 +232,7 @@ pub(super) fn summarise(run: &TimedRun<'_>) -> BenchRow {
 
 /// Ids the reset witness compares: the prefill argmax, and the id the
 /// first decode step produces.
-#[cfg(any(test, all(feature = "gpu", target_os = "macos")))]
+#[cfg(test)]
 const RESET_WITNESS_IDS: usize = 2;
 
 /// Refuse a lowered row whose timed run did not start where a fresh
@@ -250,7 +244,7 @@ const RESET_WITNESS_IDS: usize = 2;
 /// would time a different generation and still print a plausible row.
 /// Compared over the ids both runs produced, so an early EOS shortens
 /// the check rather than failing it.
-#[cfg(any(test, all(feature = "gpu", target_os = "macos")))]
+#[cfg(test)]
 pub(super) fn check_reset_witness(
     backend: ExecBackend,
     warm: &[u32],
@@ -364,15 +358,6 @@ mod tests {
         assert!(!is_device_backend(resolved[0]));
     }
 
-    #[cfg(all(feature = "gpu", target_os = "macos"))]
-    #[test]
-    fn metal_alias_is_the_metal_backend() {
-        let resolved = resolve_backends(&["metal"]).unwrap();
-        assert_eq!(row_label(resolved[0]), "vindex3-metal");
-        assert!(is_device_backend(resolved[0]));
-    }
-
-    #[cfg(not(all(feature = "gpu", target_os = "macos")))]
     #[test]
     fn metal_alias_refuses_without_the_gpu_build() {
         let err = resolve_backends(&["metal"]).unwrap_err();
