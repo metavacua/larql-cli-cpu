@@ -1,4 +1,4 @@
-//! Q4_K predict and generate paths: resident, uncached CPU, Metal, and remote FFN.
+//! Q4_K predict and generate paths: resident, uncached CPU, and remote FFN.
 
 use larql_inference::{LayerShardedBackend, ModelWeights};
 use larql_vindex::{tokenizers, VectorIndex};
@@ -6,14 +6,6 @@ use std::time::Instant;
 
 #[allow(unused_imports)]
 use super::*;
-
-/// Build the Metal compute backend for `--metal`, or a clear error when the
-/// binary lacks the backend or the host lacks a device. Delegates to the
-/// shared registry-backed factory in `backend_select`.
-pub(super) fn metal_backend_box(
-) -> Result<Box<dyn larql_compute::ComputeBackend>, Box<dyn std::error::Error>> {
-    crate::backend_select::backend_for_metal_flag(true)
-}
 
 /// Predict against a Q4_K / Q6_K vindex: dequantise each layer's attn + FFN
 /// weights just-in-time, run the standard f32 forward block, drop, repeat.
@@ -71,22 +63,15 @@ pub(super) fn run_predict_q4k(
     index.load_interleaved_kquant(vindex_path)?;
     let _ = index.load_lm_head_kquant(vindex_path);
 
-    // Metal Q4K path (`--metal`) routes autoregressive generation through the
-    // fused `full_pipeline_q4` prefill + `decode_token` KV-cached decode in
-    // `layer_graph::generate`. Works for pre-norm (Llama/Mistral) and
-    // post-norm + QK-norm (Gemma 3/4) architectures. CPU path below is the
-    // fallback for when the backend is absent or for diffing.
     let start = Instant::now();
 
     // Autoregressive multi-token generation. For Q4K on CPU, we build
     // a per-layer CPU FfnBackend-compatible view and loop via the
-    // generic `generate_stream`. Metal shader autoregressive generation
-    // is a separate path (see `larql-inference/src/layer_graph/generate.rs`)
-    // and is wired to `--metal`; that path is KV-cached and much faster.
-    if args.max_tokens > 1 && !args.metal {
+    // generic `generate_stream`.
+    if args.max_tokens > 1 {
         // CPU Q4K autoregressive: per-step, dequantise layer weights
         // just-in-time (`predict_kquant` does this internally) and loop.
-        // Not token-cached, so O(N²) but correct. For speed use --metal.
+        // Not token-cached, so O(N²) but correct.
         //
         // This path has no KV cache and therefore no engine to select, so a
         // named `--engine` cannot be honoured here. Say so instead of running
@@ -129,81 +114,14 @@ pub(super) fn run_predict_q4k(
         return run_q4k_generate_cpu(weights, tokenizer, &token_ids, args, &index);
     }
 
-    let result = if args.metal {
-        // `larql_compute::default_backend()` always returns CPU since
-        // the GPU-backend extraction (see its doc-comment). GPU
-        // selection is the caller's responsibility — mirror what
-        // `bench/local_runtime.rs::build_runtime` does and reach for
-        // `MetalBackend::new()` directly when `--metal` is set, so the
-        // fused Q4 prefill + KV-cached decode kernels actually fire
-        // here. The previous `default_backend()` call silently fell
-        // through to CPU's `generate_via_cpu_q4k` fallback which
-        // produces degenerate output ("ikea ikea ikea…"), masquerading
-        // as a Granite/Gemma forward-path regression.
-        let backend: Box<dyn larql_compute::ComputeBackend> = metal_backend_box()?;
-        if !backend.supports_quant(::larql_compute::QuantFormat::Q4_K) {
-            return Err("Metal backend doesn't report Q4_K support — \
-                 check `larql diag <vindex>` for backend capabilities."
-                .into());
-        }
-        vlog!(
-            verbose,
-            "Backend: {} (Metal Q4K prefill + KV-cached decode)",
-            backend.name()
-        );
-        // --metal + --max-tokens > 1: route to the existing shader
-        // autoregressive generate() in `larql-inference/src/layer_graph`
-        // (GPU prefill + KV-cached decode). That function returns its
-        // own tokens list; we stream them and exit.
-        if args.max_tokens > 1 {
-            use std::io::Write;
-            let cached_layers =
-                larql_inference::layer_graph::CachedLayerGraph::from_residuals(Vec::new());
-            let num_layers = weights.num_layers;
-            let result = larql_inference::layer_graph::generate(
-                weights,
-                tokenizer,
-                &token_ids,
-                args.max_tokens,
-                &index,
-                &*backend,
-                &cached_layers,
-                0..num_layers,
-            );
-            let mut stdout = std::io::stdout();
-            for (tok, _) in &result.tokens {
-                print!("{tok}");
-                let _ = stdout.flush();
-            }
-            println!();
-            if verbose {
-                eprintln!(
-                    "  prefill: {:.1}ms  decode avg: {:.1}ms/tok  ({:.1} tok/s)",
-                    result.prefill_ms,
-                    result.avg_decode_ms(),
-                    result.decode_tok_s(),
-                );
-            }
-            return Ok(());
-        }
-        larql_inference::vindex::predict_kquant_metal(
-            weights,
-            tokenizer,
-            &token_ids,
-            args.predict_top_k,
-            &index,
-            &*backend,
-        )
-    } else {
-        vlog!(verbose, "Backend: CPU (Accelerate + dequantise-per-layer)");
-        larql_inference::vindex::predict_kquant(
-            weights,
-            tokenizer,
-            &token_ids,
-            args.predict_top_k,
-            &index,
-        )
-    };
+    vlog!(verbose, "Backend: CPU (Accelerate + dequantise-per-layer)");
+    let result = larql_inference::vindex::predict_kquant(
+        weights,
+        tokenizer,
+        &token_ids,
+        args.predict_top_k,
+        &index,
+    );
     vlog!(
         verbose,
         "Q4 forward pass: {:.2}s",

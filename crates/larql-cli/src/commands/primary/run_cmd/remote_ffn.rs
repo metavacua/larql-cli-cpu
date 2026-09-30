@@ -5,7 +5,7 @@ use super::*;
 
 /// `--ffn URL` dispatch path for dense models.
 ///
-/// Metal runs attention on the local GPU. Every layer's FFN is a round trip
+/// Attention runs locally on the CPU. Every layer's FFN is a round trip
 /// to the remote server at `ffn_url` via `LayerShardedBackend`. The local
 /// vindex supplies attention weights; the remote server supplies FFN outputs.
 ///
@@ -20,7 +20,6 @@ pub(super) fn run_with_remote_ffn(
     max_tokens: usize,
     dispatch: &str,
     predispatch_iters: usize,
-    metal: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use larql_inference::{
         generate_with_remote_ffn, generate_with_remote_ffn_batch, LayerShardedBackend,
@@ -28,8 +27,7 @@ pub(super) fn run_with_remote_ffn(
     use std::time::Duration;
 
     let timeout = Duration::from_secs(ffn_timeout_secs);
-    let backend: Box<dyn larql_compute::ComputeBackend> =
-        crate::backend_select::backend_for_metal_flag(metal)?;
+    let backend: Box<dyn larql_compute::ComputeBackend> = crate::backend_select::cpu_backend()?;
     eprintln!("Connecting to remote FFN at {ffn_url}…");
     let remote = LayerShardedBackend::connect(ffn_url, timeout)
         .map_err(|e| format!("failed to connect to remote FFN server: {e}"))?;

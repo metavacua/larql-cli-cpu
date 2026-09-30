@@ -26,8 +26,7 @@ use super::args::BenchArgs;
 use super::local::generation_fingerprint;
 use super::row::BenchRow;
 use super::vindex3::{
-    backend_name, is_device_backend, representation_note, row_label, summarise, DeviceWindow,
-    TimedRun,
+    backend_name, representation_note, row_label, summarise, DeviceWindow, TimedRun,
 };
 use crate::commands::primary::vindex3_cmd::decode::argmax;
 use crate::commands::primary::vindex3_cmd::prepare::{
@@ -39,8 +38,7 @@ use crate::commands::primary::vindex3_cmd::plugins::Plugins;
 
 type BoxErr = Box<dyn std::error::Error>;
 
-/// Bench one V3 backend: open, prepare, pre-warm (device backends only),
-/// then one timed generation.
+/// Bench one V3 backend: open, prepare, then one timed generation.
 pub(super) fn run_vindex3(
     container: &Path,
     args: &BenchArgs,
@@ -154,12 +152,6 @@ impl BackendVisitor for Timed<'_> {
             row_label(self.which),
             loading.elapsed().as_secs_f64()
         );
-
-        if is_device_backend(self.which) {
-            // One untimed token through a fresh state: device buffers,
-            // pipelines and pools, exactly as the V2 Metal pre-warm.
-            self.generate(backend, &ops, 1)?;
-        }
 
         let max_tokens = self.args.warmup + self.args.tokens;
         let started = Instant::now();

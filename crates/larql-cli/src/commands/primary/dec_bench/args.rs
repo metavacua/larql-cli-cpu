@@ -51,11 +51,6 @@ pub struct CaptureArgs {
     #[arg(long, default_value = "16")]
     pub steps: usize,
 
-    /// Use the Metal GPU attention backend (required on macOS for the
-    /// remote-FFN decode path).
-    #[arg(long)]
-    pub metal: bool,
-
     /// Output pool directory (`manifest.json` + `residuals.bin`, plus
     /// `raw.bin`/`normed.bin`/`routing.bin` with `--routing`).
     #[arg(long)]
@@ -117,11 +112,6 @@ pub struct DriftArgs {
     /// (pre-registered C6 gate: 0.5).
     #[arg(long, default_value_t = super::drift::DEFAULT_DRIFT_GATE_PCT)]
     pub gate_pct: f64,
-
-    /// Use the Metal GPU attention backend (required on macOS — the
-    /// remote-FFN decode path needs the fused GPU decode).
-    #[arg(long)]
-    pub metal: bool,
 
     /// Per-request timeout for the expert server.
     #[arg(long, default_value = "60")]

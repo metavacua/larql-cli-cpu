@@ -36,11 +36,9 @@ pub(super) fn run_drift(args: &DriftArgs) -> Result<(), Box<dyn std::error::Erro
         .into());
     }
 
-    // An explicit `--metal` with no usable device is a loud error, not a CPU
-    // fallback (see `backend_select`); without `--metal` the forced scorer
-    // itself errors — the remote-FFN walk needs the fused GPU decode path.
-    let backend: Box<dyn larql_compute::ComputeBackend> =
-        crate::backend_select::backend_for_metal_flag(args.metal)?;
+    // Known gap: the forced scorer errors on this CPU-only build — the
+    // remote-FFN walk needs the fused decode path only Metal implemented.
+    let backend: Box<dyn larql_compute::ComputeBackend> = crate::backend_select::cpu_backend()?;
 
     let mut cb = larql_vindex::SilentLoadCallbacks;
     let weights = larql_vindex::load_model_weights_kquant(&vindex_path, &mut cb)

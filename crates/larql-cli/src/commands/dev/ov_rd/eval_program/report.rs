@@ -56,8 +56,8 @@ pub struct EvalProgramReport {
     /// declared tolerance. "n/a" when reference_metrics is absent.
     pub metric_parity: &'static str,
     pub metric_parity_failures: Option<String>,
-    /// Which backend ran the Mode D injection forward passes.
-    /// "metal" = GPU path active, "cpu_fallback" = Metal unavailable or stub returned None.
+    /// Which backend ran the Mode D injection forward passes. Always "cpu"
+    /// in this build.
     pub intervention_backend: &'static str,
     pub strata: Vec<StratumReport>,
     pub per_prompt: Vec<PromptReport>,

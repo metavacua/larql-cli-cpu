@@ -11,10 +11,10 @@
 /// (no prefill, or an engine with only one).
 ///
 /// This is the field that tells a reader whether the row measured the
-/// backend they asked for. A windowed engine on `--backends metal`
-/// declines the fused path and runs its whole forward on the CPU, while
-/// the row label still says `[metal (GPU)]` — worth ~15 ms/token and
-/// otherwise only inferable by noticing the timings look wrong.
+/// dispatch shape they asked for. An engine that declines the fused path
+/// runs its forward layer by layer on the host while the row label is
+/// unchanged — upstream measured that at ~15 ms/token, otherwise only
+/// inferable by noticing the timings look wrong.
 pub(super) fn format_dispatch_note(
     path: Option<larql_inference::kv_engine::DispatchPath>,
     per_layer_is_host_delegated: bool,

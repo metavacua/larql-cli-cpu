@@ -81,9 +81,7 @@ pub fn run(mut args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
     let as_given = args.clone();
 
     // `--cpu` is shorthand for a CPU-only run. Two normalisations:
-    //  1. Force `backends = "cpu"` so the engine path (which decides
-    //     CPU-vs-Metal via `args.backends.contains("metal")`) builds a
-    //     CpuBackend rather than silently running the engine on Metal.
+    //  1. Force `backends = "cpu"`, whatever `--backends` said.
     //  2. Unless the user picked engines explicitly, also surface the
     //     production `standard` StandardEngine CPU row. That is the path
     //     `larql run`/`larql walk` actually use and it is ~12% faster
@@ -144,26 +142,31 @@ pub fn run(mut args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
             .filter(|s| !s.is_empty())
             .collect()
     };
-    let want_metal = requested_backends.contains(&"metal");
     let want_cpu = requested_backends.contains(&"cpu");
     let want_engine = args.engine.is_some();
     let want_ffn = args.ffn.is_some();
     let want_moe = args.moe_shards.is_some();
     // A VINDEX3 container names its backends in its own vocabulary
-    // (`production-q4k`, `metal-lowered`, …); `vindex3::resolve_backends`
+    // (`production-q4k`, `reference`, …); `vindex3::resolve_backends`
     // judges those, so the V2 emptiness check below is not its gate.
     let is_v3 = is_vindex3_container(&vindex_path);
-    if !is_v3
-        && !want_metal
-        && !want_cpu
-        && args.ollama.is_none()
-        && !want_engine
-        && !want_ffn
-        && !want_moe
-    {
+    if !is_v3 && !want_cpu && args.ollama.is_none() && !want_engine && !want_ffn && !want_moe {
         return Err(
-            "no backends selected: pass --backends metal,cpu, --ollama, --engine, --ffn, or --moe-shards".into(),
+            "no backends selected: pass --backends cpu, --ollama, --engine, --ffn, or --moe-shards"
+                .into(),
         );
+    }
+    // The V2 path knows one backend. A name it does not know is refused, not
+    // skipped: silently dropping `metal` from `metal,cpu` would time only part
+    // of what was asked for. (A VINDEX3 container judges its own names.)
+    if !is_v3 {
+        if let Some(unknown) = requested_backends.iter().find(|b| **b != "cpu") {
+            return Err(format!(
+                "unknown bench backend {unknown:?}: this build benches `cpu` \
+                 (plus --ollama, --engine, --ffn and --moe-shards)"
+            )
+            .into());
+        }
     }
 
     println!("larql bench: {}", vindex_path.display());
@@ -216,26 +219,14 @@ pub fn run(mut args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
     // MoE decode path, not the dense legacy CPU decode (`run_larql`) or the
     // NullFfn engine path — both ignore the experts. Detect up front (mmap
     // load, cheap) so the CPU rows route correctly. `--moe-shards` keeps the
-    // remote path; Metal MoE keeps its existing GPU dispatch.
+    // remote path.
     let arch_is_moe = is_q4k && vindex_is_hybrid_moe(&vindex_path);
     // CPU MoE without shards → drive the in-process LocalMoeFfn engine path.
-    let want_local_moe = arch_is_moe && !want_metal && args.moe_shards.is_none();
+    let want_local_moe = arch_is_moe && args.moe_shards.is_none();
 
-    if want_metal {
-        if is_q4k {
-            rows.extend(run_larql(&vindex_path, &args, /* metal */ true)?);
-        } else if !want_engine {
-            return Err(format!(
-                "GPU bench requires a Q4K vindex (got quant={:?}). \
-                 Use a q4k vindex for GPU bench, or omit --backends and use --engine only.",
-                cfg.quant,
-            )
-            .into());
-        }
-    }
     if want_cpu && !arch_is_moe {
         if is_q4k {
-            rows.extend(run_larql(&vindex_path, &args, /* metal */ false)?);
+            rows.extend(run_larql(&vindex_path, &args)?);
         } else if !want_engine {
             return Err(format!(
                 "CPU bench requires a Q4K vindex (got quant={:?}).",
@@ -291,7 +282,7 @@ pub fn run(mut args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
                     engine_list,
                     &args,
                 )?);
-            } else if arch_is_moe && !want_metal {
+            } else if arch_is_moe {
                 // CPU MoE with --moe-shards: the remote-MoE block below
                 // dispatches experts to the shards. The dense NullFfn engine
                 // loop would silently ignore the experts, so skip it here.
@@ -315,11 +306,7 @@ pub fn run(mut args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
                 for engine_name in EngineKind::split_specs(engine_list) {
                     match EngineKind::from_name(&engine_name) {
                         Some(kind) => {
-                            let backend = if want_metal {
-                                larql_inference::default_engine_backend()
-                            } else {
-                                larql_inference::cpu_engine_backend()
-                            };
+                            let backend = larql_inference::cpu_engine_backend();
                             rows.push(run_engine(
                                 &mut weights,
                                 Some(&index),
@@ -360,11 +347,7 @@ pub fn run(mut args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
             for engine_name in EngineKind::split_specs(engine_list) {
                 match EngineKind::from_name(&engine_name) {
                     Some(kind) => {
-                        let backend = if want_metal {
-                            larql_inference::default_engine_backend()
-                        } else {
-                            larql_inference::cpu_engine_backend()
-                        };
+                        let backend = larql_inference::cpu_engine_backend();
                         rows.push(run_engine(
                             &mut weights,
                             None,

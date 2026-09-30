@@ -1,20 +1,14 @@
-//! Pure helpers for the local Metal/CPU bench path. The I/O-heavy
+//! Pure helpers for the local CPU bench path. The I/O-heavy
 //! `run_larql` body lives in `local_runtime.rs`; this file owns:
-//!   * `backend_name_for` — `"larql-metal"` / `"larql-cpu"`
+//!   * `LOCAL_BACKEND` — the `"larql-cpu"` row label
 //!   * `format_early_stop_note` — note string for partial / no-decode runs
 //!   * `append_cpu_fallback_note` — makes CPU Q4K fallback rows explicit
 //!   * `format_q4k_cache_log` — verbose `-v` cache-stats line
 //!
 //! All exercised by tests in this file.
 
-/// Returns the table-row backend label for the local bench.
-pub(super) fn backend_name_for(metal: bool) -> &'static str {
-    if metal {
-        "larql-metal"
-    } else {
-        "larql-cpu"
-    }
-}
+/// The table-row backend label for the local bench.
+pub(super) const LOCAL_BACKEND: &str = "larql-cpu";
 
 /// Note string for the local bench row: either empty (full target reached),
 /// "early stop @n/target …" (partial), or "no decode steps completed …"
@@ -110,12 +104,6 @@ pub(super) fn format_q4k_cache_log(backend_label: &str, slots: usize, bytes: usi
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn backend_name_for_picks_label() {
-        assert_eq!(backend_name_for(true), "larql-metal");
-        assert_eq!(backend_name_for(false), "larql-cpu");
-    }
 
     #[test]
     fn early_stop_note_empty_when_target_reached() {
@@ -223,8 +211,8 @@ mod tests {
 
     #[test]
     fn q4k_cache_log_reports_slots_and_mb() {
-        let s = format_q4k_cache_log("larql-metal", 12, 16 * 1024 * 1024);
-        assert!(s.contains("after larql-metal"));
+        let s = format_q4k_cache_log(LOCAL_BACKEND, 12, 16 * 1024 * 1024);
+        assert!(s.contains("after larql-cpu"));
         assert!(s.contains("12 populated slots"));
         assert!(s.contains("16.0 MB"));
     }

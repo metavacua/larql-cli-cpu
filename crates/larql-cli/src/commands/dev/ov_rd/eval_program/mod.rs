@@ -117,8 +117,6 @@ pub(super) fn run_eval_program(args: EvalProgramArgs) -> Result<(), Box<dyn std:
     let mut weights = load_model_weights_kquant(&args.index, &mut cb)?;
     let tokenizer = load_vindex_tokenizer(&args.index)?;
 
-    let metal_backend = super::metal_backend::init(args.metal);
-
     let mut all_records = load_prompts(&args.prompts, None)?;
     if args.max_per_stratum > 0 {
         all_records = limit_prompts_per_stratum(all_records, args.max_per_stratum);
@@ -229,7 +227,6 @@ pub(super) fn run_eval_program(args: EvalProgramArgs) -> Result<(), Box<dyn std:
 
     eprintln!("Evaluating program on {} prompts", eval_prompts.len());
     let mut prompt_reports: Vec<PromptReport> = Vec::new();
-    let mut actual_intervention_backend: &'static str = "cpu_fallback";
     let mut diag = Diagnostics::default();
     let target_group = program.group;
 
@@ -247,108 +244,39 @@ pub(super) fn run_eval_program(args: EvalProgramArgs) -> Result<(), Box<dyn std:
         }
         let stratum = record.stratum.as_deref().unwrap_or("unknown");
 
-        // Pass 1: baseline — Metal if available, CPU fallback.
-        let baseline_h = if let Some(ref b) = metal_backend {
-            if let Some(h) =
-                super::metal_backend::try_metal_baseline(&weights, &token_ids, &index, b)
-            {
-                h
-            } else {
-                larql_inference::vindex::predict_kquant_hidden(&weights, &token_ids, &index, None)
-            }
-        } else {
-            larql_inference::vindex::predict_kquant_hidden(&weights, &token_ids, &index, None)
-        };
+        // Pass 1: baseline.
+        let baseline_h =
+            larql_inference::vindex::predict_kquant_hidden(&weights, &token_ids, &index, None);
         let baseline_logits = final_logits(&weights, &baseline_h);
         let baseline_logp = log_softmax(&baseline_logits);
         let baseline_top1 = argmax(&baseline_logits);
 
-        // Pass 2: oracle PQ codes — Metal capture if available, CPU fallback.
-        // Metal: runs only layers 0..=target_layer on GPU, captures pre-W_O output,
-        // then computes PQ codes on CPU. ~34× faster than full CPU forward pass for L0.
-        let oracle_codes_by_position: Vec<Vec<usize>> = if let Some(ref b) = metal_backend {
-            if let Some(pre_wo) = super::metal_backend::try_metal_capture_pre_wo(
-                &weights, &token_ids, &index, head.layer, head.head, b,
-            ) {
-                // pre_wo: [seq_len × head_dim] f32 captured from attn_outs[target_layer]
-                let head_dim = pre_wo.len() / token_ids.len();
-                (0..token_ids.len())
-                    .map(|pos| {
-                        let values = &pre_wo[pos * head_dim..(pos + 1) * head_dim];
-                        let base = head_means.positions.get(pos).unwrap_or(&head_means.global);
-                        let residual: Vec<f32> =
-                            values.iter().zip(base).map(|(yi, bi)| yi - bi).collect();
-                        let z = basis.residual_to_z(&residual);
-                        let coords = pca_basis.coordinates_with_rank(&z, codebook.config.k);
-                        codebook.quantize_indices_for_stratum(&coords, stratum)
-                    })
-                    .collect()
-            } else {
-                // Fall back to CPU oracle PQ
-                let (_, _, codes) = forward_q4k_oracle_pq_head(
-                    &mut weights,
-                    &token_ids,
-                    &index,
-                    head,
-                    basis,
-                    pca_basis,
-                    head_means,
-                    codebook,
-                    stratum,
-                )?;
-                codes
-            }
-        } else {
-            let (_, _, codes) = forward_q4k_oracle_pq_head(
-                &mut weights,
-                &token_ids,
-                &index,
-                head,
-                basis,
-                pca_basis,
-                head_means,
-                codebook,
-                stratum,
-            )?;
-            codes
-        };
+        // Pass 2: oracle PQ codes.
+        let (_, _, oracle_codes_by_position) = forward_q4k_oracle_pq_head(
+            &mut weights,
+            &token_ids,
+            &index,
+            head,
+            basis,
+            pca_basis,
+            head_means,
+            codebook,
+            stratum,
+        )?;
 
-        // Pass 3: oracle Mode D baseline — Metal if available, CPU fallback.
-        let oracle_h = if let Some(ref b) = metal_backend {
-            let oracle_delta_flat = build_replacement_delta(
-                mode_d_table,
-                &oracle_codes_by_position,
-                stratum,
-                weights.hidden_size,
-            );
-            let oracle_delta = ndarray::Array2::from_shape_vec(
-                (token_ids.len(), weights.hidden_size),
-                oracle_delta_flat,
-            )
-            .ok();
-            oracle_delta.and_then(|d| {
-                super::metal_backend::try_metal(
-                    &weights, &token_ids, &index, head.layer, head.head, &d, b,
-                )
-            })
-        } else {
-            None
-        };
-        let oracle_h = match oracle_h {
-            Some(h) => h,
-            None => forward_q4k_oracle_pq_mode_d_head(
-                &mut weights,
-                &token_ids,
-                &index,
-                head,
-                basis,
-                pca_basis,
-                head_means,
-                codebook,
-                mode_d_table,
-                stratum,
-            )?,
-        };
+        // Pass 3: oracle Mode D baseline.
+        let oracle_h = forward_q4k_oracle_pq_mode_d_head(
+            &mut weights,
+            &token_ids,
+            &index,
+            head,
+            basis,
+            pca_basis,
+            head_means,
+            codebook,
+            mode_d_table,
+            stratum,
+        )?;
         let oracle_logp = log_softmax(&final_logits(&weights, &oracle_h));
         diag.oracle_mode_d_kls
             .push(kl_logp(&baseline_logp, &oracle_logp));
@@ -407,53 +335,16 @@ pub(super) fn run_eval_program(args: EvalProgramArgs) -> Result<(), Box<dyn std:
             })
             .collect();
 
-        // Pass 5: program-mapped Mode D injection — Metal if available, CPU fallback.
-        // Track which path ran so the report is self-describing.
-        let delta_flat =
-            build_replacement_delta(mode_d_table, &remapped_codes, stratum, weights.hidden_size);
-        let replacement_delta =
-            ndarray::Array2::from_shape_vec((token_ids.len(), weights.hidden_size), delta_flat)
-                .map_err(|e| format!("delta shape: {e}"))?;
-        let (program_h, used_metal) = if let Some(ref b) = metal_backend {
-            if let Some(h) = super::metal_backend::try_metal(
-                &weights,
-                &token_ids,
-                &index,
-                head.layer,
-                head.head,
-                &replacement_delta,
-                b,
-            ) {
-                (h, true)
-            } else {
-                let h = forward_q4k_predicted_address_mode_d_head(
-                    &mut weights,
-                    &token_ids,
-                    &index,
-                    head,
-                    mode_d_table,
-                    &remapped_codes,
-                    stratum,
-                )?;
-                (h, false)
-            }
-        } else {
-            let h = forward_q4k_predicted_address_mode_d_head(
-                &mut weights,
-                &token_ids,
-                &index,
-                head,
-                mode_d_table,
-                &remapped_codes,
-                stratum,
-            )?;
-            (h, false)
-        };
-        // Log once on the first prompt which backend was actually used.
-        if idx == 0 {
-            actual_intervention_backend = if used_metal { "metal" } else { "cpu_fallback" };
-            eprintln!("intervention_backend: {actual_intervention_backend}");
-        }
+        // Pass 5: program-mapped Mode D injection.
+        let program_h = forward_q4k_predicted_address_mode_d_head(
+            &mut weights,
+            &token_ids,
+            &index,
+            head,
+            mode_d_table,
+            &remapped_codes,
+            stratum,
+        )?;
         let program_logits = final_logits(&weights, &program_h);
         let program_logp = log_softmax(&program_logits);
         let program_top1 = argmax(&program_logits);
@@ -532,7 +423,7 @@ pub(super) fn run_eval_program(args: EvalProgramArgs) -> Result<(), Box<dyn std:
         behavior_gate,
         metric_parity,
         metric_parity_failures,
-        intervention_backend: actual_intervention_backend,
+        intervention_backend: "cpu",
         strata,
         per_prompt: prompt_reports,
     };
@@ -657,18 +548,4 @@ fn print_summary(
     if let Some(detail) = metric_parity_failures {
         eprintln!("metric parity FAIL:\n{detail}");
     }
-}
-
-fn build_replacement_delta(
-    mode_d_table: &super::pq::ModeDTable,
-    remapped_codes: &[Vec<usize>],
-    stratum: &str,
-    hidden_size: usize,
-) -> Vec<f32> {
-    let mut delta = Vec::with_capacity(remapped_codes.len() * hidden_size);
-    for (pos, codes) in remapped_codes.iter().enumerate() {
-        let d = mode_d_table.delta_for_position_codes_with_stratum(pos, codes, stratum);
-        delta.extend_from_slice(&d);
-    }
-    delta
 }
