@@ -66,6 +66,16 @@ EXTERNAL = re.compile(
     r"larql_probes/|~/|/Users/)"
 )
 PATH_ROOTS = ("crates/", "docs/", "bench/", "scripts/", "knowledge/", ".github/")
+# Packages of the upstream LARQL workspace that this CPU-only extraction does
+# not carry. A `-p` naming one is an instruction for that workspace — like a
+# path under EXTERNAL — not a reference into this tree.
+UPSTREAM_PACKAGES = frozenset(
+    {"larql-compute-metal", "larql-server", "larql-demos", "vindex-cli", "larql-python", "model-compute"}
+)
+# A backticked path that is itself the text of a link to an absolute URL is
+# resolved by that URL (a permalink into the source it was extracted from),
+# not by this tree.
+LINKED_CODE = re.compile(r"\[`[^`]*`\]\([a-z][a-z0-9+.-]*://[^)\s]+\)")
 # A reference the prose has already LABELLED is not a trap, and this gate
 # exists to catch traps. Three shapes qualify: a roadmap naming the file it
 # intends to create, a doc that says outright the thing is missing, and a
@@ -177,7 +187,14 @@ def cargo_targets(kind: str) -> dict[str, set[str]]:
     return owners
 
 
-def _fixture(root: Path, *, with_docs: bool = True, with_broken: bool = False) -> None:
+def _fixture(
+    root: Path,
+    *,
+    with_docs: bool = True,
+    with_broken: bool = False,
+    with_upstream: bool = False,
+    with_bad_example: bool = False,
+) -> None:
     """A miniature GIT repository: one real reference, and traps in
     directories a `.gitignore` keeps untracked.
 
@@ -204,6 +221,14 @@ def _fixture(root: Path, *, with_docs: bool = True, with_broken: bool = False) -
         (root / "docs" / "real.md").write_text("cites `crates/larql-x/src/lib.rs`\n")
     if with_broken:
         (root / "docs" / "bad.md").write_text("cites `crates/larql-x/src/gone.rs`\n")
+    if with_upstream:
+        (root / "docs" / "upstream.md").write_text(
+            "cites [`crates/larql-x/src/gone.rs`](https://example.invalid/blob/sha/gone.rs)\n"
+            "and [`gone.rs:12`](https://example.invalid/blob/sha/gone.rs#L12)\n"
+            "run `cargo run -p larql-compute-metal --example nope`\n"
+        )
+    if with_bad_example:
+        (root / "docs" / "example.md").write_text("run `cargo run -p larql-x --example nope`\n")
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
     subprocess.run(["git", "add", "-A"], cwd=root, check=True)
 
@@ -272,6 +297,23 @@ def selftest() -> int:
         results.append(
             (rc_b != 0 and "gone.rs" in out_b,
              f"a genuinely broken reference still FAILS (rc={rc_b})")
+        )
+
+        # References the prose resolves elsewhere: a path linked to a
+        # permalink, and an example in a package this tree does not carry.
+        upstream = base / "upstream"
+        _fixture(upstream, with_upstream=True)
+        rc_u, out_u = _run_in(upstream)
+        results.append(
+            (rc_u == 0, f"linked upstream paths and upstream-package examples pass (rc={rc_u})")
+        )
+        # ...while an example missing from a package this tree DOES carry fails.
+        bad_example = base / "bad_example"
+        _fixture(bad_example, with_bad_example=True)
+        rc_x, out_x = _run_in(bad_example)
+        results.append(
+            (rc_x != 0 and "nope" in out_x,
+             f"a missing example in a local package still FAILS (rc={rc_x})")
         )
 
     for ok, label in results:
@@ -352,6 +394,7 @@ def main() -> int:
         except (OSError, UnicodeDecodeError):
             continue
         for num, line in enumerate(lines, 1):
+            line = LINKED_CODE.sub("", line)
             # 1. `path.rs:LINE`
             for m in re.finditer(
                 r"`([A-Za-z0-9_./-]+\.(?:rs|py|md|toml|json|sh|yml)):(\d+)(?:[-–]\d+)?`", line
@@ -385,7 +428,9 @@ def main() -> int:
                 name = m.group(1)
                 owners = examples.get(name)
                 pm = re.search(r"-p\s+([\w-]+)", line)
-                if not owners:
+                if pm and pm.group(1) in UPSTREAM_PACKAGES:
+                    counts["example"] -= 1
+                elif not owners:
                     if pm:  # bare `--example` may be an external repo's
                         findings.append((rel, num, "example: does not exist", name))
                 elif pm and pm.group(1) not in owners:
@@ -399,7 +444,9 @@ def main() -> int:
                 name = m.group(1)
                 owners = benches.get(name)
                 pm = re.search(r"-p\s+([\w-]+)", line)
-                if not owners:
+                if pm and pm.group(1) in UPSTREAM_PACKAGES:
+                    counts["bench"] -= 1
+                elif not owners:
                     findings.append((rel, num, "bench: does not exist", name))
                 elif pm and pm.group(1) not in owners:
                     findings.append(
