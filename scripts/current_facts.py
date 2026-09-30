@@ -20,12 +20,11 @@ import tomllib
 ROOT = Path(__file__).resolve().parent.parent
 GENERATED = ROOT / "docs/generated"
 SOURCES = {
-    "package": "crates/vindex-cli/Cargo.toml",
+    "package": "Cargo.toml",
     "generation": "crates/larql-vindex/src/format/generation.rs",
     "graph": "crates/larql-vindex/src/format/vindex3/graph/mod.rs",
     "plan": "crates/larql-vindex/src/format/vindex3/plan/report.rs",
     "spec": "crates/larql-vindex/docs/vindex3-format-spec.md",
-    "vindex": "crates/vindex-cli/src/main.rs",
     "larql_vindex3": "crates/larql-cli/src/commands/primary/vindex3_cmd/args.rs",
 }
 
@@ -64,13 +63,12 @@ def facts() -> dict:
         source["generation"],
     )
     return {
-        "facts_schema": 1,
+        "facts_schema": 2,
         "scope": "source-checkout",
-        "vindex_cli_version": tomllib.loads(source["package"])["package"]["version"],
+        "larql_version": tomllib.loads(source["package"])["workspace"]["package"]["version"],
         "spec_version": one(r"^\*\*Version:\*\* (\S+)$", source["spec"]),
         "constants": constants,
         "commands": {
-            "vindex": command_names(source["vindex"], "Command"),
             "larql_vindex3": command_names(source["larql_vindex3"], "Vindex3Command"),
         },
         "sources": SOURCES,
@@ -79,7 +77,7 @@ def facts() -> dict:
 
 def markdown(data: dict) -> str:
     rows = {
-        "vindex package version (not release availability)": data["vindex_cli_version"],
+        "larql workspace version (not release availability)": data["larql_version"],
         "Candidate specification version": data["spec_version"],
         **data["constants"],
     }
