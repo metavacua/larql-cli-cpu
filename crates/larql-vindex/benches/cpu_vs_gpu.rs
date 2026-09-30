@@ -60,8 +60,6 @@ fn configs() -> &'static [(&'static str, usize, usize)] {
 fn bench_f32_gemv(c: &mut Criterion) {
     let mut group = c.benchmark_group("cpu_vs_gpu/f32_gemv_single_position");
     let cpu = CpuBackend;
-    #[cfg(all(feature = "gpu", target_os = "macos"))]
-    let metal = larql_compute_metal::MetalBackend::new();
 
     for &(name, features, hidden) in configs() {
         let gate = synth_matrix(features, hidden);
@@ -78,17 +76,6 @@ fn bench_f32_gemv(c: &mut Criterion) {
             },
         );
 
-        // Metal f32_gemv_force: dedicated row-per-simdgroup kernel.
-        #[cfg(all(feature = "gpu", target_os = "macos"))]
-        if let Some(ref m) = metal {
-            group.bench_with_input(
-                BenchmarkId::new("metal", name),
-                &(gate.view(), q_slice),
-                |b, (g, x)| {
-                    b.iter(|| m.f32_gemv_force(*g, x));
-                },
-            );
-        }
         // Suppress unused warning when `metal` feature is off.
         let _ = q_slice;
     }
@@ -98,8 +85,6 @@ fn bench_f32_gemv(c: &mut Criterion) {
 fn bench_f32_batch_matmul(c: &mut Criterion) {
     let mut group = c.benchmark_group("cpu_vs_gpu/f32_batch_matmul_seq64");
     let cpu = CpuBackend;
-    #[cfg(all(feature = "gpu", target_os = "macos"))]
-    let metal = larql_compute_metal::MetalBackend::new();
 
     let seq_len = 64usize; // typical mid-size prefill batch
     for &(name, features, hidden) in configs() {
@@ -113,17 +98,6 @@ fn bench_f32_batch_matmul(c: &mut Criterion) {
                 b.iter(|| cpu.matmul_transb(*x, *g));
             },
         );
-
-        #[cfg(all(feature = "gpu", target_os = "macos"))]
-        if let Some(ref m) = metal {
-            group.bench_with_input(
-                BenchmarkId::new("metal", name),
-                &(gate.view(), x.view()),
-                |b, (g, x)| {
-                    b.iter(|| m.matmul_transb(*x, *g));
-                },
-            );
-        }
     }
     group.finish();
 }
@@ -131,8 +105,6 @@ fn bench_f32_batch_matmul(c: &mut Criterion) {
 fn bench_q4_matvec(c: &mut Criterion) {
     let mut group = c.benchmark_group("cpu_vs_gpu/q4_matvec_decode");
     let cpu = CpuBackend;
-    #[cfg(all(feature = "gpu", target_os = "macos"))]
-    let metal = larql_compute_metal::MetalBackend::new();
 
     for &(name, features, hidden) in configs() {
         let gate = synth_matrix(features, hidden);
@@ -148,17 +120,6 @@ fn bench_q4_matvec(c: &mut Criterion) {
                 b.iter(|| cpu.q4_matvec(bytes, q8x, q8s, features, hidden));
             },
         );
-
-        #[cfg(all(feature = "gpu", target_os = "macos"))]
-        if let Some(ref m) = metal {
-            group.bench_with_input(
-                BenchmarkId::new("metal", name),
-                &(q4_bytes.clone(), q8_x.clone(), q8_scales.clone()),
-                |b, (bytes, q8x, q8s)| {
-                    b.iter(|| m.q4_matvec(bytes, q8x, q8s, features, hidden));
-                },
-            );
-        }
     }
     group.finish();
 }

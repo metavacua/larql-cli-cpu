@@ -62,34 +62,20 @@ mod hybrid_traversal;
 mod hyper_connection;
 mod intervene;
 mod intervene_heads;
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-mod kda_metal;
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-mod kda_native_parity;
 mod kda_parity;
 mod kda_parity_full_rank_gate;
 mod kda_parity_real;
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-mod kda_q8_real;
 mod kda_state;
 mod kimi_kda_layer_real;
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-mod kimi_layer_metal;
 mod kimi_mla_layer_real;
 mod kimi_moe_block;
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-mod kimi_moe_metal;
 mod kimi_moe_real;
 mod kimi_router;
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-mod kimi_two_layer;
 mod kv_view;
 mod lowering_identity;
 mod lowering_pin;
 mod lowering_registry;
 mod mamba2_exec;
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-mod mla_metal;
 mod mla_parity;
 mod mla_parity_output_gate;
 mod mla_parity_q_lora;
@@ -102,23 +88,16 @@ mod placement_seams;
 mod plan_fixtures;
 mod projection_bench;
 mod provenance;
+mod qw36c_layer0;
 mod qwen2_moe;
 mod realization;
-mod vq8_shared_execution;
-// Each module carries its OWN cfg: inserting a bare `mod` line above a
-// gated one hands the attribute to the newcomer and silently un-gates
-// the original — that exact capture broke six CI jobs on PR #346.
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-mod q2a_decode_bench;
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-mod q2a_teacher_forced;
-mod qw36c_layer0;
 mod stack_dispatch_refusal;
 mod stack_parity;
 mod stack_real;
 mod token2_real;
 mod token_real;
 mod token_tiny;
+mod vq8_shared_execution;
 mod wave19_hc_batch;
 mod wave19_hc_decode;
 mod wave19_hc_substrate;
@@ -128,8 +107,6 @@ mod gated_delta_refusal;
 mod gemma4;
 mod gemma4_refusals;
 mod generate_baseline;
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-mod generate_metal;
 mod generate_real;
 mod golden;
 mod head_observation;

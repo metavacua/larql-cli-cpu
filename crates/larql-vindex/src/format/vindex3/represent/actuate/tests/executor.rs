@@ -458,7 +458,6 @@ fn a_missing_artifact_is_refused_before_the_backend_is_consulted() {
 /// On a build without the instrument, a fully instructable request
 /// reaches the procedure and is refused for the backend — naming what
 /// the build lacks and which procedure it could not perform.
-#[cfg(not(all(feature = "gpu", target_os = "macos")))]
 #[test]
 fn a_build_without_the_instrument_refuses_after_instructing() {
     let dir = glimmer();

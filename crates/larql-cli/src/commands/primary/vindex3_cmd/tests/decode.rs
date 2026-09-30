@@ -209,14 +209,6 @@ fn the_dispatch_hands_the_visitor_the_named_realisation() {
     );
 }
 
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-#[test]
-fn a_lowered_arm_is_refused_by_the_interpreter_dispatch() {
-    let err = with_plan_backend(ExecBackend::MetalLowered, &Plugins::none(), NameOf)
-        .expect_err("a lowered arm does not run through the interpreter");
-    assert!(err.to_string().contains("lowered"), "{err}");
-}
-
 #[test]
 fn the_canonical_arms_want_no_pack_and_the_nvfp4_arm_wants_its_encoding() {
     assert_eq!(wanted_representation(ExecBackend::Reference), None);

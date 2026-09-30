@@ -300,16 +300,6 @@ mod verb_executor {
         assert!(err.contains("NVFP4 pack"), "{err}");
         assert!(nothing_under(&f.root.join("runs")), "nothing ran");
     }
-
-    /// Lowered arms on the Metal device. Fails, never skips, when the
-    /// device or its shader library is unavailable.
-    #[cfg(all(feature = "gpu", target_os = "macos"))]
-    #[test]
-    fn lowered_arms_measure_and_the_reading_is_ingested() {
-        let f = fixture();
-        measure_uniform(&f, ExecBackend::MetalLoweredF16, ExecBackend::MetalLowered)
-            .expect("a lowered plan-v1 run on this Metal device");
-    }
 }
 
 #[test]

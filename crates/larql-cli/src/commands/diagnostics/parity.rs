@@ -15,30 +15,19 @@
 //! What shipped is in `crates/larql-cli/CHANGELOG.md` (2026-05-10); the
 //! remaining open scoping work is `ROADMAP.md` → "P2: parity polish".
 
-// Without the `gpu`+macOS feature the real `run` (and everything it calls —
-// the naive reference impls, MoE helpers, dump utilities) is `#[cfg]`'d out,
-// leaving only the stub `run` below. That code is live in the gpu build, so
-// it is not truly dead — silence dead-code only in the gpu-off config rather
-// than gating every helper individually.
-#![cfg_attr(not(all(feature = "gpu", target_os = "macos")), allow(dead_code))]
+// The real `run` (and everything it calls — the naive reference impls, MoE
+// helpers, dump utilities) only ever existed in the Metal build, which this
+// repository does not carry, leaving only the stub `run` below.
+#![allow(dead_code)]
 
 use clap::Args;
 
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-use crate::commands::primary::cache;
 use larql_compute::Activation;
 use larql_models::weights::{per_layer_ffn_key, PER_LAYER_FFN_DOWN, PER_LAYER_FFN_GATE_UP};
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-use larql_vindex::{load_model_weights_kquant, load_vindex_config, SilentLoadCallbacks};
 
 mod layer_diff;
 mod moe;
 mod reference;
-// The components are reached only from the Metal-backed `run`.
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-use layer_diff::*;
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-use moe::*;
 use reference::*;
 
 // ── Component / backend taxonomies ────────────────────────────────────────────
@@ -108,85 +97,12 @@ pub struct ParityArgs {
     pub verbose: bool,
 }
 
-#[cfg(not(all(feature = "gpu", target_os = "macos")))]
 pub fn run(_args: ParityArgs) -> Result<(), Box<dyn std::error::Error>> {
     Err(
         "`larql parity` requires the `gpu` feature on macOS — Metal is the reference \
          backend this command compares CPU output against."
             .into(),
     )
-}
-
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-pub fn run(args: ParityArgs) -> Result<(), Box<dyn std::error::Error>> {
-    if !COMPONENTS.contains(&args.component.as_str()) {
-        return Err(format!(
-            "unknown --component '{}'. Available: {}",
-            args.component,
-            COMPONENTS.join(", ")
-        )
-        .into());
-    }
-
-    // `layer` component always uses metal+cpu internally; other components
-    // need the backends list validated and require ≥2.
-    if args.component != "layer" {
-        let backends: Vec<&str> = args.backends.split(',').map(|s| s.trim()).collect();
-        for b in &backends {
-            if !BACKENDS.contains(b) {
-                return Err(format!(
-                    "unknown backend '{}'. Available: {}",
-                    b,
-                    BACKENDS.join(", ")
-                )
-                .into());
-            }
-        }
-        if backends.len() < 2 {
-            return Err("need at least 2 backends to diff (default is `reference,cpu`)".into());
-        }
-    }
-
-    // ── Resolve + load vindex ────────────────────────────────────────────────
-    let path = cache::resolve_model(&args.model)?;
-    let config = load_vindex_config(&path)?;
-    let mut cb = SilentLoadCallbacks;
-    let weights = load_model_weights_kquant(&path, &mut cb)?;
-    let arch = &*weights.arch;
-
-    println!("Vindex:    {}", path.display());
-    println!("Model:     {}", config.model);
-    println!("Component: {}", args.component);
-    println!("Layer:     {}", args.layer);
-    println!();
-
-    if args.component == "layer" {
-        return run_layer_diff(&path, &config, &args);
-    }
-
-    // lm-head parity is backend-agnostic (Q4_K matvec vs f32 reference) —
-    // works on any vindex that has an lm_head, MoE or dense. The moe-*
-    // components need an expert store, which pure MoE (GPT-OSS, OLMoE,
-    // GraniteMoE) has exactly as hybrid does — gating on hybrid alone was
-    // the `is_hybrid_moe()`-only assumption this codebase keeps finding.
-    if !(arch.is_moe() || arch.is_hybrid_moe()) && args.component != "lm-head" {
-        return Err(format!(
-            "vindex {} is not MoE — moe-* components are MoE-only",
-            args.model
-        )
-        .into());
-    }
-
-    let backends: Vec<&str> = args.backends.split(',').map(|s| s.trim()).collect();
-    println!("Backends:  {}", backends.join(" → "));
-    println!();
-
-    match args.component.as_str() {
-        "moe-expert" => run_moe_expert(&config, &weights, &args, &backends),
-        "moe-block" => run_moe_block(&config, &weights, &args, &backends),
-        "lm-head" => run_lm_head(&path, &config, &weights, &args, &backends),
-        _ => unreachable!("validated above"),
-    }
 }
 
 // ── lm-head: Q4_K-vs-reference logits for the final projection ───────────────

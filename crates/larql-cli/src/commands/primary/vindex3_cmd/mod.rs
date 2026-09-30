@@ -36,8 +36,6 @@ mod exec;
 mod generate;
 mod input_moments;
 mod intervention;
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-pub(crate) mod lowered;
 pub(crate) mod measure;
 mod observe;
 mod ops;

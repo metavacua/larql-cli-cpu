@@ -292,21 +292,6 @@ fn refuse_inapplicable_flags(args: &RunArgs) -> Result<(), BoxErr> {
     .into())
 }
 
-/// `--metal` names the Metal realisation; otherwise the `larql-compute`
-/// CPU kernels. Split into two whole definitions rather than a `cfg`
-/// block inside one, for the reason `run_cmd::generate_routed_metal`
-/// documents: the `gpu` feature compiles everywhere, the Metal crate
-/// only on macOS, and Cargo cannot express the conjunction.
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-fn select_backend(metal: bool) -> Result<ExecBackend, BoxErr> {
-    Ok(if metal {
-        ExecBackend::Metal
-    } else {
-        ExecBackend::Production
-    })
-}
-
-#[cfg(not(all(feature = "gpu", target_os = "macos")))]
 fn select_backend(metal: bool) -> Result<ExecBackend, BoxErr> {
     if metal {
         return Err("--metal needs the `gpu` feature on macOS; this build has neither".into());

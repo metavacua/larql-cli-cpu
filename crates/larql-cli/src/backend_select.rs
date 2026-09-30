@@ -16,19 +16,9 @@
 
 use larql_compute::{backend_from_spec, BackendCtor, BackendKind, ComputeBackend};
 
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-fn metal_ctor() -> Option<Box<dyn ComputeBackend>> {
-    larql_compute_metal::metal_backend().map(|m| Box::new(m) as Box<dyn ComputeBackend>)
-}
-
 /// Constructors for the GPU backend crates compiled into this binary,
 /// in `BackendKind::Auto` preference order.
 pub fn backend_registry() -> Vec<(BackendKind, BackendCtor)> {
-    #[cfg(all(feature = "gpu", target_os = "macos"))]
-    {
-        vec![(BackendKind::Metal, metal_ctor as BackendCtor)]
-    }
-    #[cfg(not(all(feature = "gpu", target_os = "macos")))]
     {
         Vec::new()
     }
@@ -58,7 +48,6 @@ mod tests {
         assert!(backend.name().starts_with("cpu"));
     }
 
-    #[cfg(not(all(feature = "gpu", target_os = "macos")))]
     #[test]
     fn metal_flag_errors_loudly_when_not_compiled_in() {
         // `unwrap_err` needs `Ok: Debug`, which `Box<dyn ComputeBackend>` isn't.
@@ -67,24 +56,5 @@ mod tests {
             Ok(_) => panic!("expected NotCompiledIn without the gpu feature"),
         };
         assert!(err.to_string().contains("metal"));
-    }
-}
-
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-#[cfg(test)]
-mod macos_tests {
-    use super::*;
-
-    /// On a gpu-feature macOS build the registry advertises Metal, and
-    /// invoking its constructor is safe whether or not a device exists
-    /// (`None` on headless CI, `Some` on an M-series Mac).
-    #[test]
-    fn registry_advertises_metal_and_ctor_is_callable() {
-        let registry = backend_registry();
-        assert_eq!(registry.len(), 1);
-        assert_eq!(registry[0].0, BackendKind::Metal);
-        if let Some(backend) = (registry[0].1)() {
-            assert!(backend.name().contains("metal"));
-        }
     }
 }

@@ -108,12 +108,6 @@ pub fn cpu_engine_backend() -> Box<dyn EngineBackend> {
 /// the `gpu` feature is enabled, CPU otherwise. Parallel to
 /// `default_backend()` but returns the wider trait object.
 pub fn default_engine_backend() -> Box<dyn EngineBackend> {
-    #[cfg(all(feature = "gpu", target_os = "macos"))]
-    {
-        if let Some(metal) = larql_compute_metal::MetalBackend::new() {
-            return Box::new(metal);
-        }
-    }
     cpu_engine_backend()
 }
 
@@ -135,12 +129,6 @@ pub fn cpu_async_engine_backend() -> Box<dyn AsyncComputeBackend> {
 /// tok/s shape changes at A4 when `MetalBackend` lands real deferred
 /// dispatch (one `MTLCommandBuffer` per session).
 pub fn default_async_engine_backend() -> Box<dyn AsyncComputeBackend> {
-    #[cfg(all(feature = "gpu", target_os = "macos"))]
-    {
-        if let Some(metal) = larql_compute_metal::MetalBackend::new() {
-            return Box::new(metal);
-        }
-    }
     cpu_async_engine_backend()
 }
 
@@ -156,12 +144,6 @@ pub fn default_async_engine_backend() -> Box<dyn AsyncComputeBackend> {
 /// engines that want a compute backend for `fused_prefill` /
 /// `fused_decode_step` use it.
 pub fn default_compute_backend() -> Box<dyn larql_compute::ComputeBackend> {
-    #[cfg(all(feature = "gpu", target_os = "macos"))]
-    {
-        if let Some(metal) = larql_compute_metal::MetalBackend::new() {
-            return Box::new(metal);
-        }
-    }
     larql_compute::cpu_backend()
 }
 

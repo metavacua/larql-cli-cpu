@@ -420,92 +420,37 @@ fn check_golden(
     Ok(())
 }
 
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-fn metal_backend() -> Option<larql_compute_metal::MetalBackend> {
-    larql_compute_metal::MetalBackend::new()
-}
-
 // ── Per-architecture × backend tests ───────────────────────────────────────
-
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-fn run_metal(vindex: &str) {
-    let Some(metal) = metal_backend() else {
-        eprintln!("skip: Metal backend unavailable");
-        return;
-    };
-    let g =
-        lookup_golden(vindex, "metal").unwrap_or_else(|| panic!("no metal golden for {vindex}"));
-    check_golden(g, "metal", &metal).unwrap_or_else(|e| panic!("{e}"));
-}
 
 fn run_cpu(vindex: &str) {
     let g = lookup_golden(vindex, "cpu").unwrap_or_else(|| panic!("no cpu golden for {vindex}"));
     check_golden(g, "cpu", &CpuBackend).unwrap_or_else(|e| panic!("{e}"));
 }
 
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-#[test]
-#[ignore = "loads a real vindex; run with --ignored"]
-fn logits_golden_gemma3_4b_metal() {
-    run_metal("gemma3-4b-q4k-v2");
-}
 #[test]
 #[ignore = "loads a real vindex; run with --ignored"]
 fn logits_golden_gemma3_4b_cpu() {
     run_cpu("gemma3-4b-q4k-v2");
-}
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-#[test]
-#[ignore = "loads a real vindex; run with --ignored"]
-fn logits_golden_gemma4_31b_dense_metal() {
-    run_metal("gemma4-31b-q4k");
 }
 #[test]
 #[ignore = "loads a real vindex; run with --ignored"]
 fn logits_golden_gemma4_31b_dense_cpu() {
     run_cpu("gemma4-31b-q4k");
 }
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-#[test]
-#[ignore = "loads a real vindex; run with --ignored"]
-fn logits_golden_llama2_7b_metal() {
-    run_metal("llama2-7b-q4k");
-}
 #[test]
 #[ignore = "loads a real vindex; run with --ignored"]
 fn logits_golden_llama2_7b_cpu() {
     run_cpu("llama2-7b-q4k");
-}
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-#[test]
-#[ignore = "loads a real vindex; run with --ignored"]
-fn logits_golden_mistral_7b_metal() {
-    run_metal("mistral-7b-v0.1-q4k");
 }
 #[test]
 #[ignore = "loads a real vindex; run with --ignored"]
 fn logits_golden_mistral_7b_cpu() {
     run_cpu("mistral-7b-v0.1-q4k");
 }
-// Q4_K down variants — exercise the separated geglu + q4k_matvec path
-// after the fused-kernel default flip.
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-#[test]
-#[ignore = "loads a real vindex; run with --ignored"]
-fn logits_golden_gemma3_4b_q4k_down_metal() {
-    run_metal("gemma3-4b-q4k-downq4k");
-}
 #[test]
 #[ignore = "loads a real vindex; run with --ignored"]
 fn logits_golden_gemma3_4b_q4k_down_cpu() {
     run_cpu("gemma3-4b-q4k-downq4k");
-}
-// Gemma 4 31B Q6_K-down variant.
-#[cfg(all(feature = "gpu", target_os = "macos"))]
-#[test]
-#[ignore = "loads a real vindex; run with --ignored"]
-fn logits_golden_gemma4_31b_q6kdown_metal() {
-    run_metal("gemma4-31b-q4k-q6kdown");
 }
 #[test]
 #[ignore = "loads a real vindex; run with --ignored"]
