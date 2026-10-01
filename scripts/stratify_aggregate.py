@@ -111,6 +111,12 @@ def main() -> int:
         fcols = [*AST_COLS, *[f"std::{m}" for m in mods]]
         fa = [[from_ast(c, k) for k in AST_COLS] + [int(ast.get(c, {}).get("std_paths", {}).get(m, 0)) for m in mods] for c in crates]
         add("ast_facts", crates, fcols, fa, "counting", "tree-sitter counts per crate, production code only")
+        net = {m: n for f in ast.values() for m, n in f.get("net_modules", {}).items()}
+        if net:
+            roots_ = sorted({r for n in net.values() for r in n})
+            mods_ = sorted(net)
+            add("net_use", mods_, roots_, [[net[m].get(r, 0) for r in roots_] for m in mods_], "counting",
+                "net_use[m,r] = paths rooted at network crate r in module m (production source, ast-grep)")
     use_path = root / "actual-use.json"
     if use_path.exists():
         pairs = json.loads(use_path.read_text())
