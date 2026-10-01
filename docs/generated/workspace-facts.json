@@ -346,14 +346,18 @@
       "features": {
         "default": [
           "http",
-          "msgpack"
+          "msgpack",
+          "io",
+          "engine"
         ],
         "http": [
           "dep:reqwest"
         ],
         "msgpack": [
           "dep:rmp-serde"
-        ]
+        ],
+        "io": [],
+        "engine": []
       },
       "local_dependencies": [],
       "examples": [
