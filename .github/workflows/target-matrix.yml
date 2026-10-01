@@ -560,6 +560,13 @@ jobs:
           {
             echo "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER=riscv64-linux-gnu-gcc"
             echo "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUNNER=qemu-riscv64-static -L /usr/riscv64-linux-gnu"
+            # The runner's -L reaches only the test process. A test that
+            # spawns the riscv64 binary (test_continuation_plugin_cli) starts
+            # it through binfmt_misc, which has no sysroot, so its dynamic
+            # loader cannot find libstdc++.so.6. QEMU_LD_PREFIX is honoured
+            # by every qemu-user instance, children included. Probe run
+            # 36807867138: red without it, green with it.
+            echo "QEMU_LD_PREFIX=/usr/riscv64-linux-gnu"
           } >> "$GITHUB_ENV"
 
       - name: Cache cargo registry (downloads only, never target/)
