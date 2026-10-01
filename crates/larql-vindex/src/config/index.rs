@@ -350,16 +350,13 @@ impl VindexConfig {
     }
 
     /// Whether the FFN up/down weights a local forward pass needs are
-    /// present. `has_model_weights` alone is not enough: the Attention
-    /// tier sets it (attention + norms are weights) yet carries no FFN.
-    /// A manifest from before tiers existed reads as Browse with the
-    /// flag set, and keeps working.
+    /// present. `has_model_weights` says weight files exist, but alone it
+    /// is not enough: the Attention tier sets it (attention + norms are
+    /// weights) yet carries no FFN. The level only excludes that tier, so
+    /// a manifest from before tiers existed (it reads as Browse with the
+    /// flag set) keeps working.
     pub fn has_ffn_weights(&self) -> bool {
-        match self.extract_level {
-            ExtractLevel::Inference | ExtractLevel::All => true,
-            ExtractLevel::Attention => false,
-            ExtractLevel::Browse => self.has_model_weights,
-        }
+        self.has_model_weights && self.extract_level != ExtractLevel::Attention
     }
 
     /// Resident-size estimate for a browse-only vindex — just the
@@ -777,6 +774,10 @@ mod resident_size_tests {
             (ExtractLevel::Attention, true, false),
             (ExtractLevel::Inference, true, true),
             (ExtractLevel::All, true, true),
+            // The flag is the authority on weight files being on disk: a
+            // manifest that claims a level but wrote none has no FFN to run.
+            (ExtractLevel::Inference, false, false),
+            (ExtractLevel::All, false, false),
         ] {
             let mut c = cfg(level, StorageDtype::F16, 1);
             c.has_model_weights = flag;
