@@ -165,19 +165,37 @@ def run_cargo(verb: str, unit: dict, target: str, env: dict, extra: list[str], l
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 
+TREE_LINE = re.compile(r"^(\d+)\|(\S+) v(\S+)")
+
+
 def closure(unit: dict, target: str, env: dict) -> dict:
-    sel = ["--lib"] if unit["kind"] == "lib" else ["--bins"]  # tree selects by -p only; kept for symmetry
-    del sel
+    """Cfg- and feature-resolved dependency tree of one unit on one target.
+
+    `--prefix depth` with a `|` separator gives parent -> child edges exactly
+    as Cargo resolved them for this unit (normal + build, never dev), which a
+    flat package list - or the target-agnostic Cargo.lock - cannot: lock edges
+    include dev-dependencies and edges another target would not resolve.
+    `pkgs` is the closure; `edges` are index pairs into `pkgs`.
+    """
     r = sh(["cargo", "tree", "--locked", "--target", target, "-p", unit["name"], "-e", "normal,build",
-            "--prefix", "none", "-f", "{p}"], env=env)
+            "--prefix", "depth", "-f", "|{p}"], env=env)
     if r.returncode:
-        return {"exit": r.returncode, "error": r.stderr[:FIRST_ERROR_CHARS], "pkgs": []}
-    pkgs = set()
+        return {"exit": r.returncode, "error": r.stderr[:FIRST_ERROR_CHARS], "pkgs": [], "edges": []}
+    names: dict[str, int] = {}
+    edges: set[tuple[int, int]] = set()
+    stack: list[int] = []
     for line in r.stdout.splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and not line.startswith("["):
-            pkgs.add(f"{parts[0]}@{parts[1].lstrip('v')}")
-    return {"exit": 0, "pkgs": sorted(pkgs)}
+        m = TREE_LINE.match(line)
+        if not m:
+            continue  # section headings such as `[build-dependencies]`
+        depth, pkg = int(m.group(1)), f"{m.group(2)}@{m.group(3)}"
+        i = names.setdefault(pkg, len(names))
+        del stack[depth:]
+        if stack:
+            edges.add((stack[-1], i))
+        stack.append(i)
+    order = sorted(names, key=names.get)
+    return {"exit": 0, "pkgs": order, "edges": sorted(edges)}
 
 
 def main() -> int:

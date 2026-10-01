@@ -202,6 +202,48 @@ def main() -> int:
         add("Unexplained", units, cols, notO * (1 - Ex), "boolean", "(1-O)*(1-Ex): failure with no failing package in the closure")
         add("Intro", P, units, Intro, "boolean", "failing package p lies in the closure of unit u on some column")
         check("no_unexplained_failure", not (notO * (1 - Ex)).any(), int((notO * (1 - Ex)).sum()))
+    # ── slices: which direct dependencies drag a root blocker into which crate ──
+    # Exact per-target edges (probe: cargo tree --prefix depth). `entry[t][c,x]=1`
+    # iff workspace crate c has direct external dependency x and x's resolved
+    # subtree contains a root blocker on t - the edges to cut or feature-gate.
+    # `drags[t][x,b]=1` iff x's subtree contains blocker package b on t.
+    if all("edges" in by_col[c]["units"][u]["closure"] for c in cols for u in units):
+        blockers = sorted({pkg_name(p) for p in failed_pkgs if pkg_name(p) not in crates})
+        direct_ext = sorted({pkg_name(by_col[c]["units"][u]["closure"]["pkgs"][b])
+                             for c in cols for u in units
+                             for a, b in by_col[c]["units"][u]["closure"]["edges"]
+                             if a == 0 and pkg_name(by_col[c]["units"][u]["closure"]["pkgs"][b]) not in crates})
+        for j, col in enumerate(cols):
+            roots = {p for p, cs in failed_pkgs.items() if j in cs and pkg_name(p) not in crates}
+            if not roots:
+                continue
+            entry = np.zeros((len(crates), len(direct_ext)), dtype=np.int64)
+            drags = np.zeros((len(direct_ext), len(blockers)), dtype=np.int64)
+            for i, u in enumerate(units):
+                g = by_col[col]["units"][u]["closure"]
+                pk, adj = g["pkgs"], {}
+                for a, b in g["edges"]:
+                    adj.setdefault(a, []).append(b)
+                for child in adj.get(0, []):
+                    x = pkg_name(pk[child])
+                    if x in crates:
+                        continue
+                    seen, todo = {child}, [child]
+                    while todo:  # forward closure of x's subtree in this unit's resolved graph
+                        for nxt in adj.get(todo.pop(), []):
+                            if nxt not in seen:
+                                seen.add(nxt)
+                                todo.append(nxt)
+                    hit = {pkg_name(pk[n]) for n in seen if pk[n] in roots}
+                    if hit:
+                        entry[crates.index(crate_of[i]), direct_ext.index(x)] = 1
+                        for b in hit:
+                            drags[direct_ext.index(x), blockers.index(b)] = 1
+            add(f"entry|{col}", crates, direct_ext, entry, "boolean",
+                "entry[c,x]=1: crate c directly depends on x and x's resolved subtree contains a root blocker on this column")
+            add(f"drags|{col}", direct_ext, blockers, drags, "boolean",
+                "drags[x,b]=1: x's resolved subtree on this column contains root-blocker package b")
+
     # monotonicity: a unit cannot pass while one of its dependencies fails
     V = O * (DU @ notO)
     add("V", units, cols, V, "counting", "O * (DU (1-O)): passing units with a failing dependency (must be all 0)")
