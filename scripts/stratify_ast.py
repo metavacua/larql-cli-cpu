@@ -42,6 +42,10 @@ OS_BOUND = {"fs", "net", "env", "process", "thread", "path", "time", "os", "io",
 NET_ROOTS = ("reqwest", "hf_hub", "tonic", "axum", "tokio", "hyper", "hyper_util", "quinn", "h3", "h3_quinn",
              "h3_axum", "rustls", "tungstenite", "tower", "mio", "socket2", "mockito", "larql_router",
              "larql_router_protocol", "std::net")
+# IO = the process talking to its environment other than over a network: the
+# filesystem, standard streams, environment, child processes, terminals.
+IO_STD = ("fs", "io", "env", "process", "path")
+IO_CRATES = ("memmap2", "rustyline", "indicatif", "console", "dirs", "walkdir", "tempfile")
 NET_MODULE_DEPTH = 2  # directories below src/ that name a module: crate/dir/subdir
 CFG_TARGET = re.compile(r"target_(os|arch|family|env|pointer_width|endian|has_atomic|vendor|feature)|\bunix\b|\bwindows\b|\bwasm")
 
@@ -53,6 +57,10 @@ RULES = {
     "net_path": {
         "kind": "scoped_identifier",
         "regex": rf"^(::)?({'|'.join(NET_ROOTS)})(::|$)",
+    },
+    "io_path": {
+        "kind": "scoped_identifier",
+        "regex": rf"^(::)?({'|'.join(IO_CRATES)})(::|$)",
     },
     "unsafe": {"any": [
         {"kind": "unsafe_block"},
@@ -109,11 +117,19 @@ def main() -> int:
         "inner_attrs": [], "std_paths": Counter(), "cfg_target": 0, "cfg_target_files": Counter(),
         "unsafe": 0, "extern_c": 0, "no_std_declared": False, "no_std_conditional": False,
     })
+    io_modules: dict[str, Counter] = defaultdict(Counter)
     for m in scan(a.ast_grep, a.crates, "std_path", RULES["std_path"]):
         c = crate_of(m["file"])
         if c and not is_test_path(m["file"]):  # production code decides portability, tests do not
             mod = re.match(r"(?:::)?std::(\w+)", m["text"]).group(1)
             facts[c]["std_paths"][mod] += 1
+            if mod in IO_STD:
+                io_modules[module_of(m["file"])][f"std::{mod}"] += 1
+    for m in scan(a.ast_grep, a.crates, "io_path", RULES["io_path"]):
+        c = crate_of(m["file"])
+        if c and not is_test_path(m["file"]):
+            io_modules[module_of(m["file"])][re.match(rf"(?:::)?({'|'.join(IO_CRATES)})", m["text"]).group(1)] += 1
+            facts[c]
     net_modules: dict[str, Counter] = defaultdict(Counter)
     for m in scan(a.ast_grep, a.crates, "net_path", RULES["net_path"]):
         c = crate_of(m["file"])
@@ -148,6 +164,7 @@ def main() -> int:
             "inner_attrs": f["inner_attrs"], "std_paths": dict(f["std_paths"]),
             "os_bound_std_paths": os_bound, "os_bound_total": sum(os_bound.values()),
             "net_modules": {m: dict(n) for m, n in sorted(net_modules.items()) if m.split("/")[0] == c},
+            "io_modules": {m: dict(n) for m, n in sorted(io_modules.items()) if m.split("/")[0] == c},
             "cfg_target": f["cfg_target"], "cfg_target_top_files": f["cfg_target_files"].most_common(5),
             "unsafe": f["unsafe"], "extern_c": f["extern_c"],
         }

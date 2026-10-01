@@ -61,26 +61,30 @@ class Matrix:
 # ── linear algebra over the boolean semiring ───────────────────────────────
 
 def bool_matmul(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    return ((a @ b) > 0).astype(np.int64)
+    # float32 keeps the product on BLAS; entries are 0/1 sums far below 2**24, so it is exact
+    return ((a.astype(np.float32) @ b.astype(np.float32)) > 0).astype(np.int64)
 
 
 def closure(d: np.ndarray) -> tuple[np.ndarray, bool]:
     """Transitive closure R = D + D^2 + ... and whether D is nilpotent.
 
-    D is nilpotent exactly when the dependency graph is acyclic: some power
-    D^k (k <= n) is the zero matrix.
+    D is nilpotent exactly when the dependency graph is acyclic, i.e. no
+    node reaches itself: diag(R) = 0. R is computed to its fixpoint: once D^k
+    adds no new pair, no longer path can either (any pair first reached at
+    length m < k extends by one edge to a path of length m + 1 <= k).
     """
     n = d.shape[0]
     reach = np.zeros_like(d)
     power = d.copy()
-    nilpotent = False
     for _ in range(n + 1):
         if not power.any():
-            nilpotent = True
             break
-        reach = ((reach + power) > 0).astype(np.int64)
+        grown = ((reach + power) > 0).astype(np.int64)
+        if (grown == reach).all():
+            break
+        reach = grown
         power = bool_matmul(power, d)
-    return reach, nilpotent
+    return reach, not bool(np.diag(reach).any())
 
 
 def strata(d: np.ndarray) -> np.ndarray:

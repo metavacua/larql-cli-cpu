@@ -75,6 +75,9 @@ jobs:
   probe:
     permissions:
       contents: read
+    # `[no-probe]` in a push's commit message runs only the cheap layers (ast,
+    # lsif): iterating on source-level analysis must not cost 19 compiler jobs.
+    if: github.event_name != 'push' || !contains(github.event.head_commit.message, '[no-probe]')
     name: probe · ${{ matrix.target }} · ${{ matrix.mode }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -233,7 +236,7 @@ jobs:
       contents: read
     name: matrices
     needs: [probe, ast, lsif]
-    if: always()
+    if: always() && (github.event_name != 'push' || !contains(github.event.head_commit.message, '[no-probe]'))
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

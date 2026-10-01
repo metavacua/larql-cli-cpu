@@ -129,6 +129,38 @@ def main() -> int:
         add("Dead", crates, crates, D * (N == 0), "boolean", "D * (N == 0): declared, never referenced")
         add("Undeclared", crates, crates, (N > 0) * (1 - R), "boolean", "(N > 0) * (1 - R): used without a declared path")
 
+    # ── module level: network and IO, from the type-resolved reference graph ──
+    # MB[i,j]=1 iff module i references a symbol defined in module j (rust-analyzer
+    # LSIF). Seeds come from the AST: modules whose own code names a network (IO)
+    # crate or std item. mockito alone is test scaffolding, not network behaviour.
+    # A module is tainted if it is a seed or reaches one: taint = seed + R seed.
+    mod_path = root / "module-use.json"
+    if ast is not None and mod_path.exists():
+        pairs = json.loads(mod_path.read_text())
+        net_seed = {m for f in ast.values() for m, n in f.get("net_modules", {}).items() if set(n) - {"mockito"}}
+        io_seed = {m for f in ast.values() for m, n in f.get("io_modules", {}).items() if n}
+        mods = sorted({m for k in pairs for m in k.split("->")} | net_seed | io_seed)
+        mi = {m: i for i, m in enumerate(mods)}
+        MU = np.zeros((len(mods), len(mods)), dtype=np.int64)
+        for k, n in pairs.items():
+            u, d = k.split("->")
+            MU[mi[u], mi[d]] = n
+        MB = (MU > 0).astype(np.int64)
+        MR, mod_acyclic = sm.closure(MB)
+        vec = lambda s: np.array([[int(m in s)] for m in mods])
+        ns, ios = vec(net_seed), vec(io_seed)
+        net_taint = ((ns + sm.bool_matmul(MR, ns)) > 0).astype(np.int64)
+        io_taint = ((ios + sm.bool_matmul(MR, ios)) > 0).astype(np.int64)
+        add("module_ref", mods, mods, MU, "counting", "MU[i,j] = references from module i to symbols defined in module j (LSIF, production source)")
+        add("module_net_seed", mods, ["net"], ns, "boolean", "module's own code uses a network crate or std::net")
+        add("module_io_seed", mods, ["io"], ios, "boolean", "module's own code uses std fs/io/env/process/path or an IO crate")
+        add("module_net_taint", mods, ["net"], net_taint, "boolean", "seed + R seed: the module is, or transitively depends on, network code")
+        add("module_io_taint", mods, ["io"], io_taint, "boolean", "seed + R seed: the module is, or transitively depends on, IO code")
+        add("module_net_callers", mods, ["net"], ((sm.bool_matmul(MB, ns) > 0) * (1 - ns)), "boolean",
+            "modules that reference a network module directly (the edges to put behind a trait)")
+        add("module_free", mods, ["free"], (1 - net_taint) * (1 - io_taint), "boolean", "neither network- nor IO-dependent")
+        check("module_graph_acyclic", mod_acyclic, f"{len(mods)} modules")
+
     # ── unit level ─────────────────────────────────────────────────────────
     ci = {c: i for i, c in enumerate(crates)}
     DU = np.zeros((nu, nu), dtype=np.int64)
