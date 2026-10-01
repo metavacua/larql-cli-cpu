@@ -11,12 +11,14 @@
 # root the policy files blame.) Nothing here reports a colour as a result:
 # each probe job exits 0 whenever it ran, and the facts go to JSON.
 #
-# Output (artifact `matrices`, also the run summary):
-#   crate x crate, target x target (agreement + implication), unit x target
-#   (check, clippy), package x target (who refuses a target, who pulls it in),
-#   dependency-tree delta, and the lib-xor-bin stratification. Source-level
-#   AST facts (no_std declared, OS-bound std paths, cfg(target), unsafe) come
-#   from ast-grep and are joined to the compile results.
+# Output (artifact `matrices`): labelled integer matrices - dependency D and
+# its closure R, unit x target outcome O, target x target agreement and
+# implication (O^T O, O^T (1-O)), per-class cause matrices, failing-package
+# incidence, dependency-closure deltas, monotonicity V = O * (DU (1-O)) - as
+# matrices.json (+ JSON Schema), csv/, mtx/ (Matrix Market) and matrices.npz.
+# Definitions are in scripts/stratify_aggregate.py. Source-level AST facts
+# (no_std declared, OS-bound std paths, cfg(target), unsafe) from ast-grep are
+# a crate x fact matrix joined to the compile results.
 #
 # Cost control: one job per target compiles every unit in dependency order in
 # one target dir, so each third-party package builds once per target, not once
@@ -38,6 +40,9 @@ on:
       - scripts/stratify_probe.py
       - scripts/stratify_ast.py
       - scripts/stratify_aggregate.py
+      - scripts/stratify_matrix.py
+      - scripts/stratify_verify.py
+      - scripts/schemas/stratification-matrices.schema.json
   workflow_dispatch:
     inputs:
       subject_ref:
@@ -187,11 +192,22 @@ jobs:
           for d in collected/probe-*; do cp -r "$d" "agg/$(basename "$d")"; done
           cp collected/ast/ast.json agg/ast.json
           ls agg
+      - name: Install numpy, scipy, jsonschema
+        run: python3 -m pip install numpy scipy jsonschema
       - name: Build matrices
         working-directory: subject
-        run: python3 ../tools/scripts/stratify_aggregate.py ../agg | tee ../agg/summary.md
-      - name: Publish to run summary
-        run: head -c 900000 agg/summary.md >> "$GITHUB_STEP_SUMMARY"
+        run: python3 ../tools/scripts/stratify_aggregate.py ../agg
+      # Every serialisation is re-read by an independent parser (jsonschema,
+      # csv, numpy.load, scipy.io.mmread) and must equal the canonical JSON.
+      # --require-all: a parser that is missing is a failure, not a skip.
+      - name: Verify every format round-trips
+        run: python3 tools/scripts/stratify_verify.py agg/matrices --require-all
+      - name: Publish invariants (machine-readable only)
+        if: always()
+        run: |
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat agg/matrices/invariants.json >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: matrices

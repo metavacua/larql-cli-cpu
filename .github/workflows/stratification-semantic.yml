@@ -6,8 +6,9 @@
 # scripts, proc macros, name resolution) is exactly the memory-heavy work
 # that must not happen on the dev machine - so it happens here.
 #
-#   lsif   -> symbol-level reference graph -> crate x crate matrix of
-#             actual use, comparable against the declared Cargo edges.
+#   lsif   -> symbol-level reference graph -> crate -> crate reference counts
+#             (actual-use.json); stratify_aggregate.py turns them into the
+#             matrix N and Dead = D * (N == 0) beside the declared edges D.
 #   diag   -> per-target semantic diagnostics. `cargo.target` is set through
 #             a runner-local rust-analyzer.toml (never committed), so cfg
 #             resolution follows the target: `inactive-code` marks what that
@@ -73,13 +74,9 @@ jobs:
           mkdir -p ../sem
           rust-analyzer lsif . > ../sem/workspace.lsif
           wc -l ../sem/workspace.lsif
-      - name: Crate x crate actual-use matrix
+      - name: Crate -> crate reference counts (input of the N matrix)
         working-directory: subject
-        run: python3 ../tools/scripts/stratify_lsif.py --lsif ../sem/workspace.lsif --root "$PWD" --out ../sem/out | tee ../sem/matrix.md
-      - name: Publish
-        if: always()
-        run: |
-          [ -f sem/matrix.md ] && head -c 900000 sem/matrix.md >> "$GITHUB_STEP_SUMMARY" || echo "no matrix produced" >> "$GITHUB_STEP_SUMMARY"
+        run: python3 ../tools/scripts/stratify_lsif.py --lsif ../sem/workspace.lsif --root "$PWD" --out ../sem/out
       - uses: actions/upload-artifact@v4
         if: always()
         with:

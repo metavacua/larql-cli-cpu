@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "larql.stratification.matrices/1",
+  "title": "Labelled integer matrices",
+  "type": "object",
+  "required": ["schema", "producer", "matrices"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "larql.stratification.matrices/1" },
+    "producer": { "type": "object" },
+    "matrices": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/matrix" }
+    }
+  },
+  "$defs": {
+    "label": { "type": "string", "minLength": 1 },
+    "matrix": {
+      "type": "object",
+      "required": ["rows", "cols", "shape", "semiring", "definition", "meta", "data"],
+      "additionalProperties": false,
+      "properties": {
+        "rows": { "type": "array", "items": { "$ref": "#/$defs/label" }, "uniqueItems": true },
+        "cols": { "type": "array", "items": { "$ref": "#/$defs/label" }, "uniqueItems": true },
+        "shape": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "minItems": 2, "maxItems": 2 },
+        "semiring": { "enum": ["boolean", "counting", "none"] },
+        "definition": { "type": "string" },
+        "meta": { "type": "object" },
+        "data": {
+          "type": "array",
+          "items": { "type": "array", "items": { "type": "integer" } }
+        }
+      }
+    }
+  }
+}

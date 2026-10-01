@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Crate x crate matrix of ACTUAL symbol use, from a rust-analyzer LSIF dump.
+"""Crate -> crate counts of ACTUAL symbol use, from a rust-analyzer LSIF dump.
 
 Cargo.toml says which crates a crate MAY use. The semantic index says which
 it DOES: every reference range whose definition lives in another workspace
@@ -75,18 +75,10 @@ def main() -> int:
         sys.stderr.write(f"no cross-crate references found; LSIF labels seen: {dict(labels.most_common(12))}\n")
         return 1
 
-    crates = sorted({c for pair in uses for c in pair})
     a.out.mkdir(parents=True, exist_ok=True)
-    header = "| user \\ defines | " + " | ".join(c.replace("larql-", "") for c in crates) + " |"
-    rows = [header, "|" + "---|" * (len(crates) + 1)]
-    for u in crates:
-        rows.append(f"| **{u}** | " + " | ".join(str(uses[(u, d)] or "·") if u != d else "■" for d in crates) + " |")
-    (a.out / "crate-by-crate-actual-use.md").write_text(
-        "# crate x crate - actual symbol references (rust-analyzer LSIF)\n\n"
-        "Row uses symbols defined in column. Compare with the declared-dependency matrix: "
-        "a declared edge with `·` here is dead weight.\n\n" + "\n".join(rows) + "\n")
+    # {"user->defining": reference count}; stratify_aggregate.py turns this into the matrix N.
     (a.out / "actual-use.json").write_text(json.dumps({f"{u}->{d}": n for (u, d), n in sorted(uses.items())}, indent=1))
-    print("\n".join(rows))
+    print(json.dumps({"pairs": len(uses), "references": sum(uses.values())}))
     return 0
 
 

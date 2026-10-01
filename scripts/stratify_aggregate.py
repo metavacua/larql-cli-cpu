@@ -1,22 +1,28 @@
 #!/usr/bin/env python3
-"""Build the stratification matrices from per-target probe results + AST facts.
+"""Assemble the stratification matrices from probe, AST and LSIF data.
 
-Inputs : DIR containing probe-*/result.json (stratify_probe.py), ast.json
-         (stratify_ast.py), and a readable workspace (for cargo metadata).
-Outputs: DIR/matrices/*.md and DIR/matrices/summary.json.
+Index sets (every axis label below is a member of one of these):
+  C crates   U units (crate:lib|bin)   T columns (target|mode)
+  Q cause classes   P failing packages   Z strata   F AST facts
 
-Matrices (all square ones are n x n over the same ordered set):
-  1 crate x crate        workspace dependency adjacency (D direct, t transitive),
-                         ordered by stratum, with lib/bin kind and AST facts
-  2 target x target      agreement   - units with the same check outcome on both
-  3 target x target      implication - units that pass on ROW but fail on COLUMN
-                         (0 means "if it builds on ROW it builds on COLUMN")
-  4 unit x target        cargo check outcome + cause class
-  5 unit x target        cargo clippy outcome + warning / restriction-lint counts
-  6 package x target     which package refused the target first, by cause class,
-                         and the lowest-stratum unit that pulls it in
-  7 unit x target        dependency-tree delta vs the baseline target
-  8 stratification       per target: the first stratum that breaks; lib-xor-bin
+Everything is a matrix and every relation is computed from other matrices:
+
+  D   [C,C] bool   declared dependency, D[i,j]=1 iff i depends on j
+  R   [C,C] bool   reachability = D + D^2 + ... (boolean semiring)
+  s   [C,1] int    stratum = longest path from i; D nilpotent <=> acyclic
+  DU  [U,U] bool   unit-level dependency (bin -> its own lib, crate edges -> libs)
+  O   [U,T] bool   cargo check passes
+  Ag  [T,T] int    O^T O + (1-O)^T (1-O)   units with the same outcome on a,b
+  Imp [T,T] int    O^T (1-O)               units passing on a, failing on b
+  V   [U,T] int    O * (DU (1-O))          passing units with a failing dep (must be 0)
+  Bk  [P,T] bool   package p failed on target t
+  Ex  [U,T] bool   failure is explained by a failing package in the unit's
+                   closure (K_t Bk_t > 0) or by the unit's own crate
+  Dead[C,C] bool   D * (N == 0): declared dependency never used (LSIF)
+
+Output: <root>/matrices/{matrices.json,csv/,mtx/,matrices.npz,invariants.json}
+Exit 1 if inputs are missing or the output fails structural validation;
+data invariants (e.g. V == 0) are recorded in invariants.json, not hidden.
 """
 
 from __future__ import annotations
@@ -24,182 +30,204 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from collections import defaultdict
 from pathlib import Path
 
-BASELINE = "x86_64-unknown-linux-gnu"
-PASS, FAIL = "ok", "FAIL"
-CLASS_ABBREV = {
-    "std-absent": "std", "sysroot-absent": "sysroot", "native-lib-cross": "nativelib",
-    "cc-missing": "cc", "platform-unsupported": "platform", "build-script": "build.rs",
-    "source-error": "src", "<unattributed>": "?",
-}
+import numpy as np
+
+import stratify_matrix as sm
+
+BASELINE_TARGET = "x86_64-unknown-linux-gnu"
+RESTRICTION_LINTS = ("clippy::std_instead_of_core", "clippy::std_instead_of_alloc", "clippy::alloc_instead_of_core")
+KIND_COLS = ("lib", "bin", "cdylib", "proc-macro")
+AST_COLS = ("no_std_declared", "no_std_conditional", "cfg_target", "unsafe", "extern_c", "os_bound_total")
+SCHEMA_PATH = Path(__file__).parent / "schemas" / "stratification-matrices.schema.json"
+BASE_CLASSES = ("sysroot-absent", "std-absent", "native-lib-cross", "cc-missing", "platform-unsupported",
+                "build-script", "source-error", "<unattributed>")
 
 
-def col(r: dict) -> str:
-    return r["target"] if r["mode"] == "strict" else f"{r['target']}~sysroot"
+def col_label(r: dict) -> str:
+    return f"{r['target']}|{r['mode']}"
 
 
-def short(t: str) -> str:
-    return (t.replace("-unknown-", "-").replace("-none-elf", "-none").replace("-linux-gnu", "-gnu")
-             .replace("riscv", "rv").replace("wasm32-", "w32-"))
-
-
-def table(header: list[str], rows: list[list[str]]) -> str:
-    out = ["| " + " | ".join(header) + " |", "|" + "|".join("---" for _ in header) + "|"]
-    out += ["| " + " | ".join(r) + " |" for r in rows]
-    return "\n".join(out) + "\n"
-
-
-def workspace_deps() -> tuple[dict[str, set[str]], dict[str, list[str]]]:
+def workspace() -> tuple[list[str], np.ndarray, dict[str, set[str]]]:
     r = subprocess.run(["cargo", "metadata", "--no-deps", "--locked", "--format-version", "1"],
                        capture_output=True, text=True, check=True)
     pk = {p["name"]: p for p in json.loads(r.stdout)["packages"]}
-    direct = {n: {d["name"] for d in p["dependencies"] if d["name"] in pk and d.get("kind") != "dev"} for n, p in pk.items()}
-    kinds = {n: sorted({k for t in p["targets"] for k in t["kind"]}) for n, p in pk.items()}
-    return direct, kinds
+    names = sorted(pk)
+    ix = {n: i for i, n in enumerate(names)}
+    d = np.zeros((len(names), len(names)), dtype=np.int64)
+    for n, p in pk.items():
+        for dep in p["dependencies"]:
+            if dep["name"] in ix and dep.get("kind") != "dev":
+                d[ix[n], ix[dep["name"]]] = 1
+    kinds = {n: {k for t in p["targets"] for k in t["kind"]} for n, p in pk.items()}
+    return names, d, kinds
 
 
-def closure_of(direct: dict[str, set[str]], n: str) -> set[str]:
-    seen: set[str] = set()
-    stack = list(direct[n])
-    while stack:
-        d = stack.pop()
-        if d not in seen:
-            seen.add(d)
-            stack.extend(direct[d])
-    return seen
-
-
-def passed(cell: dict) -> bool:
-    return cell["check"]["exit"] == 0
+def pkg_name(p: str) -> str:
+    return p.split("@")[0]
 
 
 def main() -> int:
     root = Path(sys.argv[1])
     results = [json.loads(p.read_text()) for p in sorted(root.glob("probe-*/result.json"))]
     if not results:
-        print("::error::no probe results found - refusing to emit an empty matrix", file=sys.stderr)
+        print(json.dumps({"error": "no probe results found"}), file=sys.stderr)
         return 1
-    ast = json.loads((root / "ast.json").read_text()) if (root / "ast.json").exists() else {}
-    by_col = {col(r): r for r in results}
-    cols = sorted(by_col, key=lambda c: (c != BASELINE, c))
-    units = sorted(results[0]["units"], key=lambda k: (results[0]["units"][k]["stratum"], k))
-    stratum = {k: results[0]["units"][k]["stratum"] for k in units}
-    direct, pkg_kinds = workspace_deps()
-    md: dict[str, str] = {}
+    cols = sorted((col_label(r) for r in results), key=lambda c: (c != f"{BASELINE_TARGET}|strict", c))
+    by_col = {col_label(r): r for r in results}
+    first = results[0]["units"]
+    units = sorted(first, key=lambda k: (first[k]["stratum"], k))
+    nu, nt = len(units), len(cols)
+    crate_of = [u.split(":")[0] for u in units]
+    kind_of = [u.split(":")[1] for u in units]
+    out: list[sm.Matrix] = []
+    inv: list[dict] = []
 
-    # 1 ── crate x crate
-    crates = sorted({k.split(":")[0] for k in units}, key=lambda c: (min(stratum[k] for k in units if k.startswith(c + ":")), c))
-    clos = {c: closure_of(direct, c) for c in crates}
-    rows = []
-    for c in crates:
-        # A crate with no AST hits at all is absent from ast.json: that is 0 facts, not unknown.
-        a = ast.get(c, {"os_bound_total": 0, "cfg_target": 0, "unsafe": 0} if ast else {})
-        rows.append([f"**{c}**", ",".join(sorted(set(pkg_kinds[c]) & {"lib", "bin", "cdylib", "proc-macro"})),
-                     str(min(stratum[k] for k in units if k.startswith(c + ":"))),
-                     *["D" if d in direct[c] else "t" if d in clos[c] else ("·" if d != c else "■") for d in crates],
-                     "yes" if a.get("no_std_declared") else "no", str(a.get("os_bound_total", "?")),
-                     str(a.get("cfg_target", "?")), str(a.get("unsafe", "?"))])
-    md["1-crate-by-crate"] = ("Row depends on column: D direct, t transitive, ■ self. Dev-dependencies excluded.\n\n" +
-        table(["crate", "kind", "stratum", *[c.replace("larql-", "") for c in crates], "no_std", "OS-bound std paths", "cfg(target)", "unsafe"], rows))
+    def add(name, rows, cs, data, semiring="counting", definition="", **meta):
+        out.append(sm.Matrix(name, list(rows), list(cs), data, semiring, definition, meta))
+        return out[-1].data
 
-    # 2/3 ── target x target
-    agree, impl = [], []
-    for a in cols:
-        ra, rb = [], []
-        for b in cols:
-            same = sum(passed(by_col[a]["units"][k]) == passed(by_col[b]["units"][k]) for k in units)
-            pa_fb = sum(passed(by_col[a]["units"][k]) and not passed(by_col[b]["units"][k]) for k in units)
-            ra.append(f"{same}/{len(units)}")
-            rb.append("·" if a == b else str(pa_fb))
-        agree.append([f"**{short(a)}**", *ra]); impl.append([f"**{short(a)}**", *rb])
-    hdr = ["", *[short(c) for c in cols]]
-    md["2-target-agreement"] = "Units with the same `cargo check` outcome on both targets.\n\n" + table(hdr, agree)
-    md["3-target-implication"] = ("Cell = units that PASS on the row target but FAIL on the column target. "
-                                  "0 means building on the row implies building on the column.\n\n" + table(hdr, impl))
+    def check(name: str, ok: bool, detail=None) -> None:
+        inv.append({"name": name, "ok": bool(ok), "detail": detail})
 
-    # 4/5 ── unit x target
-    def check_cell(cell):
-        if passed(cell):
-            return PASS
-        classes = sorted({CLASS_ABBREV.get(f["cls"], f["cls"]) for f in cell["check"]["failed"]})
-        return "FAIL " + "/".join(classes)
-    md["4-unit-by-target-check"] = table(["unit", "s", *[short(c) for c in cols]],
-        [[f"{k}", str(stratum[k]), *[check_cell(by_col[c]["units"][k]) for c in cols]] for k in units])
+    # ── crate level ────────────────────────────────────────────────────────
+    crates, D, kinds = workspace()
+    R, nilpotent = sm.closure(D)
+    check("D_nilpotent_acyclic", nilpotent)
+    s = sm.strata(D) if nilpotent else np.zeros(len(crates), dtype=np.int64)
+    add("D", crates, crates, D, "boolean", "D[i,j]=1 iff crate i depends on crate j (normal+build)")
+    add("R", crates, crates, R, "boolean", "R = D + D^2 + ... (boolean semiring)")
+    add("stratum", crates, ["s"], s.reshape(-1, 1), "none", "s_i = longest dependency path from i")
+    kinc = np.array([[int(k in kinds[c]) for k in KIND_COLS] for c in crates])
+    add("kind_incidence", crates, KIND_COLS, kinc, "boolean", "cargo target kinds present in the package")
+    add("lib_xor_bin_violation", crates, ["violates"], (kinc[:, 0] * kinc[:, 1]).reshape(-1, 1), "boolean",
+        "lib * bin: package has both a library and a binary target")
 
-    def clippy_cell(cell):
-        cp = cell["clippy"]
-        if "skipped" in cp:
-            return "–"
-        if cp["exit"]:
-            return "FAIL"
-        total = sum(cp["lints"].values())
-        restr = sum(v for k, v in cp["lints"].items() if k in ("clippy::std_instead_of_core", "clippy::std_instead_of_alloc", "clippy::alloc_instead_of_core"))
-        return f"ok w{total} r{restr}"
-    md["5-unit-by-target-clippy"] = ("`–` = clippy not run because check failed. `wN` warnings, `rN` core/alloc/std restriction-lint hits.\n\n" +
-        table(["unit", *[short(c) for c in cols]], [[k, *[clippy_cell(by_col[c]["units"][k]) for c in cols]] for k in units]))
+    ast = json.loads((root / "ast.json").read_text()) if (root / "ast.json").exists() else None
+    if ast is not None:
+        from_ast = lambda c, k: int(ast.get(c, {}).get(k, 0))  # absent crate = 0 hits, not unknown
+        mods = sorted({m for f in ast.values() for m in f["std_paths"]})
+        fcols = [*AST_COLS, *[f"std::{m}" for m in mods]]
+        fa = [[from_ast(c, k) for k in AST_COLS] + [int(ast.get(c, {}).get("std_paths", {}).get(m, 0)) for m in mods] for c in crates]
+        add("ast_facts", crates, fcols, fa, "counting", "tree-sitter counts per crate, production code only")
+    use_path = root / "actual-use.json"
+    if use_path.exists():
+        pairs = json.loads(use_path.read_text())
+        N = np.zeros_like(D)
+        for key, n in pairs.items():
+            u, d = key.split("->")
+            if u in crates and d in crates:
+                N[crates.index(u), crates.index(d)] = n
+        add("N", crates, crates, N, "counting", "N[i,j] = reference ranges in crate i resolving to a definition in crate j (LSIF)")
+        add("Dead", crates, crates, D * (N == 0), "boolean", "D * (N == 0): declared, never referenced")
+        add("Undeclared", crates, crates, (N > 0) * (1 - R), "boolean", "(N > 0) * (1 - R): used without a declared path")
 
-    # 6 ── package x target (who refuses the target, and who pulls it in)
-    refusers: dict[str, dict[str, str]] = defaultdict(dict)
-    firsterr: dict[str, str] = {}
-    for c in cols:
-        for k in units:
-            for f in by_col[c]["units"][k]["check"]["failed"]:
-                refusers[f["pkg"]].setdefault(c, CLASS_ABBREV.get(f["cls"], f["cls"]))
-                firsterr.setdefault(f["pkg"], f["first"].splitlines()[0] if f["first"] else "")
-    def introduced_by(pkg: str, c: str) -> str:
-        name = pkg.split("@")[0]
-        for k in units:  # units are stratum-ordered
-            if any(p.split("@")[0] == name for p in by_col[c]["units"][k]["closure"]["pkgs"]):
-                return k
-        return "?"
-    prow = []
-    for pkg in sorted(refusers, key=lambda p: (-len(refusers[p]), p)):
-        first_t = next(iter(refusers[pkg]))
-        prow.append([f"`{pkg}`", str(len(refusers[pkg])), introduced_by(pkg, first_t),
-                     *[refusers[pkg].get(c, "") for c in cols], firsterr[pkg][:70].replace("|", "/")])
-    md["6-package-by-target"] = ("Packages that failed to compile, by target. `introduced by` = lowest-stratum unit whose "
-        "dependency closure contains the package.\n\n" + table(["package", "#targets", "introduced by", *[short(c) for c in cols], "first error"], prow))
+    # ── unit level ─────────────────────────────────────────────────────────
+    ci = {c: i for i, c in enumerate(crates)}
+    DU = np.zeros((nu, nu), dtype=np.int64)
+    for i in range(nu):
+        for j in range(nu):
+            if kind_of[j] == "lib" and (D[ci[crate_of[i]], ci[crate_of[j]]] or (kind_of[i] == "bin" and crate_of[i] == crate_of[j])):
+                DU[i, j] = 1
+    add("DU", units, units, DU, "boolean", "unit i depends on lib unit j (crate edge, or bin -> own lib)")
+    su = np.array([first[u]["stratum"] for u in units])
+    add("unit_stratum", units, ["s"], su.reshape(-1, 1), "none", "stratum of the unit (a bin sits above its own lib)")
+    zs = sorted(set(su.tolist()))
+    SZ = np.array([[int(su[i] == z) for i in range(nu)] for z in zs])
+    add("SZ", [f"s{z}" for z in zs], units, SZ, "boolean", "stratum membership: SZ[z,u]=1 iff unit u is in stratum z")
 
-    # 7 ── dependency-tree delta vs baseline
-    base = by_col.get(BASELINE)
-    if base:
-        drow = []
-        for k in units:
-            bset = set(base["units"][k]["closure"]["pkgs"])
-            cells = []
-            for c in cols:
-                s = set(by_col[c]["units"][k]["closure"]["pkgs"])
-                cells.append("=" if s == bset else f"-{len(bset - s)}/+{len(s - bset)}")
-            drow.append([k, str(len(bset)), *cells])
-        md["7-dependency-tree-delta"] = (f"Per unit, packages in the cfg-resolved closure vs `{BASELINE}`: "
-            "`-n` packages not needed on that target, `+n` needed only there.\n\n" + table(["unit", "baseline pkgs", *[short(c) for c in cols]], drow))
+    O = np.zeros((nu, nt), dtype=np.int64)
+    ran = np.zeros_like(O); cp = np.zeros_like(O); warn = np.zeros_like(O); restr = np.zeros_like(O)
+    classes = sorted(set(BASE_CLASSES) | {f["cls"] for r in results for c in r["units"].values() for f in c["check"]["failed"]})
+    cause = {q: np.zeros_like(O) for q in classes}
+    own = np.zeros_like(O)
+    failed_pkgs: dict[str, set[int]] = {}
+    for j, c in enumerate(cols):
+        for i, u in enumerate(units):
+            cell = by_col[c]["units"][u]
+            O[i, j] = int(cell["check"]["exit"] == 0)
+            cl = cell["clippy"]
+            if "skipped" not in cl:
+                ran[i, j] = 1; cp[i, j] = int(cl["exit"] == 0)
+                warn[i, j] = sum(cl["lints"].values())
+                restr[i, j] = sum(v for k, v in cl["lints"].items() if k in RESTRICTION_LINTS)
+            for f in cell["check"]["failed"]:
+                cause[f["cls"]][i, j] = 1
+                failed_pkgs.setdefault(f["pkg"], set()).add(j)
+                own[i, j] |= int(pkg_name(f["pkg"]) == crate_of[i])
+    add("O", units, cols, O, "boolean", "O[u,t]=1 iff cargo check of unit u passes on column t")
+    add("clippy_ran", units, cols, ran, "boolean", "clippy ran (check passed)")
+    add("clippy_pass", units, cols, cp, "boolean", "clippy ran and exited 0")
+    add("clippy_warnings", units, cols, warn, "counting", "clippy warnings emitted")
+    add("clippy_restriction_hits", units, cols, restr, "counting", "std_instead_of_core + std_instead_of_alloc + alloc_instead_of_core hits")
+    for q in classes:
+        add(f"cause[{q}]", units, cols, cause[q], "boolean", f"unit fails with a package of class {q}")
+    add("cause_counts", classes, cols, np.array([cause[q].sum(axis=0) for q in classes]), "counting", "units failing with class q on column t")
 
-    # 8 ── stratification
-    srows, strata_ids = [], sorted(set(stratum.values()))
-    for c in cols:
-        cells, frontier = [], None
-        for s in strata_ids:
-            ks = [k for k in units if stratum[k] == s]
-            ok = sum(passed(by_col[c]["units"][k]) for k in ks)
-            cells.append(f"{ok}/{len(ks)}")
-            if frontier is None and ok < len(ks):
-                frontier = s
-        srows.append([short(c), *cells, "all pass" if frontier is None else f"breaks at s{frontier}"])
-    xor = [n for n in crates if {"lib", "bin"} <= {"lib" if set(pkg_kinds[n]) & {"lib", "rlib", "cdylib", "dylib", "staticlib", "proc-macro"} else "", "bin" if "bin" in pkg_kinds[n] else ""}]
-    md["8-stratification"] = ("Units passing `cargo check` per stratum (s0 = no workspace dependencies).\n\n" +
-        table(["target", *[f"s{s}" for s in strata_ids], "frontier"], srows) +
-        f"\n**lib XOR bin violations (package has both a lib and a bin target):** {', '.join(xor) or 'none'}\n")
+    # ── target x target ────────────────────────────────────────────────────
+    notO = 1 - O
+    Ag = O.T @ O + notO.T @ notO
+    Imp = O.T @ notO
+    add("Ag", cols, cols, Ag, "counting", "O^T O + (1-O)^T (1-O)")
+    add("Imp", cols, cols, Imp, "counting", "O^T (1-O): units passing on row, failing on column")
+    add("Compat", cols, cols, (Imp == 0), "boolean", "Imp == 0: passing on row implies passing on column, for every unit")
+    check("Ag_symmetric_diag_full", (Ag == Ag.T).all() and (np.diag(Ag) == nu).all())
 
-    out = root / "matrices"
-    out.mkdir(exist_ok=True)
-    for name, body in md.items():
-        (out / f"{name}.md").write_text(f"# {name}\n\n{body}")
-    (out / "summary.json").write_text(json.dumps({"columns": cols, "units": units, "stratum": stratum}, indent=1))
-    summary = "\n\n".join(f"## {n}\n\n{b}" for n, b in md.items())
-    print(summary)
-    return 0
+    # ── dependency tree, per column ────────────────────────────────────────
+    closures = [[set(by_col[c]["units"][u]["closure"]["pkgs"]) for u in units] for c in cols]
+    base = cols.index(f"{BASELINE_TARGET}|strict") if f"{BASELINE_TARGET}|strict" in cols else 0
+    csize = np.array([[len(closures[j][i]) for j in range(nt)] for i in range(nu)])
+    add("closure_size", units, cols, csize, "counting", "|cfg-resolved dependency closure of u on t|")
+    add("closure_dropped", units, cols, [[len(closures[base][i] - closures[j][i]) for j in range(nt)] for i in range(nu)],
+        "counting", "|closure(u, baseline) \\ closure(u, t)|", baseline=cols[base])
+    add("closure_added", units, cols, [[len(closures[j][i] - closures[base][i]) for j in range(nt)] for i in range(nu)],
+        "counting", "|closure(u, t) \\ closure(u, baseline)|", baseline=cols[base])
+
+    P = sorted(failed_pkgs, key=lambda p: (-len(failed_pkgs[p]), p))
+    if P:
+        Bk = np.zeros((len(P), nt), dtype=np.int64)
+        for a, p in enumerate(P):
+            Bk[a, list(failed_pkgs[p])] = 1
+        add("Bk", P, cols, Bk, "boolean", "package p failed to compile on column t")
+        Ex = np.zeros_like(O)
+        Intro = np.zeros((len(P), nu), dtype=np.int64)
+        pnames = [pkg_name(p) for p in P]
+        for j in range(nt):
+            K = np.array([[int(any(pkg_name(x) == n for x in closures[j][i])) for n in pnames] for i in range(nu)])
+            Ex[:, j] = ((K @ Bk[:, j]) > 0).astype(np.int64) | own[:, j]
+            Intro |= K.T
+        Ex = Ex * notO
+        add("Ex", units, cols, Ex, "boolean", "failing unit explained by a failing package in its closure, or its own crate")
+        add("Unexplained", units, cols, notO * (1 - Ex), "boolean", "(1-O)*(1-Ex): failure with no failing package in the closure")
+        add("Intro", P, units, Intro, "boolean", "failing package p lies in the closure of unit u on some column")
+        check("no_unexplained_failure", not (notO * (1 - Ex)).any(), int((notO * (1 - Ex)).sum()))
+    # monotonicity: a unit cannot pass while one of its dependencies fails
+    V = O * (DU @ notO)
+    add("V", units, cols, V, "counting", "O * (DU (1-O)): passing units with a failing dependency (must be all 0)")
+    check("monotone_check", not V.any(), int(V.sum()))
+    # per-stratum pass counts and frontier, both from SZ and O
+    add("stratum_pass", [f"s{z}" for z in zs], cols, SZ @ O, "counting", "SZ O: units passing in stratum z on column t")
+    add("stratum_size", [f"s{z}" for z in zs], ["n"], SZ.sum(axis=1).reshape(-1, 1), "counting", "SZ 1")
+    full = (SZ @ O) == SZ.sum(axis=1, keepdims=True)
+    frontier = np.array([next((zs[z] for z in range(len(zs)) if not full[z, j]), -1) for j in range(nt)])
+    add("frontier", cols, ["first_failing_stratum"], frontier.reshape(-1, 1), "none", "min stratum with a failing unit; -1 = none")
+
+    # ── write + validate ───────────────────────────────────────────────────
+    mdir = root / "matrices"
+    sm.write_all(out, mdir, {"tool": "stratify_aggregate.py", "baseline": cols[base], "rustc": first and results[0]["rustc"]})
+    doc = json.loads((mdir / "matrices.json").read_text())
+    try:
+        import jsonschema
+        jsonschema.validate(doc, json.loads(SCHEMA_PATH.read_text()))
+        check("json_schema_valid", True)
+    except ImportError:
+        check("json_schema_valid", False, "jsonschema not installed; shape/label checks in Matrix still ran")
+    except jsonschema.ValidationError as e:
+        check("json_schema_valid", False, e.message[:200])
+    (mdir / "invariants.json").write_text(json.dumps(inv, indent=1))
+    print(json.dumps({"matrices": {m.name: list(m.data.shape) for m in out}, "invariants": inv}))
+    return 0 if all(i["ok"] for i in inv if i["name"] == "json_schema_valid") else 1
 
 
 if __name__ == "__main__":
