@@ -129,7 +129,7 @@ impl Session {
             hidden,
             target_embed,
             target_id,
-            use_constellation: config.has_model_weights,
+            use_constellation: config.has_ffn_weights(),
         })
     }
 }

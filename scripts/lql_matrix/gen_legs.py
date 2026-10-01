@@ -18,22 +18,23 @@ Design (decoupled axes — see docs/superpowers + tracker discussion):
 Leg fields: name, hf, corpus_model, source_kind, op, level, flags, expect_quant,
 tokenizer_repo (only set for gguf legs).
 
-BitNet-2B-4T is opt-in (INCLUDE_BITNET2B=true / workflow_dispatch input
-`include_bitnet2b`), OFF by default. It's the only ~2B-parameter source here —
-everything else is <=1.5B — and it's the heaviest leg group by a wide margin:
-a ~5GB safetensors download for the 5 native+xform legs, plus a further GGUF
-I2_S download for the 3 ternary/dequant legs. A routine matrix run doesn't
-need to pay that cost every time; opt in explicitly when BitNet-specific
-coverage is actually the point of the run.
+Models: SmolLM2-135M (instruct + base), Qwen2.5-Coder-0.5B and Qwen2.5-1.5B, and
+BitNet-2B-4T. BitNet is the only ~2B-parameter source (everything else is <=1.5B)
+and the heaviest leg group by a wide margin: a ~5GB safetensors download for its
+native+xform legs, plus a further GGUF I2_S download for the 3 ternary/dequant
+legs. It is ON by default (INCLUDE_BITNET2B=true; the workflow_dispatch input
+`include_bitnet2b` defaults to true) and can be switched off for a cheap run.
 """
 import json
 import os
 
-INCLUDE_BITNET2B = os.environ.get("INCLUDE_BITNET2B", "false").lower() == "true"
+INCLUDE_BITNET2B = os.environ.get("INCLUDE_BITNET2B", "true").lower() == "true"
 
 SAFETENSORS = [
     ("smol135",     "HuggingFaceTB/SmolLM2-135M-Instruct"),
     ("smol135base", "HuggingFaceTB/SmolLM2-135M"),
+    ("qwen05",      "Qwen/Qwen2.5-Coder-0.5B-Instruct"),
+    ("qwen15",      "Qwen/Qwen2.5-1.5B-Instruct"),
 ]
 if INCLUDE_BITNET2B:
     SAFETENSORS = SAFETENSORS + [("bitnet2b", "microsoft/bitnet-b1.58-2B-4T")]
@@ -88,8 +89,10 @@ def main():
                         expect_quant="none", source_kind="gguf",
                         corpus_model=tok, tokenizer_repo=tok))
 
-    # fp4 post-hoc requant invariant (hidden%256==0): only bitnet2b in this matrix
-    # satisfies it (2560 % 256 == 0), so it rides the same opt-in gate as GGUF.
+    # fp4 post-hoc requant invariant (hidden%256==0): qwen15 (1536) and bitnet2b
+    # (2560) satisfy it; the smol and qwen05 models (576 / 896) do not.
+    legs.append(leg("qwen15.xform.fp4", "Qwen/Qwen2.5-1.5B-Instruct",
+                    "quantize-fp4", level="inference", expect_quant="fp4"))
     if INCLUDE_BITNET2B:
         legs.append(leg("bitnet2b.xform.fp4", "microsoft/bitnet-b1.58-2B-4T",
                         "quantize-fp4", level="inference", expect_quant="fp4"))

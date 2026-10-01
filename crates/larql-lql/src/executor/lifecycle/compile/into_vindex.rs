@@ -150,7 +150,7 @@ impl Session {
         let memit_enabled = larql_compute::options::env_value("LARQL_MEMIT_ENABLE")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-        let memit_results = if !memit_facts.is_empty() && config.has_model_weights && memit_enabled
+        let memit_results = if !memit_facts.is_empty() && config.has_ffn_weights() && memit_enabled
         {
             let mut cb = larql_vindex::SilentLoadCallbacks;
             let weights = larql_vindex::load_model_weights(path, &mut cb)

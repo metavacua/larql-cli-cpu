@@ -349,6 +349,19 @@ impl VindexConfig {
             || self.extract_level == ExtractLevel::All
     }
 
+    /// Whether the FFN up/down weights a local forward pass needs are
+    /// present. `has_model_weights` alone is not enough: the Attention
+    /// tier sets it (attention + norms are weights) yet carries no FFN.
+    /// A manifest from before tiers existed reads as Browse with the
+    /// flag set, and keeps working.
+    pub fn has_ffn_weights(&self) -> bool {
+        match self.extract_level {
+            ExtractLevel::Inference | ExtractLevel::All => true,
+            ExtractLevel::Attention => false,
+            ExtractLevel::Browse => self.has_model_weights,
+        }
+    }
+
     /// Resident-size estimate for a browse-only vindex — just the
     /// gate matrices + embeddings + tokenizer.  Sized as the f32
     /// expansion of the gate vectors (worst case under warmup).
@@ -750,5 +763,28 @@ mod resident_size_tests {
 
         let infer = cfg(ExtractLevel::Inference, StorageDtype::F16, 1);
         assert!(infer.has_inference_weights());
+    }
+
+    /// The attention tier carries model weights but no FFN, so a local
+    /// forward pass is impossible there even though `has_model_weights`
+    /// is set. A legacy manifest (no `extract_level`, so it defaults to
+    /// Browse) with the flag set predates tiers and must still pass.
+    #[test]
+    fn has_ffn_weights_excludes_the_attention_tier_only() {
+        for (level, flag, want) in [
+            (ExtractLevel::Browse, false, false),
+            (ExtractLevel::Browse, true, true), // legacy manifest
+            (ExtractLevel::Attention, true, false),
+            (ExtractLevel::Inference, true, true),
+            (ExtractLevel::All, true, true),
+        ] {
+            let mut c = cfg(level, StorageDtype::F16, 1);
+            c.has_model_weights = flag;
+            assert_eq!(
+                c.has_ffn_weights(),
+                want,
+                "{level:?} has_model_weights={flag}"
+            );
+        }
     }
 }

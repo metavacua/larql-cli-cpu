@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use crate::error::LqlError;
-use crate::executor::helpers::{dir_size, format_bytes};
+use crate::executor::helpers::{dir_size, format_bytes, require_ffn_weights};
 use crate::executor::tuning::{MEMIT_DEFAULT_RIDGE, MEMIT_TARGET_ALPHA};
 use crate::executor::Session;
 use larql_vindex::format::filenames::TOKENIZER_JSON;
@@ -30,6 +30,7 @@ impl Session {
                 vindex_path.display()
             )));
         }
+        require_ffn_weights(&config, vindex_path, "COMPILE INTO MODEL")?;
 
         let final_dir = PathBuf::from(output);
         let vindex_path_owned = vindex_path.to_path_buf();

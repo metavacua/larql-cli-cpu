@@ -1,7 +1,7 @@
 //! `INFER` — full forward pass with attention. Requires model weights.
 
 use crate::error::LqlError;
-use crate::executor::helpers::format_knn_override_summary;
+use crate::executor::helpers::{format_knn_override_summary, require_ffn_weights};
 use crate::executor::{Backend, Session};
 
 impl Session {
@@ -93,6 +93,7 @@ impl Session {
                 path.display(),
             )));
         }
+        require_ffn_weights(config, path, "INFER")?;
 
         let mut cb = larql_vindex::SilentLoadCallbacks;
         let tokenizer = larql_vindex::load_vindex_tokenizer(path)

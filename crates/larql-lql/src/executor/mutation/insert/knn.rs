@@ -119,7 +119,9 @@ impl Session {
                     .saturating_sub(1)
                     .min(config.num_layers.saturating_sub(1))
             };
-            has_weights = config.has_model_weights;
+            // The forward pass below needs FFN weights; the Attention tier
+            // has model weights but no FFN and must take the weightless path.
+            has_weights = config.has_ffn_weights();
         }
 
         // ── Phase 2: Capture residual via forward pass ──

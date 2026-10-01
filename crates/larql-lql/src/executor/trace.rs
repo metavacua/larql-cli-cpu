@@ -6,7 +6,7 @@
 
 use crate::ast::{Range, TracePositionMode};
 use crate::error::LqlError;
-use crate::executor::helpers::format_knn_override_summary;
+use crate::executor::helpers::{format_knn_override_summary, require_ffn_weights};
 
 #[derive(Debug)]
 struct PendingRetrievalOverride {
@@ -60,6 +60,7 @@ impl super::Session {
                 path.display(),
             )));
         }
+        require_ffn_weights(config, path, "TRACE")?;
 
         if config.quant != larql_vindex::QuantFormat::None {
             return Err(LqlError::Execution(

@@ -6,6 +6,31 @@ use std::path::Path;
 
 use larql_inference::ndarray::Array1;
 
+use crate::error::LqlError;
+
+/// Refuse a statement that needs a local forward pass when the vindex has
+/// no FFN weights. The Attention extraction tier sets `has_model_weights`
+/// (attention + norms are weights), so the "requires model weights" checks
+/// pass there and the forward pass later panics on the missing FFN tensor;
+/// this check turns that into the refusal the Browse tier already gives.
+pub(crate) fn require_ffn_weights(
+    config: &larql_vindex::VindexConfig,
+    path: &Path,
+    statement: &str,
+) -> Result<(), LqlError> {
+    if config.has_ffn_weights() {
+        return Ok(());
+    }
+    let level = format!("{:?}", config.extract_level).to_lowercase();
+    Err(LqlError::Execution(format!(
+        "{statement} requires FFN weights, which extraction level `{level}` does not include \
+         (it only enables the client side of remote-FFN inference).\n\
+         Rebuild: EXTRACT MODEL \"{model}\" INTO \"{path}\" WITH INFERENCE",
+        model = config.model,
+        path = path.display(),
+    )))
+}
+
 /// Number of leading characters of a target token used for `starts_with`
 /// fuzzy matching against tokenizer outputs (e.g. "Pos" → matches " Pos",
 /// "Posei", "Poseidon"). Three characters is enough discrimination for

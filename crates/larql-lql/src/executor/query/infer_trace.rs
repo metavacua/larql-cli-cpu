@@ -3,7 +3,7 @@
 
 use crate::ast::LayerBand;
 use crate::error::LqlError;
-use crate::executor::helpers::format_knn_override_summary;
+use crate::executor::helpers::{format_knn_override_summary, require_ffn_weights};
 use crate::executor::{Backend, Session};
 
 use super::resolve_bands;
@@ -41,6 +41,7 @@ impl Session {
                 "EXPLAIN INFER requires model weights. Rebuild with WITH INFERENCE.".into(),
             ));
         }
+        require_ffn_weights(config, path, "EXPLAIN INFER")?;
         if with_attention && config.quant != larql_vindex::QuantFormat::None {
             return Err(LqlError::Execution(
                 "EXPLAIN INFER WITH ATTENTION does not yet support quantised (q4k) vindexes — \
