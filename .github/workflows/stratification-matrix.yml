@@ -35,7 +35,9 @@ on:
     branches: [worktree-target-stratification-matrix]
     paths:
       - .github/workflows/stratification-matrix.yml
-      - scripts/stratify_*.py
+      - scripts/stratify_probe.py
+      - scripts/stratify_ast.py
+      - scripts/stratify_aggregate.py
   workflow_dispatch:
     inputs:
       subject_ref:
