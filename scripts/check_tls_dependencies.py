@@ -52,7 +52,7 @@ def main() -> None:
     # Normal edges exclude OpenBLAS/Swagger's host-side download build tools.
     tree = subprocess.run(
         ["cargo", "tree", "--locked", "--target", args.target, "--no-default-features",
-         "-p", "larql-cli", "-p", "larql-router", "-p", "larql-server",
+         "-p", "larql-cli", "-p", "larql-router",
          "-e", "normal", "--prefix", "none", "--format", "{p}"],
         cwd=ROOT, capture_output=True, text=True,
     )
