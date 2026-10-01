@@ -24,6 +24,10 @@
 # one target dir, so each third-party package builds once per target, not once
 # per cell. Parallelism is capped so this does not starve per-PR CI.
 #
+# Layers: probe (compiler, per target), ast (ast-grep, syntax), lsif and diag
+# (rust-analyzer, name resolution - loading a whole workspace is memory-heavy,
+# so it runs here and never on the dev machine), aggregate (matrices).
+#
 # `subject_ref` points the probe at any branch or SHA while the tooling stays
 # at the workflow's own ref, so the same instrument can score main and a
 # fixes branch.
@@ -42,6 +46,7 @@ on:
       - scripts/stratify_aggregate.py
       - scripts/stratify_matrix.py
       - scripts/stratify_verify.py
+      - scripts/stratify_lsif.py
       - scripts/schemas/stratification-matrices.schema.json
   workflow_dispatch:
     inputs:
@@ -50,19 +55,23 @@ on:
         required: false
         default: ''
 
-permissions:
-  contents: read
+# Least privilege: nothing by default; each job re-grants only what it uses
+# (contents: read, for checkout). Artifact upload/download need no token scope.
+permissions: {}
 
 env:
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
 
+# One run per subject ref: a newer run on the same ref supersedes the older.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.run_id }}
-  cancel-in-progress: false
+  group: ${{ github.workflow }}-${{ inputs.subject_ref || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   probe:
+    permissions:
+      contents: read
     name: probe · ${{ matrix.target }} · ${{ matrix.mode }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -145,6 +154,8 @@ jobs:
           retention-days: 14
 
   ast:
+    permissions:
+      contents: read
     name: source AST facts (ast-grep)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -169,9 +180,119 @@ jobs:
           path: ast-out
           retention-days: 14
 
+  lsif:
+    permissions:
+      contents: read
+    name: lsif · crate x crate actual use
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: tools
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.subject_ref || github.sha }}
+          path: subject
+      - name: Install rust-analyzer on the pinned toolchain and system OpenBLAS
+        working-directory: subject
+        run: |
+          rustup component add rust-analyzer
+          rust-analyzer --version
+          rust-analyzer --help
+          sudo apt-get update
+          sudo apt-get install -y libopenblas-dev pkg-config
+      - name: Cache cargo registry (downloads only, never target/)
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-reg2-strat-sem-${{ hashFiles('subject/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-reg2-strat-sem-
+      - name: rust-analyzer lsif (whole workspace)
+        working-directory: subject
+        run: |
+          mkdir -p ../sem
+          rust-analyzer lsif . > ../sem/workspace.lsif
+          wc -l ../sem/workspace.lsif
+      - name: Crate -> crate reference counts (input of the N matrix)
+        working-directory: subject
+        run: python3 ../tools/scripts/stratify_lsif.py --lsif ../sem/workspace.lsif --root "$PWD" --out ../sem/out
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: semantic-lsif
+          path: sem/out
+          retention-days: 30
+
+  diag:
+    permissions:
+      contents: read
+    name: diagnostics · ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - wasm32-wasip1
+          - wasm32v1-none
+          - aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.subject_ref || github.sha }}
+          path: subject
+      - name: Install rust-analyzer, target and system OpenBLAS
+        working-directory: subject
+        run: |
+          rustup component add rust-analyzer
+          rustup target add ${{ matrix.target }}
+          rust-analyzer diagnostics --help
+          sudo apt-get update
+          sudo apt-get install -y libopenblas-dev pkg-config
+      - name: Cache cargo registry (downloads only, never target/)
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-reg2-strat-sem-${{ hashFiles('subject/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-reg2-strat-sem-
+      # Runner-local config, never committed: cfg resolution follows `target`.
+      - name: Point rust-analyzer at ${{ matrix.target }}
+        working-directory: subject
+        run: |
+          printf '[cargo]\ntarget = "%s"\n' "${{ matrix.target }}" > rust-analyzer.toml
+          cat rust-analyzer.toml
+      - name: rust-analyzer diagnostics (raw output, unfiltered)
+        working-directory: subject
+        run: |
+          mkdir -p ../diag
+          set +e
+          rust-analyzer diagnostics . > ../diag/raw.txt 2> ../diag/err.txt
+          echo "exit $?" | tee ../diag/exit.txt
+          wc -l ../diag/raw.txt ../diag/err.txt
+          head -60 ../diag/err.txt
+          grep -c "inactive-code" ../diag/raw.txt | sed 's/^/inactive-code: /'
+          grep -oE "(unresolved-[a-z-]+|unlinked-file|macro-error|inactive-code|unresolved_[a-z_]+)" ../diag/raw.txt | sort | uniq -c | sort -rn | tee ../diag/by-code.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: semantic-diag-${{ matrix.target }}
+          path: diag
+          retention-days: 30
+
   aggregate:
+    permissions:
+      contents: read
     name: matrices
-    needs: [probe, ast]
+    needs: [probe, ast, lsif]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -191,6 +312,8 @@ jobs:
           mkdir -p agg
           for d in collected/probe-*; do cp -r "$d" "agg/$(basename "$d")"; done
           cp collected/ast/ast.json agg/ast.json
+          # optional input: absent when the lsif job could not run
+          if [ -f collected/semantic-lsif/actual-use.json ]; then cp collected/semantic-lsif/actual-use.json agg/; fi
           ls agg
       - name: Install numpy, scipy, jsonschema
         run: python3 -m pip install numpy scipy jsonschema
