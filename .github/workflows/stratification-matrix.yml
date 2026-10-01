@@ -28,6 +28,14 @@
 name: stratification-matrix
 
 on:
+  # A workflow file that is not yet on the default branch cannot be
+  # dispatched, so this branch triggers itself on push. Drop this block when
+  # the file lands on main; workflow_dispatch is the intended entry point.
+  push:
+    branches: [worktree-target-stratification-matrix]
+    paths:
+      - .github/workflows/stratification-matrix.yml
+      - scripts/stratify_*.py
   workflow_dispatch:
     inputs:
       subject_ref:
