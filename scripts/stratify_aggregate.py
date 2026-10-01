@@ -243,6 +243,11 @@ def main() -> int:
                 "entry[c,x]=1: crate c directly depends on x and x's resolved subtree contains a root blocker on this column")
             add(f"drags|{col}", direct_ext, blockers, drags, "boolean",
                 "drags[x,b]=1: x's resolved subtree on this column contains root-blocker package b")
+            # reach = entry (x) drags: blockers a crate hits through its own external deps; the
+            # slice adds those reached through workspace dependencies, R (x) reach.
+            reach = sm.bool_matmul(entry, drags)
+            add(f"slice|{col}", crates, blockers, ((reach + sm.bool_matmul(R, reach)) > 0), "boolean",
+                "slice[c,b]=1: crate c depends, directly or through workspace crates, on blocker b: (entry drags) + R (entry drags)")
 
     # monotonicity: a unit cannot pass while one of its dependencies fails
     V = O * (DU @ notO)
