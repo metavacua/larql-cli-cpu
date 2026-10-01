@@ -36,6 +36,7 @@ import numpy as np
 
 import stratify_matrix as sm
 
+WIRING_MODULES = ("lib", "main")
 BASELINE_TARGET = "x86_64-unknown-linux-gnu"
 RESTRICTION_LINTS = ("clippy::std_instead_of_core", "clippy::std_instead_of_alloc", "clippy::alloc_instead_of_core")
 KIND_COLS = ("lib", "bin", "cdylib", "proc-macro")
@@ -145,8 +146,14 @@ def main() -> int:
         for k, n in pairs.items():
             u, d = k.split("->")
             MU[mi[u], mi[d]] = n
-        MB = (MU > 0).astype(np.int64)
+        # A mod.rs / lib.rs / main.rs only wires its children together (re-exports); its references
+        # to them are not logic dependencies, and with them the graph collapses into giant cycles
+        # (first real run: 108 of 150 `larql-inference` modules in one). Edges FROM wiring modules
+        # are dropped for taint; `module_ref` keeps them.
+        wiring = np.array([m.split("/", 1)[-1] in WIRING_MODULES or m.endswith("/mod") for m in mods], dtype=np.int64)
+        MB = (MU > 0).astype(np.int64) * (1 - wiring)[:, None]
         MR, mod_acyclic = sm.closure(MB)
+        add("module_wiring", mods, ["wiring"], wiring.reshape(-1, 1), "boolean", "module is mod.rs / lib.rs / main.rs (re-export wiring)")
         vec = lambda s: np.array([[int(m in s)] for m in mods])
         ns, ios = vec(net_seed), vec(io_seed)
         net_taint = ((ns + sm.bool_matmul(MR, ns)) > 0).astype(np.int64)
