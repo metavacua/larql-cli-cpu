@@ -17,7 +17,7 @@ target conditions, default-feature choices and explicit example targets.
 | [larql-cli](../../crates/larql-cli/Cargo.toml) | `0.2.0` | `larql-compute`, `larql-core`, `larql-factory`, `larql-inference`, `larql-kv`, `larql-lql`, `larql-models`, `larql-router`, `larql-vindex`, `larql-vindex-spec` | `research` |
 | [larql-compute](../../crates/larql-compute/Cargo.toml) | `0.2.0` | `larql-execution`, `larql-models` | None |
 | [larql-continuation-fixture](../../crates/larql-continuation-fixture/Cargo.toml) | `0.2.0` | `larql-vindex` | None |
-| [larql-core](../../crates/larql-core/Cargo.toml) | `0.2.0` | None | `http`, `msgpack` |
+| [larql-core](../../crates/larql-core/Cargo.toml) | `0.2.0` | None | `http`, `msgpack`, `io`, `engine` |
 | [larql-execution](../../crates/larql-execution/Cargo.toml) | `0.2.0` | None | None |
 | [larql-factory](../../crates/larql-factory/Cargo.toml) | `0.2.0` | `larql-models`, `larql-vindex-spec` | None |
 | [larql-inference](../../crates/larql-inference/Cargo.toml) | `0.2.0` | `larql-compute`, `larql-core`, `larql-execution`, `larql-models`, `larql-router-protocol`, `larql-vindex` | None |
