@@ -1,0 +1,189 @@
+# Stratification matrix: which workspace unit (package x lib|bin) builds on
+# which target, where it first breaks, and which dependency broke it.
+#
+# target-matrix.yml answers "does the pre-declared expectation hold". This
+# answers a different question, and exists because that file's colours
+# cannot: its diagnostic steps are `continue-on-error`, and its no_std cells
+# map "expected-fail + failed" to green, so a run that is all green can still
+# be 100% red underneath. (Read run 36804623863's logs: wasm rungs 1-3 fail in
+# getrandom / mio / tokio, and every no_std cell fails inside serde,
+# serde_json, thiserror or zmij - a third-party dependency, never the crate
+# root the policy files blame.) Nothing here reports a colour as a result:
+# each probe job exits 0 whenever it ran, and the facts go to JSON.
+#
+# Output (artifact `matrices`, also the run summary):
+#   crate x crate, target x target (agreement + implication), unit x target
+#   (check, clippy), package x target (who refuses a target, who pulls it in),
+#   dependency-tree delta, and the lib-xor-bin stratification. Source-level
+#   AST facts (no_std declared, OS-bound std paths, cfg(target), unsafe) come
+#   from ast-grep and are joined to the compile results.
+#
+# Cost control: one job per target compiles every unit in dependency order in
+# one target dir, so each third-party package builds once per target, not once
+# per cell. Parallelism is capped so this does not starve per-PR CI.
+#
+# `subject_ref` points the probe at any branch or SHA while the tooling stays
+# at the workflow's own ref, so the same instrument can score main and a
+# fixes branch.
+name: stratification-matrix
+
+on:
+  workflow_dispatch:
+    inputs:
+      subject_ref:
+        description: Branch or SHA to probe (default - the ref this workflow runs from)
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: never
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: probe · ${{ matrix.target }} · ${{ matrix.mode }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        include:
+          # Strict: nothing is faked. A target the runner has no native
+          # library for fails honestly (cause class `native-lib-cross`).
+          - { target: x86_64-unknown-linux-gnu, mode: strict }
+          - { target: aarch64-unknown-linux-gnu, mode: strict, cc: gcc-aarch64-linux-gnu }
+          - { target: riscv64gc-unknown-linux-gnu, mode: strict, cc: gcc-riscv64-linux-gnu }
+          - { target: x86_64-pc-windows-gnu, mode: strict, cc: gcc-mingw-w64-x86-64 }
+          - { target: wasm32-unknown-unknown, mode: strict }
+          - { target: wasm32-wasip1, mode: strict }
+          - { target: wasm32-unknown-emscripten, mode: strict }
+          - { target: wasm32v1-none, mode: strict }
+          - { target: riscv32i-unknown-none-elf, mode: strict }
+          - { target: riscv32im-unknown-none-elf, mode: strict }
+          - { target: riscv32imc-unknown-none-elf, mode: strict }
+          - { target: riscv32imac-unknown-none-elf, mode: strict }
+          - { target: riscv32imafc-unknown-none-elf, mode: strict }
+          - { target: riscv64gc-unknown-none-elf, mode: strict }
+          - { target: riscv64imac-unknown-none-elf, mode: strict }
+          - { target: aarch64-unknown-none, mode: strict }
+          - { target: x86_64-unknown-none, mode: strict }
+          - { target: aarch64-unknown-uefi, mode: strict }
+          - { target: x86_64-unknown-uefi, mode: strict }
+          # Sysroot-assumed: the same libc targets again with
+          # PKG_CONFIG_ALLOW_CROSS=1, so a missing target-arch OpenBLAS does
+          # not hide Rust-level incompatibilities stacked above it. `check`
+          # never links, so this only changes what build scripts are told.
+          - { target: aarch64-unknown-linux-gnu, mode: sysroot-assumed, cc: gcc-aarch64-linux-gnu }
+          - { target: riscv64gc-unknown-linux-gnu, mode: sysroot-assumed, cc: gcc-riscv64-linux-gnu }
+          - { target: x86_64-pc-windows-gnu, mode: sysroot-assumed, cc: gcc-mingw-w64-x86-64 }
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: tools
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.subject_ref || github.sha }}
+          path: subject
+
+      # Plain `rustup target add` from inside the subject, so the repo's
+      # pinned toolchain (rust-toolchain.toml) is the one that gains the target
+      # - see target-matrix.yml's header for why dtolnay's `targets:` is wrong here.
+      - name: Add rustup target
+        working-directory: subject
+        run: |
+          rustup target add ${{ matrix.target }}
+          rustc --version --verbose
+
+      - name: Install native OpenBLAS (host) and cross C compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopenblas-dev pkg-config ${{ matrix.cc }}
+
+      - name: Cache cargo registry (downloads only, never target/)
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-reg2-strat-${{ hashFiles('subject/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-reg2-strat-
+
+      - name: Probe every unit on ${{ matrix.target }} (${{ matrix.mode }})
+        working-directory: subject
+        run: python3 ../tools/scripts/stratify_probe.py --target ${{ matrix.target }} --mode ${{ matrix.mode }} --out ../out
+
+      - name: Upload probe data and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-${{ matrix.target }}-${{ matrix.mode }}
+          path: out
+          retention-days: 14
+
+  ast:
+    name: source AST facts (ast-grep)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: tools
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.subject_ref || github.sha }}
+          path: subject
+      - name: Install ast-grep
+        run: npm install -g @ast-grep/cli
+      - name: Scan crates
+        working-directory: subject
+        run: |
+          mkdir -p ../ast-out
+          python3 ../tools/scripts/stratify_ast.py --ast-grep "$(command -v ast-grep)" --crates crates --out ../ast-out/ast.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ast
+          path: ast-out
+          retention-days: 14
+
+  aggregate:
+    name: matrices
+    needs: [probe, ast]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: tools
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.subject_ref || github.sha }}
+          path: subject
+      - uses: actions/download-artifact@v4
+        with:
+          path: collected
+      - name: Lay out inputs
+        run: |
+          mkdir -p agg
+          for d in collected/probe-*; do cp -r "$d" "agg/$(basename "$d")"; done
+          cp collected/ast/ast.json agg/ast.json
+          ls agg
+      - name: Build matrices
+        working-directory: subject
+        run: python3 ../tools/scripts/stratify_aggregate.py ../agg | tee ../agg/summary.md
+      - name: Publish to run summary
+        run: head -c 900000 agg/summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: matrices
+          path: agg/matrices
+          retention-days: 30
