@@ -1,5 +1,5 @@
 {
-  "policy_note": "larql-execution is a wave-0 crate (per the leaf-first no_std segregation plan): a true leaf, deliberately zero dependencies at all -- not just zero larql-* deps, zero dependencies period, per its role as a dependency-light contract crate (RefusalKind and friends). Every target below is expected-fail today for the same reason as larql-vindex-spec's: no unconditional OS coupling exists to gate, but `#![cfg_attr(not(feature = \"std\"), no_std)]` has not been added yet, so std is still implicitly linked. Promote a target's entry to expected-pass only as part of the PR that adds that opt-out.",
+  "policy_note": "larql-execution is a wave-0 crate: zero dependencies, now unconditionally `#![no_std]` (core + alloc for Box<dyn ExecutionRefusal>). riscv64imac-unknown-none-elf is promoted to expected-pass as the integer-ISA reduction anchor; the other targets stay expected-fail only until a cell-by-cell verification in CI promotes them.",
   "targets": {
     "wasm32v1-none": "expected-fail",
     "riscv32i-unknown-none-elf": "expected-fail",
@@ -8,10 +8,11 @@
     "riscv32imafc-unknown-none-elf": "expected-fail",
     "riscv32imc-unknown-none-elf": "expected-fail",
     "riscv64gc-unknown-none-elf": "expected-fail",
-    "riscv64imac-unknown-none-elf": "expected-fail",
+    "riscv64imac-unknown-none-elf": "expected-pass",
     "aarch64-unknown-none": "expected-fail",
     "x86_64-unknown-none": "expected-fail",
     "aarch64-unknown-uefi": "expected-fail",
-    "x86_64-unknown-uefi": "expected-fail"
+    "x86_64-unknown-uefi": "expected-fail",
+    "riscv64im-unknown-none-elf": "expected-fail"
   }
 }

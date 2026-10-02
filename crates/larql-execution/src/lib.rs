@@ -47,8 +47,15 @@
 //! them directly would turn this enum from execution semantics into a catalogue
 //! of everything that can go wrong operationally.
 
-use std::error::Error;
-use std::fmt;
+#![cfg_attr(not(feature = "std"), no_std)]
+
+extern crate alloc;
+#[cfg(test)]
+extern crate std;
+
+use alloc::boxed::Box;
+use core::error::Error;
+use core::fmt;
 
 /// The response a refusal requires.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -124,6 +131,8 @@ pub type BoxRefusal = Box<dyn ExecutionRefusal>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::string::ToString;
+    use std::vec::Vec;
 
     #[derive(Debug)]
     struct Refused(RefusalKind);

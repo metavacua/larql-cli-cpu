@@ -1,0 +1,12 @@
+--version
+--help
+run --help
+chat --help
+bench --help
+vindex3 --help
+vindex3 plan --help
+lql --help
+repl --help
+extract-index --help
+verify --help
+convert --help
