@@ -55,6 +55,9 @@ jobs:
       # binary cache (pinned channel), nothing is compiled on the runner.
       - uses: cachix/install-nix-action@v31
       - name: Run the gate
+        # `shell: bash` (not the default `bash -e`) turns on pipefail, so the
+        # gate's exit status survives the pipe into tee.
+        shell: bash
         run: |
           nix shell github:NixOS/nixpkgs/nixos-26.05#souffle -c souffle --version
           nix shell github:NixOS/nixpkgs/nixos-26.05#souffle -c \
