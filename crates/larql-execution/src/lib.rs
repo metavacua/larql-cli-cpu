@@ -49,10 +49,12 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+#[cfg(feature = "alloc")]
 extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+#[cfg(feature = "alloc")]
 use alloc::boxed::Box;
 use core::error::Error;
 use core::fmt;
@@ -126,6 +128,7 @@ pub trait ExecutionRefusal: Error + Send + Sync + 'static {
 }
 
 /// A refusal crossing a boundary that cannot name its concrete type.
+#[cfg(feature = "alloc")]
 pub type BoxRefusal = Box<dyn ExecutionRefusal>;
 
 #[cfg(test)]
@@ -134,15 +137,19 @@ mod tests {
     use std::string::ToString;
     use std::vec::Vec;
 
+    #[cfg(feature = "alloc")]
     #[derive(Debug)]
     struct Refused(RefusalKind);
 
+    #[cfg(feature = "alloc")]
     impl fmt::Display for Refused {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             write!(f, "refused: {}", self.0)
         }
     }
+    #[cfg(feature = "alloc")]
     impl Error for Refused {}
+    #[cfg(feature = "alloc")]
     impl ExecutionRefusal for Refused {
         fn kind(&self) -> RefusalKind {
             self.0
@@ -196,6 +203,7 @@ mod tests {
         assert_eq!(RefusalKind::BindingDefect.to_string(), "binding_defect");
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn a_boxed_refusal_keeps_its_kind_and_its_message() {
         // The point of the trait: the classification survives a boundary that

@@ -36,7 +36,7 @@ jobs:
   # keeps the compiler on the pinned toolchain instead of switching to nightly.
   # The stable-only rule belongs to target-matrix.yml, not to this experiment.
   compile-nostd:
-    name: compile · ${{ matrix.name }} · ${{ matrix.crate }}
+    name: compile · ${{ matrix.target }}+${{ matrix.layer }} · ${{ matrix.crate }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -45,19 +45,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { crate: larql-execution, name: riscv32i-unknown-none-elf,    target: riscv32i-unknown-none-elf }
-          - { crate: larql-execution, name: riscv64im-unknown-none-elf,   target: riscv64im-unknown-none-elf }
-          - { crate: larql-execution, name: riscv64imac-unknown-none-elf, target: riscv64imac-unknown-none-elf }
+          - { crate: larql-execution, target: riscv32i-unknown-none-elf, layer: alloc, build_std: 'core,alloc', features: '--no-default-features --features alloc' }
+          - { crate: larql-execution, target: riscv32i-unknown-none-elf, layer: core,  build_std: 'core',       features: '--no-default-features' }
+          - { crate: larql-execution, target: riscv64im-unknown-none-elf, layer: alloc, build_std: 'core,alloc', features: '--no-default-features --features alloc' }
+          - { crate: larql-execution, target: riscv64im-unknown-none-elf, layer: core,  build_std: 'core',       features: '--no-default-features' }
+          - { crate: larql-execution, target: riscv64imac-unknown-none-elf, layer: alloc, build_std: 'core,alloc', features: '--no-default-features --features alloc' }
+          - { crate: larql-execution, target: riscv64imac-unknown-none-elf, layer: core,  build_std: 'core',       features: '--no-default-features' }
     steps:
       - uses: actions/checkout@v7
       - run: rustup component add rust-src
       - name: cargo check --lib -Zbuild-std (checked against no-std-policy.json)
         run: |
           set +e
-          cargo check -Zbuild-std=core,alloc --target ${{ matrix.target }} -p ${{ matrix.crate }} --lib --no-default-features
+          cargo check -Zbuild-std=${{ matrix.build_std }} --target ${{ matrix.target }} -p ${{ matrix.crate }} --lib ${{ matrix.features }}
           ec=$?
           set -e
-          python3 scripts/check_no_std_policy.py "${{ matrix.crate }}" "${{ matrix.name }}" "$ec" check \
+          python3 scripts/check_no_std_policy.py "${{ matrix.crate }}" "${{ matrix.target }}+${{ matrix.layer }}" "$ec" check \
             "crates/${{ matrix.crate }}/no-std-policy.json"
       # CI-only: --fix rewrites files, so it never runs on the dev machine. The tree
       # must come back clean; a diff is the fix to commit. Lints are per target
@@ -65,29 +68,29 @@ jobs:
       - name: 'cargo clippy --fix: core/alloc/std restriction lints (target-scoped)'
         run: |
           set +e
-          cargo clippy --fix --allow-dirty --allow-staged -Zbuild-std=core,alloc \
-            --target ${{ matrix.target }} -p ${{ matrix.crate }} --lib --no-deps --no-default-features -- \
+          cargo clippy --fix --allow-dirty --allow-staged -Zbuild-std=${{ matrix.build_std }} \
+            --target ${{ matrix.target }} -p ${{ matrix.crate }} --lib --no-deps ${{ matrix.features }} -- \
             -W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core
           clippy_ec=$?
           mkdir -p fixes
-          git diff -- "crates/${{ matrix.crate }}" | tee "fixes/${{ matrix.crate }}-${{ matrix.name }}.patch"
-          [ -s "fixes/${{ matrix.crate }}-${{ matrix.name }}.patch" ] || rm -f "fixes/${{ matrix.crate }}-${{ matrix.name }}.patch"
+          git diff -- "crates/${{ matrix.crate }}" | tee "fixes/${{ matrix.crate }}-${{ matrix.target }}-${{ matrix.layer }}.patch"
+          [ -s "fixes/${{ matrix.crate }}-${{ matrix.target }}-${{ matrix.layer }}.patch" ] || rm -f "fixes/${{ matrix.crate }}-${{ matrix.target }}-${{ matrix.layer }}.patch"
           git diff --exit-code -- "crates/${{ matrix.crate }}" > /dev/null
           diff_ec=$?
           set -e
           if [ "$clippy_ec" -ne 0 ]; then ec=$clippy_ec; else ec=$diff_ec; fi
-          python3 scripts/check_no_std_policy.py "${{ matrix.crate }}" "${{ matrix.name }}" "$ec" clippy-fix \
+          python3 scripts/check_no_std_policy.py "${{ matrix.crate }}" "${{ matrix.target }}+${{ matrix.layer }}" "$ec" clippy-fix \
             "crates/${{ matrix.crate }}/no-std-policy.json"
       # Apply on the dev machine with: gh run download <id> -n clippy-fix-<crate>-<target> && git apply fixes/*.patch
       - name: Upload clippy --fix patch (only when it is non-empty)
-        if: always() && hashFiles(format('fixes/{0}-{1}.patch', matrix.crate, matrix.name)) != ''
+        if: always() && hashFiles(format('fixes/{0}-{1}.patch', matrix.crate, format('{0}-{1}', matrix.target, matrix.layer))) != ''
         uses: actions/upload-artifact@v4
         with:
-          name: clippy-fix-${{ matrix.crate }}-${{ matrix.name }}
+          name: clippy-fix-${{ matrix.crate }}-${{ matrix.target }}-${{ matrix.layer }}
           path: fixes/
           retention-days: 7
       - name: host tests still pass with the crate no_std
-        if: matrix.name == 'riscv64imac-unknown-none-elf'
+        if: matrix.target == 'riscv64imac-unknown-none-elf' && matrix.layer == 'alloc'
         run: cargo test --locked -p ${{ matrix.crate }}
 
   runtime-matrix:
@@ -129,8 +132,12 @@ jobs:
           S=scripts/riscv_reduction/capture.sh
           $S out/x86 target/release/larql
           $S out/rv-full target/riscv64gc-unknown-linux-gnu/release/larql qemu-riscv64-static -cpu rv64 -L /usr/riscv64-linux-gnu
-          # F/D off: any float instruction raises SIGILL, which capture records as rc 132.
-          $S out/rv-nofd target/riscv64gc-unknown-linux-gnu/release/larql qemu-riscv64-static -cpu rv64,f=false,d=false -L /usr/riscv64-linux-gnu
+          # F/D off: a float instruction then raises SIGILL (rc 132). QEMU rejects a CPU whose
+          # extensions depend on F/D, so discover the accepted mask first and record it.
+          BIN=target/riscv64gc-unknown-linux-gnu/release/larql
+          CPU=$(python3 scripts/riscv_reduction/cpu_mask.py /usr/riscv64-linux-gnu "$BIN")
+          echo "F/D-free CPU: $CPU" | tee -a "$GITHUB_STEP_SUMMARY"
+          $S out/rv-nofd "$BIN" qemu-riscv64-static -cpu "$CPU" -L /usr/riscv64-linux-gnu
       - name: Classify
         run: |
           rc=0

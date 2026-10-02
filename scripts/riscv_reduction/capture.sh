@@ -13,4 +13,7 @@ while IFS= read -r line; do
   # shellcheck disable=SC2086
   "$@" "$bin" $line > "$out/$id.out" 2> "$out/$id.err"
   echo $? > "$out/$id.rc"
+  # The runner itself failed to start (e.g. QEMU rejected the CPU definition): that
+  # says nothing about the program, so mark it for the classifier.
+  if head -n1 "$out/$id.err" | grep -q '^qemu-'; then : > "$out/$id.harness"; fi
 done < "$(dirname "$0")/commands.txt"

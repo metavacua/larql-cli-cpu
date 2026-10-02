@@ -5,6 +5,7 @@
   similar     same exit code, stdout differs only in whitespace/digits
   refused     reference succeeded (rc 0), reduced did not -> reduced is a
               strict subset of the reference (inclusion holds)
+  harness-error  the runner (QEMU) failed to start; no evidence either way, FAILS
   divergent   anything else (reduced succeeds where the reference fails,
               or both fail with different codes) -> inclusion VIOLATED
 
@@ -29,7 +30,9 @@ print(f"### {label}\n\n| command | reference rc | reduced rc | class |\n|---|---
 for i in ids:
     cmd = (pathlib.Path(ref) / f"{i}.cmd").read_text().strip()
     (rrc, rout), (drc, dout) = load(ref, i), load(red, i)
-    if rrc == drc and rout == dout: k = "identical"
+    if (pathlib.Path(red) / f"{i}.harness").exists() or (pathlib.Path(ref) / f"{i}.harness").exists():
+        k = "harness-error"; bad += 1
+    elif rrc == drc and rout == dout: k = "identical"
     elif rrc == drc and norm(rout) == norm(dout): k = "similar"
     elif rrc == 0 and drc != 0: k = "refused"
     else: k = "divergent"; bad += 1

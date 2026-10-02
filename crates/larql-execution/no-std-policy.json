@@ -1,18 +1,24 @@
 {
-  "policy_note": "larql-execution is a wave-0 crate: zero dependencies, now unconditionally `#![no_std]` (core + alloc for Box<dyn ExecutionRefusal>). riscv64imac-unknown-none-elf is promoted to expected-pass as the integer-ISA reduction anchor; the other targets stay expected-fail only until a cell-by-cell verification in CI promotes them.",
+  "policy_note": "larql-execution is a wave-0 crate: zero dependencies, `std` (default) => `alloc` => `core` layers. Plain <target> keys are target-matrix.yml's default-features check and stay expected-fail (that check keeps std). <target>+alloc and <target>+core keys are riscv-reduction.yml's -Zbuild-std cells (core,alloc and core only) and are expected-pass.",
   "targets": {
     "wasm32v1-none": "expected-fail",
-    "riscv32i-unknown-none-elf": "expected-pass",
+    "riscv32i-unknown-none-elf": "expected-fail",
     "riscv32im-unknown-none-elf": "expected-fail",
     "riscv32imac-unknown-none-elf": "expected-fail",
     "riscv32imafc-unknown-none-elf": "expected-fail",
     "riscv32imc-unknown-none-elf": "expected-fail",
     "riscv64gc-unknown-none-elf": "expected-fail",
-    "riscv64imac-unknown-none-elf": "expected-pass",
+    "riscv64imac-unknown-none-elf": "expected-fail",
     "aarch64-unknown-none": "expected-fail",
     "x86_64-unknown-none": "expected-fail",
     "aarch64-unknown-uefi": "expected-fail",
     "x86_64-unknown-uefi": "expected-fail",
-    "riscv64im-unknown-none-elf": "expected-pass"
+    "riscv64im-unknown-none-elf": "expected-fail",
+    "riscv32i-unknown-none-elf+alloc": "expected-pass",
+    "riscv32i-unknown-none-elf+core": "expected-pass",
+    "riscv64im-unknown-none-elf+alloc": "expected-pass",
+    "riscv64im-unknown-none-elf+core": "expected-pass",
+    "riscv64imac-unknown-none-elf+alloc": "expected-pass",
+    "riscv64imac-unknown-none-elf+core": "expected-pass"
   }
 }
