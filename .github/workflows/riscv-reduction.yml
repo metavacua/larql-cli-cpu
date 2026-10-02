@@ -69,13 +69,23 @@ jobs:
             --target ${{ matrix.target }} -p ${{ matrix.crate }} --lib --no-deps --no-default-features -- \
             -W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core
           clippy_ec=$?
-          git diff -- "crates/${{ matrix.crate }}"
+          mkdir -p fixes
+          git diff -- "crates/${{ matrix.crate }}" | tee "fixes/${{ matrix.crate }}-${{ matrix.name }}.patch"
+          [ -s "fixes/${{ matrix.crate }}-${{ matrix.name }}.patch" ] || rm -f "fixes/${{ matrix.crate }}-${{ matrix.name }}.patch"
           git diff --exit-code -- "crates/${{ matrix.crate }}" > /dev/null
           diff_ec=$?
           set -e
           if [ "$clippy_ec" -ne 0 ]; then ec=$clippy_ec; else ec=$diff_ec; fi
           python3 scripts/check_no_std_policy.py "${{ matrix.crate }}" "${{ matrix.name }}" "$ec" clippy-fix \
             "crates/${{ matrix.crate }}/no-std-policy.json"
+      # Apply on the dev machine with: gh run download <id> -n clippy-fix-<crate>-<target> && git apply fixes/*.patch
+      - name: Upload clippy --fix patch (only when it is non-empty)
+        if: always() && hashFiles(format('fixes/{0}-{1}.patch', matrix.crate, matrix.name)) != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: clippy-fix-${{ matrix.crate }}-${{ matrix.name }}
+          path: fixes/
+          retention-days: 7
       - name: host tests still pass with the crate no_std
         if: matrix.name == 'riscv64imac-unknown-none-elf'
         run: cargo test --locked -p ${{ matrix.crate }}
