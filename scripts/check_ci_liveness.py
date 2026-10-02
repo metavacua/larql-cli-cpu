@@ -17,7 +17,10 @@ against the Actions API:
    (push or pull_request) on each required platform, or a written exemption.
 2. No workflow is dispatch-only unless a written exemption says why.
 3. Workflows that filter on `branches:` must include the default branch.
-4. With --runs: scheduled workflows are enabled and have actually fired
+4. A job in a pull-request workflow must be able to run on a pull request.
+   A control whose first run is after the change merges cannot guard it, and
+   cannot be checked before merge. Exemptions name `workflow::job`.
+5. With --runs: scheduled workflows are enabled and have actually fired
    recently. GitHub silently disables schedules after 60 days of repository
    inactivity, and a cron on a non-default branch never fires.
 
@@ -47,6 +50,7 @@ PARTIAL_FLAGS = {"--lib", "--test", "--bins", "--bin", "--doc", "--no-run", "--b
 MAKE_TARGET = re.compile(
     r"make\s+(larql-[a-z0-9-]+)-(?:ci|test|test-fast|coverage-summary|coverage)\b"
 )
+EVENT_ATOM = re.compile(r"github\.event_name\s*(==|!=)\s*'([a-z_]+)'")
 DEFAULT_MAX_AGE_DAYS = 45  # the slowest cron here is monthly
 
 
@@ -83,6 +87,42 @@ def branch_filters(text: str) -> list[list[str]]:
     for m in re.finditer(r"^\s+branches:\s*\n((?:\s+- .*\n)+)", block, re.M):
         lists.append(re.findall(r"-\s+['\"]?([\w./*-]+)", m.group(1)))
     return lists
+
+
+def unwrap_quotes(value: str) -> str:
+    """Drop one pair of quotes that wrap the whole value, never one that ends an inner string."""
+    value = value.strip()
+    return value[1:-1] if len(value) > 1 and value[0] == value[-1] and value[0] in "'\"" else value
+
+
+def job_conditions(text: str) -> dict[str, str | None]:
+    """Each job in the workflow with its job-level `if`, or None."""
+    match = re.search(r"^jobs:[ \t]*\n((?:(?:[ \t].*)?\n)*)", strip_comments(text) + "\n", re.M)
+    found: dict[str, str | None] = {}
+    current = None
+    for line in (match.group(1) if match else "").splitlines():
+        head = re.match(r"^  ([\w-]+):\s*$", line)
+        if head:
+            current = head.group(1)
+            found[current] = None
+        elif current and (cond := re.match(r"^    if:\s*(.+?)\s*$", line)):
+            found[current] = unwrap_quotes(re.sub(r"\s+#.*$", "", cond.group(1)))
+    return found
+
+
+def can_run_on(condition: str, event: str) -> bool:
+    """Whether a job-level `if` can be true for `event`.
+
+    Only `github.event_name` comparisons are evaluated. Any other term is assumed
+    true, so a condition this does not understand can never hide a job.
+    """
+    expr = re.sub(r"^\$\{\{\s*|\s*\}\}$", "", condition.strip())
+
+    def atom(text: str) -> bool:
+        match = EVENT_ATOM.fullmatch(text.strip())
+        return True if not match else (match.group(2) == event) == (match.group(1) == "==")
+
+    return any(all(atom(a) for a in clause.split("&&")) for clause in expr.split("||"))
 
 
 def platforms(text: str) -> set[str]:
@@ -158,6 +198,22 @@ def static_errors(root: Path, default_branch: str | None) -> list[str]:
         errors.append(f"{name}: runs only by manual dispatch; wire a trigger or add a reasoned exemption")
     for name in sorted(set(exempt_dispatch) - dispatch_only):
         errors.append(f"{POLICY}: dispatch-only exemption for {name} is stale or names no workflow")
+
+    exempt_pr_skip = policy.get("pr_skipped_jobs", {})
+    pr_skipped = {
+        f"{name}::{job}"
+        for name, text in workflows.items()
+        if "pull_request" in triggers(text)
+        for job, cond in job_conditions(text).items()
+        if cond and not can_run_on(cond, "pull_request")
+    }
+    for key in sorted(pr_skipped - set(exempt_pr_skip)):
+        errors.append(
+            f"{key}: job cannot run on pull_request, so its first run is after the change merges; "
+            "remove the condition or exempt it with a reason"
+        )
+    for key in sorted(set(exempt_pr_skip) - pr_skipped):
+        errors.append(f"{POLICY}: pull_request exemption for {key} is stale or names no skipped job")
 
     if default_branch:
         for name, text in workflows.items():
