@@ -38,6 +38,9 @@ pub use sampling::{Sampler, SamplingConfig};
 pub use types::{GenerateError, GenerateResult, StageTimings};
 
 #[cfg(test)]
+mod streaming_callback_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::layer_graph::CachedLayerGraph;
