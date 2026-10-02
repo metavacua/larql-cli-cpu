@@ -31,7 +31,7 @@ pub(super) fn backend_supports_fused_q4_pipeline(backend: &dyn ComputeBackend) -
 /// the lm_head reported for the chosen token.
 fn emit_token(
     tokens: &mut Vec<(String, f64)>,
-    on_token: &mut impl FnMut(u32, &str, f64),
+    on_token: &mut dyn FnMut(u32, &str, f64),
     id: u32,
     prediction: (String, f64),
 ) {
@@ -58,7 +58,7 @@ pub(super) fn generate_via_cpu_q4k(
     max_tokens: usize,
     index: &larql_vindex::VectorIndex,
     eos: &EosConfig,
-    on_token: &mut impl FnMut(u32, &str, f64),
+    on_token: &mut dyn FnMut(u32, &str, f64),
 ) -> GenerateResult {
     if max_tokens == 0 {
         return GenerateResult::empty_success();
@@ -93,7 +93,7 @@ fn generate_via_cpu_q4k_cached(
     index: &larql_vindex::VectorIndex,
     eos: &EosConfig,
     direct_matvec: bool,
-    on_token: &mut impl FnMut(u32, &str, f64),
+    on_token: &mut dyn FnMut(u32, &str, f64),
 ) -> GenerateResult {
     // ── Prefill ────────────────────────────────────────────────────
     let prefill_start = std::time::Instant::now();
@@ -258,7 +258,7 @@ fn generate_via_cpu_q4k_uncached(
     max_tokens: usize,
     index: &larql_vindex::VectorIndex,
     eos: &EosConfig,
-    on_token: &mut impl FnMut(u32, &str, f64),
+    on_token: &mut dyn FnMut(u32, &str, f64),
 ) -> GenerateResult {
     let prefill_start = std::time::Instant::now();
     let (first, _, _) = predict_q4k_timed(weights, tokenizer, token_ids, 5, index);
