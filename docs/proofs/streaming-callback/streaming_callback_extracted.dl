@@ -46,8 +46,15 @@ has_cb(f) :- flow(f, _).
 emits_tokens(f) :- push(f, "tokens", _).
 emits_tokens(f) :- call(f, g, _), fn(g, _, _, _), emits_tokens(g).
 
+// A function "invokes" the callback when it calls the parameter that receives
+// on_token, or forwards it to a function that does. Reaching a function is not
+// enough: an emitter that is handed on_token and never calls it streams nothing.
+.decl invokes(f:symbol)
+invokes(f) :- call(f, p, _), flow(f, p).
+invokes(f) :- passes(f, g, _), invokes(g).
+
 .decl silent_emit(entry:symbol, f:symbol, line:number)
-silent_emit(e, f, l) :- reach(e, f, _), push(f, "tokens", l), !has_cb(f).
+silent_emit(e, f, l) :- reach(e, f, _), push(f, "tokens", l), !invokes(f).
 
 .decl passes(c:symbol, g:symbol, line:number)
 passes(c, g, l) :- call(c, g, l), arg_ident(c, g, l, _, p), flow(c, p).
@@ -57,4 +64,4 @@ dropped_call(c, g, l) :- call(c, g, l), flow(c, _), fn(g, _, _, _), emits_tokens
 .decl test_backend(testfn:symbol, ty:symbol)       // what the failing test passes as `backend`
 test_backend(t, ty) :- bt(t, "backend", ty), t = "generate_streaming_callback_fires_per_token".
 
-.output takes  .output test_backend  .output silent_emit  .output dropped_call  .output has_cb
+.output takes  .output test_backend  .output silent_emit  .output dropped_call  .output invokes

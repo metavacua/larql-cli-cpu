@@ -9,6 +9,15 @@ W=${2:-$(mktemp -d)}; rm -rf "$W/facts" "$W/out"; mkdir -p "$W/out"
 python3 "$HERE/extract_facts.py" "$REPO" "$W/facts" || exit 2
 souffle -F "$W/facts" -D "$W/out" "$HERE/streaming_callback_extracted.dl" || exit 2
 python3 "$HERE/crosscheck_astgrep.py" "$REPO" "$W/facts" || { echo "cross-check failed: extraction is not trustworthy"; exit 2; }
+# Non-vacuity: a guard the extractor did not recognise leaves `takes` empty, so
+# nothing is reachable and nothing can be violated. That is a tooling failure,
+# not a pass.
+if [ ! -s "$W/out/takes.csv" ]; then
+  echo "NOT CHECKED: no guarded fallback branch was extracted (guard shape changed?)"; exit 2
+fi
+if ! grep -q "$(printf '\ttokens\t')" "$W/facts/push.facts"; then
+  echo "NOT CHECKED: no token-emitting push site was extracted"; exit 2
+fi
 echo "takes:";        cat "$W/out/takes.csv"
 n=$(cat "$W/out/silent_emit.csv" "$W/out/dropped_call.csv" | wc -l)
 if [ "$n" -ne 0 ]; then

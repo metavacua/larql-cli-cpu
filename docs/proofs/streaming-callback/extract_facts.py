@@ -21,6 +21,8 @@ G = "crates/larql-inference/src/layer_graph/generate"
 FILES = [f"{G}/gpu/mod.rs", f"{G}/cpu.rs", f"{G}/mod.rs",
          "crates/larql-compute/src/cpu/mod.rs", "crates/larql-compute/src/lib.rs",
          "crates/larql-inference/src/vindex/kquant_forward/generation.rs"]
+if os.environ.get("STREAMING_GATE_FILES"):  # test hook: parse these repo-relative files instead
+    FILES = os.environ["STREAMING_GATE_FILES"].split(",")
 P = Parser(Language(tsr.language()))
 F = {k: [] for k in "fn param call arg_ident push let_call ctor cap_arm requires guard guard_arg arg_line".split()}
 

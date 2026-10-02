@@ -54,6 +54,11 @@ jobs:
       # Soufflé is not in Ubuntu's archive, so it comes from the nixos-26.05
       # binary cache (pinned channel), nothing is compiled on the runner.
       - uses: cachix/install-nix-action@v31
+      - name: Test the gate itself (a gate that cannot fail, or passes vacuously, is worse than none)
+        shell: bash
+        run: |
+          nix shell github:NixOS/nixpkgs/nixos-26.05#souffle -c \
+            docs/proofs/streaming-callback/run_tests.sh
       - name: Run the gate
         # `shell: bash` (not the default `bash -e`) turns on pipefail, so the
         # gate's exit status survives the pipe into tee.

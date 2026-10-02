@@ -39,6 +39,16 @@ for path in files:
     ts = sorted({int(r[2]) for r in rows("call") if r[1] == "generate_via_cpu_q4k" and fn_file.get(r[0]) == path})
     check(f"calls to generate_via_cpu_q4k in {path}", ag("generate_via_cpu_q4k($$$A)", path), ts)
 
+# (d) the guard: every `!G(..)` of a capability-guard function G is extracted as a guard fact, and vice versa
+guards = collections.defaultdict(set)            # guardfn -> {(file, line)}
+for r in rows("guard"):
+    guards[r[2]].add((fn_file[r[0]], int(r[1])))
+for g in sorted({r[0] for r in rows("requires")}):
+    found = {(path, ln) for path in files for ln in ag(f"!{g}($$$A)", path)}
+    ok = all(any(p == fp and l <= fl <= l + 3 for fp, fl in guards[g]) for p, l in found) and \
+         all(any(p == fp and l <= fl <= l + 3 for p, l in found) for fp, fl in guards[g])
+    check(f"guards `!{g}(..)`: ast-grep and tree-sitter agree", ok, True)
+
 # (c) every argument identifier `on_token` sits at a line where ast-grep also finds `on_token`
 by_file = collections.defaultdict(set)
 for r in rows("arg_line"):
