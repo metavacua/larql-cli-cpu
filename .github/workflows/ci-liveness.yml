@@ -61,9 +61,11 @@ jobs:
 
   runs:
     name: scheduled workflows have fired
-    # Pull requests cannot say anything about run history, and a workflow added
-    # in the same change has none yet.
-    if: github.event_name != 'pull_request'
+    # Runs on pull requests too. A workflow added in the same change has no
+    # history yet and is given a grace period, so nothing here needs the change
+    # to merge first, and the job's own token permissions (actions: read) are
+    # exercised before merge, not after. scripts/check_ci_liveness.py rejects a
+    # job in a pull-request workflow that is gated off pull requests.
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
