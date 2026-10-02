@@ -1,0 +1,83 @@
+# Per-change tests for the contract-leaf crates that no per-crate workflow covers.
+#
+# larql-execution, larql-vindex-spec and larql-router-protocol are depended on
+# by most of the workspace and have tests of their own, but each was exercised
+# only indirectly (or only on Linux, via the temporary extraction-check). That
+# is the gap scripts/check_ci_liveness.py reports: no full per-change
+# `cargo test` on Windows.
+#
+# They are grouped in one workflow because they are small and dependency-light;
+# a crate that grows a real surface should get its own file, as larql-core did.
+
+name: leaf-crates
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/larql-execution/**'
+      - 'crates/larql-vindex-spec/**'
+      - 'crates/larql-router-protocol/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/leaf-crates.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/larql-execution/**'
+      - 'crates/larql-vindex-spec/**'
+      - 'crates/larql-router-protocol/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/leaf-crates.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: test · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest", "windows-latest"]' || '["ubuntu-latest", "windows-latest", "macos-14"]') }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Activate the pinned Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Install protoc (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install protoc -y --no-progress
+
+      - name: Cache cargo registry (downloads only, never target/)
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-reg2-leaf-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-reg2-leaf-
+
+      - name: Format check
+        run: cargo fmt -p larql-execution -p larql-vindex-spec -p larql-router-protocol -- --check
+
+      - name: Clippy
+        run: cargo clippy --locked -p larql-execution -p larql-vindex-spec -p larql-router-protocol --all-targets --no-deps -- -D warnings
+
+      - name: Tests (execution, vindex-spec)
+        run: cargo test --locked -p larql-execution -p larql-vindex-spec
+
+      # `quic` is the feature `make larql-router-protocol-test` exercises.
+      - name: Tests (router-protocol, quic)
+        run: cargo test --locked -p larql-router-protocol --features quic
