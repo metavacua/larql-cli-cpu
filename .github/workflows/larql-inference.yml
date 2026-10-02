@@ -176,3 +176,11 @@ jobs:
 
       - name: Coverage summary
         run: cargo llvm-cov --package larql-inference --summary-only
+
+      # TEMPORARY diagnostic (revert after reading): which lines of the
+      # generate module are uncovered? Reuses the profile data from the step
+      # above, so the tests are not re-run.
+      - name: Uncovered lines in layer_graph/generate (diagnostic)
+        run: |
+          cargo llvm-cov report --show-missing-lines 2>&1 | tee /tmp/missing.txt | head -0
+          grep -E "layer_graph/generate/(cpu|mod|gpu/mod)\.rs" /tmp/missing.txt | grep -v "^ *[0-9]" || true
