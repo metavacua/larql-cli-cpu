@@ -450,6 +450,11 @@ mod tests {
     use super::*;
     use crate::test_utils::Q4KTestFixtures;
 
+    /// Callback for tests that do not look at the stream. A named function,
+    /// not a closure per call site: a closure that a test never reaches (the
+    /// zero-token test) would count as an uncovered function.
+    fn ignore_token(_: u32, _: &str, _: f64) {}
+
     /// `generate_via_cpu_q4k` routes through `_cached` when
     /// `supports_cached_decode` holds. On the Q4_K synthetic fixture,
     /// the Gemma 3-style arch satisfies the cached-decode contract, so
@@ -469,7 +474,7 @@ mod tests {
             4,
             &fx.index,
             &eos,
-            &mut |_, _, _| {},
+            &mut ignore_token,
         );
         assert!(
             result.error.is_none(),
@@ -500,7 +505,7 @@ mod tests {
             0,
             &fx.index,
             &eos,
-            &mut |_, _, _| {},
+            &mut ignore_token,
         );
         assert!(result.tokens.is_empty());
         assert!(result.error.is_none());
@@ -656,7 +661,7 @@ mod uncached_path_tests {
             3,
             &fx.index,
             &eos,
-            &mut |_, _, _| {},
+            &mut ignore_token,
         );
         // Either succeeds and produces tokens, or returns a typed
         // error — both are valid (no panic, no NaN propagation).
@@ -683,7 +688,7 @@ mod uncached_path_tests {
             1,
             &fx.index,
             &eos,
-            &mut |_, _, _| {},
+            &mut ignore_token,
         );
         assert!(result.error.is_none(), "expected success");
         // With max_tokens=1, we emit the seed and skip the decode loop.
@@ -708,7 +713,7 @@ mod uncached_path_tests {
             10,
             &fx.index,
             &eos,
-            &mut |_, _, _| {},
+            &mut ignore_token,
         );
         assert!(result.error.is_none(), "EOS-stop must be a success");
         // First token is emitted before the EOS check; no decode steps run.
@@ -741,7 +746,7 @@ mod uncached_path_tests {
             10,
             &fx.index,
             &eos,
-            &mut |_, _, _| {},
+            &mut ignore_token,
         );
         assert!(result.error.is_none());
         assert_eq!(result.tokens.len(), 1);
