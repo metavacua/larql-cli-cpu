@@ -1,0 +1,60 @@
+// Same claim as streaming_callback.dl, but EVERY base fact below is produced by
+// extract_facts.py (tree-sitter-rust) from the source at the pinned commit.
+// Nothing about specific functions is written in this file: the rules are generic.
+// Only convention: a parameter named `on_token` is a callback source.
+
+.decl fn(f:symbol, file:symbol, line:number, in_test:number)
+.decl param(f:symbol, pos:number, name:symbol)
+.decl call(caller:symbol, callee:symbol, line:number)
+.decl arg_ident(caller:symbol, callee:symbol, line:number, pos:number, ident:symbol)
+.decl push(f:symbol, recv:symbol, line:number)
+.decl let_call(f:symbol, var:symbol, callee:symbol)
+.decl ctor(f:symbol, ty:symbol)
+.decl cap_arm(ty:symbol, cap:symbol)
+.decl requires(f:symbol, cap:symbol)
+.decl guard(f:symbol, line:number, guardfn:symbol, callee:symbol)
+.decl guard_arg(f:symbol, line:number, guardfn:symbol, pos:number, ident:symbol)
+.input fn  .input param  .input call  .input arg_ident  .input push
+.input let_call  .input ctor  .input cap_arm  .input requires  .input guard  .input guard_arg
+
+// ── which concrete backend type can a value have ───────────────────────
+.decl returns_type(f:symbol, ty:symbol)          // f may construct / return ty
+returns_type(f, t) :- ctor(f, t).
+returns_type(f, t) :- call(f, g, _), fn(g, _, _, _), returns_type(g, t).
+.decl bt(f:symbol, var:symbol, ty:symbol)        // variable `var` in f may have type ty
+bt(f, v, t) :- let_call(f, v, c), returns_type(c, t).
+bt(g, p, t) :- bt(f, v, t), arg_ident(f, g, _, pos, v), param(g, pos, p).
+
+// ── the guard: `!G(backend)` is true when ty lacks a capability G requires ─
+.decl lacks(g:symbol, ty:symbol)
+lacks(g, t) :- requires(g, c), cap_arm(t, _), !cap_arm(t, c).
+.decl takes(f:symbol, callee:symbol, ty:symbol)
+takes(f, callee, t) :- guard(f, l, g, callee), guard_arg(f, l, g, _, v), bt(f, v, t), lacks(g, t).
+
+.decl reach(entry:symbol, f:symbol, ty:symbol)
+reach(e, g, t) :- takes(e, g, t).
+reach(e, h, t) :- reach(e, g, t), call(g, h, _), fn(h, _, _, _).
+
+// ── does the callback value reach function f? ────────────────────────────
+.decl flow(f:symbol, p:symbol)
+flow(f, p) :- param(f, _, p), p = "on_token".
+flow(g, q) :- flow(f, p), arg_ident(f, g, _, pos, p), param(g, pos, q).
+.decl has_cb(f:symbol)
+has_cb(f) :- flow(f, _).
+
+.decl emits_tokens(f:symbol)
+emits_tokens(f) :- push(f, "tokens", _).
+emits_tokens(f) :- call(f, g, _), fn(g, _, _, _), emits_tokens(g).
+
+.decl silent_emit(entry:symbol, f:symbol, line:number)
+silent_emit(e, f, l) :- reach(e, f, _), push(f, "tokens", l), !has_cb(f).
+
+.decl passes(c:symbol, g:symbol, line:number)
+passes(c, g, l) :- call(c, g, l), arg_ident(c, g, l, _, p), flow(c, p).
+.decl dropped_call(caller:symbol, callee:symbol, line:number)
+dropped_call(c, g, l) :- call(c, g, l), flow(c, _), fn(g, _, _, _), emits_tokens(g), !passes(c, g, l).
+
+.decl test_backend(testfn:symbol, ty:symbol)       // what the failing test passes as `backend`
+test_backend(t, ty) :- bt(t, "backend", ty), t = "generate_streaming_callback_fires_per_token".
+
+.output takes  .output test_backend  .output silent_emit  .output dropped_call  .output has_cb
