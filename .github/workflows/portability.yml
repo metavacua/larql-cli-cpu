@@ -61,6 +61,70 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: 'qemu-aarch64 -cpu cortex-a53 -L /'
         run: cargo test --locked -p larql-compute --no-default-features --target aarch64-unknown-linux-gnu --lib q4_matvec
 
+  # The run-time CPU floor for x86_64. The aarch64 job above runs the kernels on
+  # a CPU without dotprod; this is the same control for x86, where every hosted
+  # runner has AVX2 and the scalar fallback therefore never executes anywhere.
+  #
+  # Rust's run-time detection cannot be overridden by an environment variable
+  # (RUST_STD_DETECT_UNSTABLE and glibc tunables both leave
+  # is_x86_feature_detected! unchanged), so the CPU is emulated: qemu-user with
+  # a CPU model that really lacks the feature, as for cortex-a53 above.
+  #
+  #   qemu64       no SSE4.2, no AVX    the x86-64 baseline
+  #   Nehalem      SSE4.2, no AVX
+  #   SandyBridge  AVX, no AVX2, no FMA the most common real-world gap
+  #   native       AVX2                 positive control: the fast kernel runs
+  #
+  # Each leg declares the kernel class it expects (LARQL_EXPECT_Q4K_MATVEC_KERNEL),
+  # so landing on the wrong CPU, or a dispatch that stops choosing the fallback,
+  # is a failure and not a pass. The native leg also requires AVX2
+  # (LARQL_REQUIRE_CPU_FEATURES), so the AVX2-vs-scalar parity test cannot skip
+  # there. See crates/larql-compute/.../tests/cpu_floor.rs.
+  x86-cpu-floor:
+    name: x86_64 kernels on ${{ matrix.cpu }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cpu: native
+            kernel: avx2
+            require: avx2
+          - cpu: qemu64
+            kernel: scalar
+            require: ''
+          - cpu: Nehalem
+            kernel: scalar
+            require: ''
+          - cpu: SandyBridge
+            kernel: scalar
+            require: ''
+    env:
+      LARQL_EXPECT_Q4K_MATVEC_KERNEL: ${{ matrix.kernel }}
+      LARQL_REQUIRE_CPU_FEATURES: ${{ matrix.require }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Activate the pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Install OpenBLAS and QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopenblas-dev pkg-config qemu-user
+      - name: Run test binaries under the CPU model
+        if: matrix.cpu != 'native'
+        run: echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=qemu-x86_64 -cpu ${{ matrix.cpu }} -L /" >> "$GITHUB_ENV"
+      # The explicit triple keeps build scripts on the host and applies the
+      # runner only to the test binary. A filter that matches nothing exits 0,
+      # so require that the control actually ran.
+      - name: The leg is on the CPU it claims
+        run: |
+          set -o pipefail
+          cargo test --locked -p larql-compute --no-default-features --target x86_64-unknown-linux-gnu --lib kernel_class_is_the_one_this_leg_expects 2>&1 | tee control.log
+          grep -Eq 'test result: ok\. 1 passed' control.log
+      - name: Quantized kernel parity on this CPU
+        run: cargo test --locked -p larql-compute --no-default-features --target x86_64-unknown-linux-gnu --lib q4k_q8k_dot
+
   cross-plugin:
     name: x86_64 plugin fixture from an ARM64 host
     runs-on: macos-14
