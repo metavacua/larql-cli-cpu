@@ -24,23 +24,19 @@ pub(super) fn backend_supports_fused_q4_pipeline(backend: &dyn ComputeBackend) -
     backend.supports(Capability::PrefillQ4) && backend.supports(Capability::DecodeToken)
 }
 
-/// Probability reported for every token on the CPU path: it takes the greedy
-/// argmax and keeps no distribution, so the value is a placeholder, not a
-/// measured probability.
-const CPU_TOKEN_PROB: f64 = 1.0;
-
 /// Record one emitted token and stream it. The single place the CPU path
 /// appends to `tokens`, so a token can never be returned without having been
 /// streamed (`generate_streaming`'s contract: one `on_token` per token,
-/// including the first).
+/// including the first). `prediction` is the `(text, softmax probability)`
+/// the lm_head reported for the chosen token.
 fn emit_token(
     tokens: &mut Vec<(String, f64)>,
     on_token: &mut impl FnMut(u32, &str, f64),
     id: u32,
-    text: String,
+    prediction: (String, f64),
 ) {
-    on_token(id, &text, CPU_TOKEN_PROB);
-    tokens.push((text, CPU_TOKEN_PROB));
+    on_token(id, &prediction.0, prediction.1);
+    tokens.push(prediction);
 }
 
 /// CPU Q4K generate path. For dense single-stream architectures (no
@@ -139,7 +135,7 @@ fn generate_via_cpu_q4k_cached(
 
     let mut next_id = match (first.token_ids.first(), first.predictions.first()) {
         (Some(&id), Some(first_pred)) => {
-            emit_token(&mut tokens, on_token, id, first_pred.0.clone());
+            emit_token(&mut tokens, on_token, id, first_pred.clone());
             if eos.is_eos_with_tokenizer(id, &first_pred.0, tokenizer) {
                 return GenerateResult {
                     tokens,
@@ -221,13 +217,9 @@ fn generate_via_cpu_q4k_cached(
             Some(&id) => id,
             None => break,
         };
-        let tok = result
-            .predictions
-            .first()
-            .map(|p| p.0.clone())
-            .unwrap_or_default();
-        let stop = eos.is_eos_with_tokenizer(id, &tok, tokenizer);
-        emit_token(&mut tokens, on_token, id, tok);
+        let prediction = result.predictions.first().cloned().unwrap_or_default();
+        let stop = eos.is_eos_with_tokenizer(id, &prediction.0, tokenizer);
+        emit_token(&mut tokens, on_token, id, prediction);
         if stop {
             break;
         }
@@ -281,7 +273,7 @@ fn generate_via_cpu_q4k_uncached(
 
     let mut ids = token_ids.to_vec();
     if let (Some(&id), Some(first_pred)) = (first.token_ids.first(), first.predictions.first()) {
-        emit_token(&mut tokens, on_token, id, first_pred.0.clone());
+        emit_token(&mut tokens, on_token, id, first_pred.clone());
         let stop = eos.is_eos_with_tokenizer(id, &first_pred.0, tokenizer);
         ids.push(id);
         if stop {
@@ -315,13 +307,9 @@ fn generate_via_cpu_q4k_uncached(
 
         match result.token_ids.first() {
             Some(&id) => {
-                let tok = result
-                    .predictions
-                    .first()
-                    .map(|p| p.0.clone())
-                    .unwrap_or_default();
-                let stop = eos.is_eos_with_tokenizer(id, &tok, tokenizer);
-                emit_token(&mut tokens, on_token, id, tok);
+                let prediction = result.predictions.first().cloned().unwrap_or_default();
+                let stop = eos.is_eos_with_tokenizer(id, &prediction.0, tokenizer);
+                emit_token(&mut tokens, on_token, id, prediction);
                 ids.push(id);
                 if stop {
                     break;
