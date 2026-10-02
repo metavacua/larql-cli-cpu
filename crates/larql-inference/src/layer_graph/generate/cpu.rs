@@ -442,6 +442,13 @@ where
     }
 }
 
+/// Callback for tests that do not look at the stream. A named function, not a
+/// closure per call site: a closure that a test never reaches (the zero-token
+/// test) would count as an uncovered function. Visible to every test module
+/// below through `use super::*`.
+#[cfg(test)]
+fn ignore_token(_: u32, _: &str, _: f64) {}
+
 #[cfg(test)]
 mod streaming_tests;
 
@@ -449,11 +456,6 @@ mod streaming_tests;
 mod tests {
     use super::*;
     use crate::test_utils::Q4KTestFixtures;
-
-    /// Callback for tests that do not look at the stream. A named function,
-    /// not a closure per call site: a closure that a test never reaches (the
-    /// zero-token test) would count as an uncovered function.
-    fn ignore_token(_: u32, _: &str, _: f64) {}
 
     /// `generate_via_cpu_q4k` routes through `_cached` when
     /// `supports_cached_decode` holds. On the Q4_K synthetic fixture,
