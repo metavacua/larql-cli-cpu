@@ -24,6 +24,25 @@ pub(super) fn backend_supports_fused_q4_pipeline(backend: &dyn ComputeBackend) -
     backend.supports(Capability::PrefillQ4) && backend.supports(Capability::DecodeToken)
 }
 
+/// Probability reported for every token on the CPU path: it takes the greedy
+/// argmax and keeps no distribution, so the value is a placeholder, not a
+/// measured probability.
+const CPU_TOKEN_PROB: f64 = 1.0;
+
+/// Record one emitted token and stream it. The single place the CPU path
+/// appends to `tokens`, so a token can never be returned without having been
+/// streamed (`generate_streaming`'s contract: one `on_token` per token,
+/// including the first).
+fn emit_token(
+    tokens: &mut Vec<(String, f64)>,
+    on_token: &mut impl FnMut(u32, &str, f64),
+    id: u32,
+    text: String,
+) {
+    on_token(id, &text, CPU_TOKEN_PROB);
+    tokens.push((text, CPU_TOKEN_PROB));
+}
+
 /// CPU Q4K generate path. For dense single-stream architectures (no
 /// hybrid MoE, no cross-layer KV sharing) this uses the KV-cached
 /// driver in [`crate::vindex::predict_kquant_prefill`] +
@@ -32,6 +51,10 @@ pub(super) fn backend_supports_fused_q4_pipeline(backend: &dyn ComputeBackend) -
 /// Falls back to the original O(N²) per-step `predict_kquant_hidden`
 /// loop for hybrid MoE (Gemma 4 26B A4B) and Gemma 4 E2B
 /// (cross-layer KV sharing).
+///
+/// `on_token(id, text, prob)` is invoked once for every token appended to the
+/// result, the seed from prefill included, on both variants (see
+/// [`emit_token`]); pass `&mut |_, _, _| {}` when streaming is not wanted.
 pub(super) fn generate_via_cpu_q4k(
     weights: &mut ModelWeights,
     tokenizer: &tokenizers::Tokenizer,
@@ -39,6 +62,7 @@ pub(super) fn generate_via_cpu_q4k(
     max_tokens: usize,
     index: &larql_vindex::VectorIndex,
     eos: &EosConfig,
+    on_token: &mut impl FnMut(u32, &str, f64),
 ) -> GenerateResult {
     if max_tokens == 0 {
         return GenerateResult::empty_success();
@@ -47,10 +71,12 @@ pub(super) fn generate_via_cpu_q4k(
     if crate::vindex::supports_cached_decode(weights) {
         let use_direct = crate::vindex::supports_direct_matvec_decode(weights, index);
         generate_via_cpu_q4k_cached(
-            weights, tokenizer, token_ids, max_tokens, index, eos, use_direct,
+            weights, tokenizer, token_ids, max_tokens, index, eos, use_direct, on_token,
         )
     } else {
-        generate_via_cpu_q4k_uncached(weights, tokenizer, token_ids, max_tokens, index, eos)
+        generate_via_cpu_q4k_uncached(
+            weights, tokenizer, token_ids, max_tokens, index, eos, on_token,
+        )
     }
 }
 
@@ -71,6 +97,7 @@ fn generate_via_cpu_q4k_cached(
     index: &larql_vindex::VectorIndex,
     eos: &EosConfig,
     direct_matvec: bool,
+    on_token: &mut impl FnMut(u32, &str, f64),
 ) -> GenerateResult {
     // ── Prefill ────────────────────────────────────────────────────
     let prefill_start = std::time::Instant::now();
@@ -112,7 +139,7 @@ fn generate_via_cpu_q4k_cached(
 
     let mut next_id = match (first.token_ids.first(), first.predictions.first()) {
         (Some(&id), Some(first_pred)) => {
-            tokens.push((first_pred.0.clone(), 1.0));
+            emit_token(&mut tokens, on_token, id, first_pred.0.clone());
             if eos.is_eos_with_tokenizer(id, &first_pred.0, tokenizer) {
                 return GenerateResult {
                     tokens,
@@ -200,7 +227,7 @@ fn generate_via_cpu_q4k_cached(
             .map(|p| p.0.clone())
             .unwrap_or_default();
         let stop = eos.is_eos_with_tokenizer(id, &tok, tokenizer);
-        tokens.push((tok, 1.0));
+        emit_token(&mut tokens, on_token, id, tok);
         if stop {
             break;
         }
@@ -239,6 +266,7 @@ fn generate_via_cpu_q4k_uncached(
     max_tokens: usize,
     index: &larql_vindex::VectorIndex,
     eos: &EosConfig,
+    on_token: &mut impl FnMut(u32, &str, f64),
 ) -> GenerateResult {
     let prefill_start = std::time::Instant::now();
     let (first, _, _) = predict_q4k_timed(weights, tokenizer, token_ids, 5, index);
@@ -253,7 +281,7 @@ fn generate_via_cpu_q4k_uncached(
 
     let mut ids = token_ids.to_vec();
     if let (Some(&id), Some(first_pred)) = (first.token_ids.first(), first.predictions.first()) {
-        tokens.push((first_pred.0.clone(), 1.0));
+        emit_token(&mut tokens, on_token, id, first_pred.0.clone());
         let stop = eos.is_eos_with_tokenizer(id, &first_pred.0, tokenizer);
         ids.push(id);
         if stop {
@@ -293,7 +321,7 @@ fn generate_via_cpu_q4k_uncached(
                     .map(|p| p.0.clone())
                     .unwrap_or_default();
                 let stop = eos.is_eos_with_tokenizer(id, &tok, tokenizer);
-                tokens.push((tok, 1.0));
+                emit_token(&mut tokens, on_token, id, tok);
                 ids.push(id);
                 if stop {
                     break;
@@ -450,6 +478,7 @@ mod tests {
             4,
             &fx.index,
             &eos,
+            &mut |_, _, _| {},
         );
         assert!(
             result.error.is_none(),
@@ -480,6 +509,7 @@ mod tests {
             0,
             &fx.index,
             &eos,
+            &mut |_, _, _| {},
         );
         assert!(result.tokens.is_empty());
         assert!(result.error.is_none());
@@ -635,6 +665,7 @@ mod uncached_path_tests {
             3,
             &fx.index,
             &eos,
+            &mut |_, _, _| {},
         );
         // Either succeeds and produces tokens, or returns a typed
         // error — both are valid (no panic, no NaN propagation).
@@ -661,6 +692,7 @@ mod uncached_path_tests {
             1,
             &fx.index,
             &eos,
+            &mut |_, _, _| {},
         );
         assert!(result.error.is_none(), "expected success");
         // With max_tokens=1, we emit the seed and skip the decode loop.
@@ -685,6 +717,7 @@ mod uncached_path_tests {
             10,
             &fx.index,
             &eos,
+            &mut |_, _, _| {},
         );
         assert!(result.error.is_none(), "EOS-stop must be a success");
         // First token is emitted before the EOS check; no decode steps run.
@@ -717,6 +750,7 @@ mod uncached_path_tests {
             10,
             &fx.index,
             &eos,
+            &mut |_, _, _| {},
         );
         assert!(result.error.is_none());
         assert_eq!(result.tokens.len(), 1);
