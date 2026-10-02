@@ -84,7 +84,9 @@ def walk_fn(fn, name, path):
     pnames = []
     for p in params.named_children:
         if p.type == "parameter":
-            pnames.append(idents(p.child_by_field_name("pattern"))[0])
+            # `_` and similar patterns bind no identifier; keep the position with a placeholder
+            ids = idents(p.child_by_field_name("pattern"))
+            pnames.append(ids[0] if ids else f"_{len(pnames)}")
     for i, p in enumerate(pnames): F["param"].append((name, i, p))
     F["fn"].append((name, path, line(fn), int(in_cfg_test(fn))))
     body = fn.child_by_field_name("body")

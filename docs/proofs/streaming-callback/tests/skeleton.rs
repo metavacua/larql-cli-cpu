@@ -36,6 +36,9 @@ fn emit(tokens: &mut Vec<(String, f64)>, on_token: &mut impl FnMut(u32, &str, f6
     tokens.push(p);
 }
 
+// Wildcard parameters carry no identifier; the extractor must keep positions aligned.
+fn ignore_token(_: u32, _: &str, _: f64) {}
+
 #[cfg(test)]
 mod tests {
     #[test]

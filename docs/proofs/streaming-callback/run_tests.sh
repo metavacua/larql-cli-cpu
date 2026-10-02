@@ -28,15 +28,17 @@ mutant("callback_replaced", ("emit(&mut tokens, on_token, 1,", "emit(&mut tokens
 # aliasing: the callback is forwarded under another name (a known, conservative false positive)
 mutant("callback_aliased", ("emit(&mut tokens, on_token, 1,", "let cb = on_token; emit(&mut tokens, cb, 1,"))
 PY
-expect() {  # name expected-exit
+expect() {  # name expected-exit expected-message-regex
   rm -rf "$W/w-$1"
   STREAMING_GATE_FILES="skel.rs" "$HERE/run_gate.sh" "$W/$1" "$W/w-$1" >"$W/$1.out" 2>&1; got=$?
-  if [ "$got" = "$2" ]; then echo "OK   $1: exit $got"; else echo "FAIL $1: expected exit $2, got $got"; sed 's/^/     | /' "$W/$1.out" | tail -12; fails=$((fails+1)); fi
+  # the exit code alone is not enough: a crash also exits 2, and must not pass as "vacuity detected"
+  if [ "$got" = "$2" ] && grep -Eq "$3" "$W/$1.out"; then echo "OK   $1: exit $got, \"$(grep -Eo "$3" "$W/$1.out" | head -1)\""
+  else echo "FAIL $1: expected exit $2 with /$3/, got exit $got"; sed 's/^/     | /' "$W/$1.out" | tail -12; fails=$((fails+1)); fi
 }
-expect fixed 0                    # property holds
-expect bug 1                      # violation reported
-expect guard_shape_unrecognised 2 # vacuity is an error, not a pass
-expect callback_never_invoked 1   # passing the callback is not calling it
-expect callback_replaced 1        # dropped_call
-expect callback_aliased 1         # conservative: aliasing is flagged for review
+expect fixed 0 'OK: on_token reaches'                              # property holds
+expect bug 1 'VIOLATION'                                           # violation reported
+expect guard_shape_unrecognised 2 'NOT CHECKED: no guarded'        # vacuity is an error, not a pass
+expect callback_never_invoked 1 'generate_streaming.emit.[0-9]+'  # the emitter is named: passing the callback is not calling it
+expect callback_replaced 1 'VIOLATION'                             # dropped_call
+expect callback_aliased 1 'VIOLATION'                              # conservative: aliasing is flagged for review
 exit $((fails > 0))
