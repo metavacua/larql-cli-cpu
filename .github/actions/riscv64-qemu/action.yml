@@ -1,0 +1,132 @@
+# Cross-compile + run-under-QEMU setup for riscv64gc-unknown-linux-gnu on an
+# x86_64 ubuntu runner. Single source for `target-matrix.yml` (full binary
+# gate, dispatch/cron) and `riscv64-gate.yml` (narrow gate on every
+# larql-cli / plugin-fixture change, issue #13), so the two cannot drift.
+#
+# The three pieces of environment that are easy to lose, each found by a
+# separate red CI run, are all set below and must survive any rewrite:
+#
+#   * the plugin fixture is a HOST cdylib, so native x86_64 OpenBLAS is
+#     needed as well as the riscv64 one (issue #7);
+#   * the runner's `-L <sysroot>` reaches only the test process. A test that
+#     spawns the riscv64 `larql` binary starts it through binfmt_misc with no
+#     sysroot, so its loader cannot find libstdc++.so.6. `QEMU_LD_PREFIX` is
+#     honoured by every qemu-user instance, children included (issue #7,
+#     probe run 36807867138: red without it, green with it);
+#   * the ports archive needs the -updates and -security pockets as well as
+#     the base suite, or libopenblas' implementation packages are
+#     "not installable".
+
+name: riscv64 QEMU toolchain
+description: Install the riscv64gc cross toolchain, QEMU user-mode emulation and OpenBLAS, and export the cargo runner environment.
+
+runs:
+  using: composite
+  steps:
+    # riscv64gc-unknown-linux-gnu is a cross target from this runner's
+    # native x86_64-unknown-linux-gnu host. Plain `rustup target add`,
+    # not `dtolnay/rust-toolchain@stable` - see the header of target-matrix.yml: the
+    # same toolchain-pin mismatch confirmed broken on the windows-gnu
+    # leg applies identically here.
+    - name: Add rustup target (riscv64gc-unknown-linux-gnu)
+      shell: bash
+      run: rustup target add riscv64gc-unknown-linux-gnu
+
+    # gcc-riscv64-linux-gnu/libc6-dev-riscv64-cross: the cross-compiler
+    # and target sysroot rustc's riscv64gc-unknown-linux-gnu linker
+    # needs. qemu-user-static - NOT the docs page's stated
+    # qemu-system-riscv64, which is a full-system emulator and does not
+    # provide qemu-riscv64-static at all (confirmed directly against the
+    # actual .deb file listing, not just the docs prose) - is what
+    # actually ships /usr/bin/qemu-riscv64-static, the user-mode
+    # emulator that runs a riscv64 ELF binary directly on this x86_64
+    # runner.
+    - name: Install riscv64 cross-toolchain + QEMU user-mode emulation
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          gcc-riscv64-linux-gnu g++-riscv64-linux-gnu libc6-dev-riscv64-cross \
+          qemu-user-static
+
+    # Confirmed empirically (2026-09-30 CI run, after every earlier
+    # riscv64gc blocker was fixed): `larql-continuation-fixture` - a
+    # dylib test fixture some larql-cli test dynamically loads - is
+    # compiled for the HOST (x86_64-unknown-linux-gnu sysroot, plain
+    # `cc`, `-m64`) even inside an otherwise riscv64-targeted cargo
+    # invocation, because it must run natively to be loadable. It still
+    # depends on larql-compute, so it still needs a native x86_64
+    # OpenBLAS - the riscv64-arch package installed below does not
+    # cover it. Every other job in this file installs this; this job
+    # is the one place cross-compiling for a non-native target made it
+    # easy to forget the native side still needs it too.
+    - name: Install OpenBLAS (native, x86_64 - for host-built plugin fixtures)
+      shell: bash
+      run: |
+        sudo apt-get install -y libopenblas-dev pkg-config
+
+    # riscv64 is an Ubuntu "ports" architecture (unlike i386, which sat
+    # on the main archive), so its packages live under ports.ubuntu.com,
+    # not the default mirrors - `dpkg --add-architecture` alone is not
+    # enough here.
+    #
+    # Confirmed empirically (2026-09-30 CI run): a plain `apt-get
+    # update` after adding riscv64 as a foreign architecture does NOT
+    # just pick up the new ports-riscv64.list source - it also tries
+    # every OTHER already-configured source (azure.archive.ubuntu.com,
+    # security.ubuntu.com, the runner's default main-archive mirrors)
+    # for a riscv64 index too, since none of those source entries
+    # restrict `Architectures:` to amd64. Those mirrors do not host
+    # riscv64 at all, so that update fails outright with a 404 on every
+    # one of them before ever reaching the ports.ubuntu.com fetch that
+    # would actually succeed. The fix is to scope the update to just
+    # the newly-added list file, leaving every other source's
+    # already-cached (amd64) indices untouched.
+    #
+    # Confirmed empirically (second 2026-09-30 CI run, after the fix
+    # above landed): the scoped update itself then succeeds, but
+    # `libopenblas-dev:riscv64`'s real implementation packages
+    # (libopenblas-pthread-dev/-openmp-dev/-serial-dev, its Depends
+    # alternatives) came back "not installable" even though they do
+    # exist for riscv64 on Ubuntu noble (verified directly against
+    # packages.ubuntu.com/noble/riscv64/libopenblas-pthread-dev). The
+    # bug was narrower than "riscv64 lacks this package": the source
+    # line only added the bare `noble` suite/pocket, missing
+    # `noble-updates` and `noble-security` - the same pocket set every
+    # other source on this runner already carries for amd64.
+    - name: Install OpenBLAS for riscv64 (ports archive)
+      shell: bash
+      run: |
+        sudo dpkg --add-architecture riscv64
+        CODENAME=$(lsb_release -cs)
+        {
+          echo "deb [arch=riscv64] http://ports.ubuntu.com/ubuntu-ports $CODENAME main universe"
+          echo "deb [arch=riscv64] http://ports.ubuntu.com/ubuntu-ports $CODENAME-updates main universe"
+          echo "deb [arch=riscv64] http://ports.ubuntu.com/ubuntu-ports $CODENAME-security main universe"
+        } | sudo tee /etc/apt/sources.list.d/ports-riscv64.list
+        sudo apt-get update \
+          -o Dir::Etc::sourcelist="sources.list.d/ports-riscv64.list" \
+          -o Dir::Etc::sourceparts="-" \
+          -o APT::Get::List-Cleanup="0"
+        sudo apt-get install -y libopenblas-dev:riscv64 pkg-config
+        echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
+        echo "PKG_CONFIG_PATH_riscv64_unknown_linux_gnu=/usr/lib/riscv64-linux-gnu/pkgconfig" >> "$GITHUB_ENV"
+
+    # A real linker (the cross-gcc above) for building, and a runner
+    # that hands the resulting binary to qemu-riscv64-static with the
+    # cross sysroot so dynamic linking resolves against riscv64
+    # libraries at test-run time, not this runner's native x86_64 ones.
+    - name: Configure cross linker + QEMU runner for riscv64gc-unknown-linux-gnu
+      shell: bash
+      run: |
+        {
+          echo "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER=riscv64-linux-gnu-gcc"
+          echo "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUNNER=qemu-riscv64-static -L /usr/riscv64-linux-gnu"
+          # The runner's -L reaches only the test process. A test that
+          # spawns the riscv64 binary (test_continuation_plugin_cli) starts
+          # it through binfmt_misc, which has no sysroot, so its dynamic
+          # loader cannot find libstdc++.so.6. QEMU_LD_PREFIX is honoured
+          # by every qemu-user instance, children included. Probe run
+          # 36807867138: red without it, green with it.
+          echo "QEMU_LD_PREFIX=/usr/riscv64-linux-gnu"
+        } >> "$GITHUB_ENV"
