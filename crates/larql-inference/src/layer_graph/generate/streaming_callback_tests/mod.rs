@@ -10,6 +10,7 @@
 //! fixture, so it runs in the default `cargo test` gate and needs no
 //! `LARQL_VINDEX_PATH`.
 
+mod contract;
 mod premises;
 
 use super::{generate_streaming, EosConfig, GenerateResult, SamplingConfig};
