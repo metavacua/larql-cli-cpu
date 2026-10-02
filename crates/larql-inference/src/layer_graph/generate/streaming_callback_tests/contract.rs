@@ -65,3 +65,26 @@ fn h4_streamed_tokens_equal_returned_tokens_in_order() {
         .collect();
     assert_eq!(streamed_pairs, result.tokens);
 }
+
+/// H5 — the probability handed to the callback is a probability. The CPU path
+/// takes the greedy argmax of a softmax, so each reported value lies in
+/// `[1/vocab, 1]`, and a run of distinct tokens cannot have every one of them
+/// at exactly `1.0` (that value is a placeholder, not a measurement).
+#[test]
+fn h5_streamed_probability_is_a_probability_not_a_placeholder() {
+    let vocab = Q4KTestFixtures::build().weights.vocab_size;
+    let (result, streamed) = run_cpu_streaming(4, |_| EosConfig::empty());
+    assert_eq!(result.tokens.len(), 4, "precondition: decode loop ran");
+    assert_eq!(streamed.len(), 4, "precondition: every token streamed");
+    let floor = 1.0 / vocab as f64;
+    for (i, (_, _, prob)) in streamed.iter().enumerate() {
+        assert!(
+            prob.is_finite() && *prob >= floor * (1.0 - 1e-6) && *prob <= 1.0,
+            "token {i}: probability {prob} is outside [1/vocab = {floor}, 1]"
+        );
+    }
+    assert!(
+        streamed.iter().any(|(_, _, prob)| *prob < 1.0),
+        "every streamed probability is exactly 1.0: a placeholder, not a softmax value"
+    );
+}
