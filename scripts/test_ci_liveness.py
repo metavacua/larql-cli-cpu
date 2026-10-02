@@ -164,6 +164,64 @@ class StaticChecks(unittest.TestCase):
         self.assertEqual(live.triggers("name: a\non: push\njobs: {}\n"), {"push"})
 
 
+def pr_workflow(jobs: str, trigger: str = "pull_request") -> str:
+    return f"name: w\non: [{trigger}]\njobs:\n{jobs}"
+
+
+class PullRequestJobs(unittest.TestCase):
+    """A control that cannot run on a pull request first runs after the change merges.
+
+    The ci-liveness `runs` job was written that way, which left the one thing it
+    needed to verify (its token permissions) unverifiable before merge.
+    """
+
+    def tree(self, job_if=None, exempt=None, trigger="pull_request"):
+        t = Tree(["alpha"], {"pr_skipped_jobs": exempt or {}})
+        t.tested("a.yml", "cargo test -p alpha")
+        condition = f"    if: {job_if}\n" if job_if else ""
+        t.workflow("w.yml", pr_workflow(f"  gate:\n{condition}    steps: []\n", trigger))
+        return t
+
+    def test_job_skipped_on_pull_request_is_reported(self):
+        errors = self.tree("github.event_name != 'pull_request'").errors()
+        self.assertEqual(len(errors), 1)
+        self.assertIn("w.yml", errors[0])
+        self.assertIn("gate", errors[0])
+        self.assertIn("pull_request", errors[0])
+
+    def test_job_gated_to_other_events_is_reported(self):
+        self.assertEqual(len(self.tree("github.event_name == 'schedule'").errors()), 1)
+
+    def test_expression_wrapper_is_read(self):
+        self.assertEqual(len(self.tree("${{ github.event_name == 'push' }}").errors()), 1)
+
+    def test_and_with_a_false_event_atom_is_reported(self):
+        self.assertEqual(len(self.tree("github.event_name == 'push' && github.ref == 'x'").errors()), 1)
+
+    def test_or_with_an_unknown_atom_may_run(self):
+        self.assertEqual(self.tree("github.event_name == 'push' || github.ref == 'x'").errors(), [])
+
+    def test_job_that_can_run_on_pull_request_passes(self):
+        self.assertEqual(self.tree().errors(), [])
+        self.assertEqual(self.tree("github.event_name != 'schedule'").errors(), [])
+        self.assertEqual(self.tree("github.event_name == 'pull_request' || github.event_name == 'schedule'").errors(), [])
+
+    def test_unrecognised_condition_is_assumed_to_run(self):
+        self.assertEqual(self.tree("needs.build.outputs.changed == 'true'").errors(), [])
+
+    def test_workflow_without_a_pull_request_trigger_is_not_subject(self):
+        self.assertEqual(self.tree("github.event_name == 'push'", trigger="push").errors(), [])
+
+    def test_exemption_allows_the_skip(self):
+        t = self.tree("github.event_name != 'pull_request'", {"w.yml::gate": "needs a secret"})
+        self.assertEqual(t.errors(), [])
+
+    def test_stale_exemption_is_an_error(self):
+        errors = self.tree(None, {"w.yml::gate": "no longer skipped"}).errors()
+        self.assertEqual(len(errors), 1)
+        self.assertIn("stale", errors[0])
+
+
 class RunHistory(unittest.TestCase):
     NOW = datetime(2026, 10, 1, tzinfo=timezone.utc)
 
