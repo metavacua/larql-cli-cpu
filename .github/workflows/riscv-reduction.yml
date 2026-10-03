@@ -51,6 +51,16 @@ jobs:
           - { crate: larql-execution, target: riscv64im-unknown-none-elf, layer: core,  build_std: 'core',       features: '--no-default-features' }
           - { crate: larql-execution, target: riscv64imac-unknown-none-elf, layer: alloc, build_std: 'core,alloc', features: '--no-default-features --features alloc' }
           - { crate: larql-execution, target: riscv64imac-unknown-none-elf, layer: core,  build_std: 'core',       features: '--no-default-features' }
+          - { crate: larql-execution, target: riscv64gc-unknown-none-elf, layer: alloc, build_std: 'core,alloc', features: '--no-default-features --features alloc' }
+          - { crate: larql-execution, target: riscv64gc-unknown-none-elf, layer: core,  build_std: 'core',       features: '--no-default-features' }
+          - { crate: larql-execution, target: x86_64-unknown-none, layer: alloc, build_std: 'core,alloc', features: '--no-default-features --features alloc' }
+          - { crate: larql-execution, target: x86_64-unknown-none, layer: core,  build_std: 'core',       features: '--no-default-features' }
+          - { crate: larql-execution, target: aarch64-unknown-none, layer: alloc, build_std: 'core,alloc', features: '--no-default-features --features alloc' }
+          - { crate: larql-execution, target: aarch64-unknown-none, layer: core,  build_std: 'core',       features: '--no-default-features' }
+          - { crate: larql-execution, target: x86_64-unknown-uefi, layer: alloc, build_std: 'core,alloc', features: '--no-default-features --features alloc' }
+          - { crate: larql-execution, target: x86_64-unknown-uefi, layer: core,  build_std: 'core',       features: '--no-default-features' }
+          - { crate: larql-execution, target: aarch64-unknown-uefi, layer: alloc, build_std: 'core,alloc', features: '--no-default-features --features alloc' }
+          - { crate: larql-execution, target: aarch64-unknown-uefi, layer: core,  build_std: 'core',       features: '--no-default-features' }
     steps:
       - uses: actions/checkout@v7
       - run: rustup component add rust-src

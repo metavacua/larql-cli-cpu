@@ -1,5 +1,5 @@
 {
-  "policy_note": "larql-execution is a wave-0 crate: zero dependencies, `std` (default) => `alloc` => `core` layers. Plain <target> keys are target-matrix.yml's default-features check and stay expected-fail (that check keeps std). <target>+alloc and <target>+core keys are riscv-reduction.yml's -Zbuild-std cells (core,alloc and core only) and are expected-pass.",
+  "policy_note": "larql-execution is a wave-0 crate: zero dependencies, `std` (default) => `alloc` => `core` layers. Plain <target> keys are target-matrix.yml's default-features check and stay expected-fail (that check keeps std). <target>+alloc and <target>+core keys are riscv-reduction.yml's -Zbuild-std cells (core,alloc and core only) and are expected-pass. The gc-none, x86 -none, aarch64 -none and UEFI cells start expected-fail (unverified); CI promotes them.",
   "targets": {
     "wasm32v1-none": "expected-fail",
     "riscv32i-unknown-none-elf": "expected-fail",
@@ -19,6 +19,16 @@
     "riscv64im-unknown-none-elf+alloc": "expected-pass",
     "riscv64im-unknown-none-elf+core": "expected-pass",
     "riscv64imac-unknown-none-elf+alloc": "expected-pass",
-    "riscv64imac-unknown-none-elf+core": "expected-pass"
+    "riscv64imac-unknown-none-elf+core": "expected-pass",
+    "riscv64gc-unknown-none-elf+alloc": "expected-fail",
+    "riscv64gc-unknown-none-elf+core": "expected-fail",
+    "x86_64-unknown-none+alloc": "expected-fail",
+    "x86_64-unknown-none+core": "expected-fail",
+    "aarch64-unknown-none+alloc": "expected-fail",
+    "aarch64-unknown-none+core": "expected-fail",
+    "x86_64-unknown-uefi+alloc": "expected-fail",
+    "x86_64-unknown-uefi+core": "expected-fail",
+    "aarch64-unknown-uefi+alloc": "expected-fail",
+    "aarch64-unknown-uefi+core": "expected-fail"
   }
 }
