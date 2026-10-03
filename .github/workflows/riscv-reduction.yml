@@ -103,6 +103,57 @@ jobs:
         if: matrix.target == 'riscv64imac-unknown-none-elf' && matrix.layer == 'alloc'
         run: cargo test --locked -p ${{ matrix.crate }}
 
+  # Informational: every library crate except the larql-cli binary is expected to compile
+  # across the chain (std on gnu, core+alloc on uefi, core on none). Where one does not,
+  # that is the data for how to rearrange it, so this job records every failing crate in
+  # one pass (--keep-going) instead of gating. Nothing here fails the PR.
+  inventory-chain:
+    name: inventory · ${{ matrix.target }} (${{ matrix.layer }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    continue-on-error: true
+    env:
+      RUSTC_BOOTSTRAP: '1'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: riscv32i-unknown-none-elf,    layer: core,       build_std: core }
+          - { target: riscv64im-unknown-none-elf,   layer: core,       build_std: core }
+          - { target: riscv64imac-unknown-none-elf, layer: core,       build_std: core }
+          - { target: riscv64gc-unknown-none-elf,   layer: core,       build_std: core }
+          - { target: aarch64-unknown-none,         layer: core,       build_std: core }
+          - { target: x86_64-unknown-none,          layer: core,       build_std: core }
+          - { target: x86_64-unknown-uefi,          layer: core+alloc, build_std: 'core,alloc' }
+          - { target: aarch64-unknown-uefi,         layer: core+alloc, build_std: 'core,alloc' }
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup component add rust-src
+      # Host-side build scripts (tonic/prost, system BLAS probing) run on the runner; install
+      # what they need so their failure does not hide the target-side result.
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libopenblas-dev pkg-config
+      - name: cargo check --keep-going (workspace minus larql-cli)
+        run: |
+          set +e
+          cargo check --keep-going -Zbuild-std=${{ matrix.build_std }} --target ${{ matrix.target }} \
+            --workspace --exclude larql-cli --exclude larql-continuation-fixture --lib --no-default-features \
+            2>&1 | tee check.log
+          set -e
+          {
+            echo "### ${{ matrix.target }} (${{ matrix.layer }})"
+            echo "Crates that failed to compile:"; echo '```'
+            grep -oE 'could not compile `[^`]+`' check.log | sort -u; echo '```'
+            echo "Error classes:"; echo '```'
+            grep -oE '^error(\[E[0-9]+\])?: .*' check.log | sed -E 's/`[^`]*`/`_`/g' | sort | uniq -c | sort -rn | head -25
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: inventory-${{ matrix.target }}
+          path: check.log
+          retention-days: 7
+
   runtime-matrix:
     name: runtime · x86_64-gnu vs riscv64gc-gnu (qemu cpu masks)
     runs-on: ubuntu-latest
