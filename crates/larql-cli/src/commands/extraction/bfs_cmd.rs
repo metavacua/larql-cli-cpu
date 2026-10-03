@@ -96,6 +96,32 @@ fn load_mock_knowledge(
     Ok(entries)
 }
 
+/// Build the networked provider for a model endpoint (non-`--mock` path).
+#[cfg(feature = "net")]
+fn http_provider(args: &BfsArgs) -> Result<Box<dyn ModelProvider>, Box<dyn std::error::Error>> {
+    let endpoint = args
+        .endpoint
+        .as_deref()
+        .unwrap_or("http://localhost:11434/v1");
+    let model = args
+        .model
+        .as_deref()
+        .ok_or("--model required when not using --mock")?;
+    Ok(Box::new(
+        larql_core::engine::http_provider::HttpProvider::new(endpoint, model),
+    ))
+}
+
+/// Without `net` there is no HTTP provider: refuse loudly rather than fall
+/// back to the mock or an empty provider.
+#[cfg(not(feature = "net"))]
+fn http_provider(args: &BfsArgs) -> Result<Box<dyn ModelProvider>, Box<dyn std::error::Error>> {
+    Err(crate::net_gate::net_required(&format!(
+        "`larql dev bfs` against a model endpoint (--endpoint {:?}, --model {:?}); pass --mock to run offline",
+        args.endpoint, args.model
+    )))
+}
+
 pub fn run(args: BfsArgs) -> Result<(), Box<dyn std::error::Error>> {
     // Load templates from file
     let tmpl_contents = std::fs::read_to_string(&args.templates).map_err(|e| {
@@ -117,17 +143,7 @@ pub fn run(args: BfsArgs) -> Result<(), Box<dyn std::error::Error>> {
         };
         Box::new(larql_core::engine::mock_provider::MockProvider::with_knowledge(knowledge))
     } else {
-        let endpoint = args
-            .endpoint
-            .as_deref()
-            .unwrap_or("http://localhost:11434/v1");
-        let model = args
-            .model
-            .as_deref()
-            .ok_or("--model required when not using --mock")?;
-        Box::new(larql_core::engine::http_provider::HttpProvider::new(
-            endpoint, model,
-        ))
+        http_provider(&args)?
     };
 
     let seeds: Vec<String> = args

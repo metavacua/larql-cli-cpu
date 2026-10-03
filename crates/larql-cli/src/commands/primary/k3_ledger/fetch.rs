@@ -18,12 +18,19 @@ use super::geometry::K3Geometry;
 
 const SAFETENSORS_LEN_PREFIX: u64 = 8;
 
+/// What the no-`net` refusal names as needing the network, shared by `range`
+/// and `config` so the two messages cannot drift.
+#[cfg(not(feature = "net"))]
+const K3_NET_WHAT: &str = "`larql k3-ledger` reading checkpoint headers over HTTP";
+
 pub struct Repo {
     pub id: String,
+    #[cfg(feature = "net")]
     client: reqwest::blocking::Client,
 }
 
 impl Repo {
+    #[cfg(feature = "net")]
     pub fn new(id: impl Into<String>) -> Result<Self, Box<dyn std::error::Error>> {
         Ok(Self {
             id: id.into(),
@@ -33,10 +40,22 @@ impl Repo {
         })
     }
 
+    /// Without `net` there is no HTTP client: refuse loudly, naming the feature.
+    #[cfg(not(feature = "net"))]
+    pub fn new(id: impl Into<String>) -> Result<Self, Box<dyn std::error::Error>> {
+        let repo = Self { id: id.into() };
+        Err(crate::net_gate::net_required(&format!(
+            "`larql k3-ledger` reading {}'s checkpoint headers from huggingface.co by HTTP range request (formats, freq-mass and retention work offline)",
+            repo.id
+        )))
+    }
+
+    #[cfg(feature = "net")]
     fn url(&self, path: &str) -> String {
         format!("https://huggingface.co/{}/resolve/main/{path}", self.id)
     }
 
+    #[cfg(feature = "net")]
     fn range(&self, path: &str, from: u64, to: u64) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let resp = self
             .client
@@ -47,6 +66,17 @@ impl Repo {
         Ok(resp.bytes()?.to_vec())
     }
 
+    #[cfg(not(feature = "net"))]
+    fn range(
+        &self,
+        _path: &str,
+        _from: u64,
+        _to: u64,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        Err(crate::net_gate::net_required(K3_NET_WHAT))
+    }
+
+    #[cfg(feature = "net")]
     pub fn config(&self) -> Result<Value, Box<dyn std::error::Error>> {
         let body = self
             .client
@@ -56,6 +86,11 @@ impl Repo {
             .text()?;
         let v: Value = serde_json::from_str(&body)?;
         Ok(v.get("text_config").cloned().unwrap_or(v))
+    }
+
+    #[cfg(not(feature = "net"))]
+    pub fn config(&self) -> Result<Value, Box<dyn std::error::Error>> {
+        Err(crate::net_gate::net_required(K3_NET_WHAT))
     }
 
     /// Parse one shard's safetensors header without reading its tensor data.

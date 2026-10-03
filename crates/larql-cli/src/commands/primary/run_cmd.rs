@@ -15,7 +15,8 @@
 //!                   (e.g. `gemma-3-4b-it-vindex`).
 //!   [prompt]        optional; enters chat mode if omitted.
 //!   -n, --top N     number of predictions to show (default 10).
-//!   --ffn URL       route FFN to a remote larql-server.
+//!   --ffn URL       route FFN to a remote larql-server. Requires the `net`
+//!                   cargo feature; refused without it.
 //!   --experts       enable WASM-expert dispatch (gcd, base64, …).
 //!   --experts-dir   directory of `.wasm` experts (overrides default lookup).
 //!   -v, --verbose
@@ -159,6 +160,7 @@ pub struct RunArgs {
 
     /// Route FFN to a remote larql-server (e.g. `http://127.0.0.1:8080`).
     /// Attention runs locally; each layer's FFN is a round trip to the URL.
+    /// Requires the `net` cargo feature; refused without it.
     #[arg(long, value_name = "URL")]
     pub ffn: Option<String>,
 
@@ -255,6 +257,8 @@ pub struct RunArgs {
     /// Expert weights (4 MB × experts_owned × layers) stay on the shard servers.
     /// Router runs locally per layer; top-K expert residuals are dispatched in
     /// parallel to the owning shard(s) via `POST /v1/expert/batch`.
+    ///
+    /// Requires the `net` cargo feature; refused without it.
     #[arg(long, value_name = "SHARDS")]
     pub moe_shards: Option<String>,
 
@@ -273,6 +277,8 @@ pub struct RunArgs {
     /// Each shard owns an explicit `(layer, expert_id)` set instead of a
     /// layer-uniform expert range — pairs naturally with the server's
     /// `--units PATH` flag.  Mutually exclusive with `--moe-shards`.
+    ///
+    /// Requires the `net` cargo feature; refused without it.
     #[arg(long, value_name = "PATH")]
     pub moe_units_manifest: Option<std::path::PathBuf>,
 
@@ -326,10 +332,12 @@ pub struct RunArgs {
     pub mm_weights: Option<PathBuf>,
 
     /// Ordered VINDEX3 CPU layer workers. Replays the full prefix each step.
+    /// Requires the `net` cargo feature; refused without it.
     #[arg(long, value_delimiter = ',', value_name = "URL,...")]
     pub v3_shards: Vec<String>,
 
     /// VINDEX3 CPU dense FFN or routed-expert workers; attention, routing and KV remain local.
+    /// Requires the `net` cargo feature; refused without it.
     #[arg(
         long,
         value_delimiter = ',',
@@ -405,6 +413,19 @@ pub struct RunArgs {
 }
 
 pub fn run(mut args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
+    // Every network route is refused up front, before `--speak` and before
+    // model resolution, so an unreachable URL never triggers a download and
+    // no flag silently falls back to a local FFN.
+    #[cfg(not(feature = "net"))]
+    crate::net_gate::refuse_flags(&[
+        ("--ffn", args.ffn.is_some()),
+        ("--moe-shards", args.moe_shards.is_some()),
+        ("--moe-units-manifest", args.moe_units_manifest.is_some()),
+        ("--v3-shards", !args.v3_shards.is_empty()),
+        ("--v3-ffn-shards", !args.v3_ffn_shards.is_empty()),
+        ("--v3-ffn-wire", args.v3_ffn_wire.is_some()),
+        ("--v3-shard-token-env", args.v3_shard_token_env.is_some()),
+    ])?;
     // Speech mode routes before vindex resolution: the speech model lives
     // in its safetensors directory until TTS funnel step 6.
     if args.speak {

@@ -22,6 +22,21 @@ use super::vindex3_runtime::run_vindex3;
 use crate::commands::primary::run_cmd_vindex3::is_vindex3_container;
 
 pub fn run(mut args: BenchArgs) -> Result<(), Box<dyn std::error::Error>> {
+    // Without the `net` feature every networked bench mode refuses loudly,
+    // before the quarantine check, the grid short-circuit and model
+    // resolution. `--ollama` is loopback HTTP via curl and previously
+    // degraded to a silent "unreachable" row, so it counts as networking.
+    // `--bench-grid-lan` is deliberately NOT refused: it only spawns child
+    // `larql bench` runs, which refuse by themselves.
+    #[cfg(not(feature = "net"))]
+    crate::net_gate::refuse_flags(&[
+        ("--ffn", args.ffn.is_some()),
+        ("--wire", args.wire.is_some()),
+        ("--moe-shards", args.moe_shards.is_some()),
+        ("--bench-grid", args.bench_grid),
+        ("--ollama", args.ollama.is_some()),
+    ])?;
+
     // QUARANTINED — and NOT because `--repeat` causes anything. It does
     // not; that attribution was made and falsified on 2026-08-16 and the
     // correction is the point of this comment.

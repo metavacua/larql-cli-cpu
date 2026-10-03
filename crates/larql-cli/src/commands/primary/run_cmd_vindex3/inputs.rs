@@ -22,56 +22,13 @@ pub(super) fn generate<B: PlanBackend>(
     } else {
         image_inputs(model, ids)?
     };
-    if !model.args.v3_ffn_shards.is_empty() {
-        let continuation = select_in(
-            model.continuations,
-            model.plan,
-            &model.continuation_choice(),
-        )?;
-        let mode = format!(
-            "local-kv-remote-ffn over {}",
-            continuation.authority().identity
-        );
-        let mut session = larql_inference::vindex3::dense_ffn::DenseFfnSession::new(
-            model.plan,
-            model.ops,
-            model.backend,
-            &continuation,
-        )?;
-        let logits = session.extend_inputs(&inputs)?;
-        emit(model, &mut session, logits, ids, out, status, &mode)
-    } else if !model.args.v3_shards.is_empty() {
-        use larql_inference::vindex3::distributed::{artifact_identity, DistributedSession};
-        let token = model
-            .args
-            .v3_shard_token_env
-            .as_deref()
-            .map(std::env::var)
-            .transpose()?;
-        let transport = larql_router::vindex3::HttpLayerShards::connect(
-            &model.args.v3_shards,
-            token.as_deref(),
-        )?;
-        let identity = artifact_identity(model.container, model.plan)?;
-        let mut session = DistributedSession::new(
-            model.plan,
-            model.ops,
-            model.backend,
-            &identity,
-            model.store.into(),
-            transport,
-        )?;
-        let logits = session.extend_inputs(&inputs)?;
-        emit(
-            model,
-            &mut session,
-            logits,
-            ids,
-            out,
-            status,
-            "distributed-prefix",
-        )
-    } else if model.args.kv_cache == KvCacheKind::None
+    #[cfg(feature = "net")]
+    {
+        if !model.args.v3_ffn_shards.is_empty() || !model.args.v3_shards.is_empty() {
+            return generate_remote(model, &inputs, ids, out, status);
+        }
+    }
+    if model.args.kv_cache == KvCacheKind::None
         || model.args.engine.as_deref() == Some(REPLAY_ENGINE)
     {
         let continuation = select_in(
@@ -101,6 +58,73 @@ pub(super) fn generate<B: PlanBackend>(
             out,
             status,
             &continuation.authority().identity.to_string(),
+        )
+    }
+}
+
+/// The two network arms of [`generate`]: a remote dense-FFN coordinator or
+/// distributed layer shards. Only a `net` build has the transports.
+#[cfg(feature = "net")]
+fn generate_remote<B: PlanBackend>(
+    model: &ResidentModel<'_, B>,
+    inputs: &[InputPosition],
+    ids: &[u32],
+    out: &mut dyn Write,
+    status: &mut dyn Write,
+) -> Result<(), BoxErr> {
+    if !model.args.v3_ffn_shards.is_empty() {
+        let continuation = select_in(
+            model.continuations,
+            model.plan,
+            &model.continuation_choice(),
+        )?;
+        let mode = format!(
+            "local-kv-remote-ffn over {}",
+            continuation.authority().identity
+        );
+        let mut session = larql_inference::vindex3::dense_ffn::DenseFfnSession::new(
+            model.plan,
+            model.ops,
+            model.backend,
+            &continuation,
+        )?;
+        let logits = session.extend_inputs(inputs)?;
+        emit(model, &mut session, logits, ids, out, status, &mode)
+    } else if !model.args.v3_shards.is_empty() {
+        use larql_inference::vindex3::distributed::{artifact_identity, DistributedSession};
+        let token = model
+            .args
+            .v3_shard_token_env
+            .as_deref()
+            .map(std::env::var)
+            .transpose()?;
+        let transport = larql_router::vindex3::HttpLayerShards::connect(
+            &model.args.v3_shards,
+            token.as_deref(),
+        )?;
+        let identity = artifact_identity(model.container, model.plan)?;
+        let mut session = DistributedSession::new(
+            model.plan,
+            model.ops,
+            model.backend,
+            &identity,
+            model.store.into(),
+            transport,
+        )?;
+        let logits = session.extend_inputs(inputs)?;
+        emit(
+            model,
+            &mut session,
+            logits,
+            ids,
+            out,
+            status,
+            "distributed-prefix",
+        )
+    } else {
+        Err(
+            "internal error: generate_remote called with neither --v3-ffn-shards nor --v3-shards"
+                .into(),
         )
     }
 }

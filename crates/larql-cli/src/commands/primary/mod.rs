@@ -17,10 +17,13 @@ pub mod inspect_hf_cmd;
 pub mod k3_ledger;
 pub mod link_cmd;
 pub mod list_cmd;
+#[cfg(feature = "net")]
 pub mod model_cmd;
 #[cfg(feature = "research")]
 pub mod optimizer_mcp;
+#[cfg(feature = "net")]
 pub mod publish_cmd;
+#[cfg(feature = "net")]
 pub mod pull_cmd;
 pub mod recipe_cmd;
 pub mod registry_cmd;
@@ -29,8 +32,11 @@ pub mod run_cmd;
 pub mod run_cmd_image;
 pub mod run_cmd_speak;
 pub mod run_cmd_vindex3;
+#[cfg(feature = "net")]
 pub mod serve_cmd;
+#[cfg(feature = "net")]
 pub mod serve_resolve;
+#[cfg(feature = "net")]
 pub mod server_capabilities_cmd;
 pub mod shannon_cmd;
 pub mod shannon_trace;

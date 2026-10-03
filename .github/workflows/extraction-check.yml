@@ -55,8 +55,12 @@ jobs:
           restore-keys: ${{ runner.os }}-extraction-clippy-
       - name: clippy — workspace, all targets, default features
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: clippy — larql-cli without the research feature
+      - name: clippy — larql-cli release shape (no research, net on)
+        run: cargo clippy -p larql-cli --bins --tests --no-default-features --features net --locked -- -D warnings
+      - name: clippy — larql-cli local-only (no research, no net)
         run: cargo clippy -p larql-cli --bins --tests --no-default-features --locked -- -D warnings
+      - name: clippy — larql-cli research without net
+        run: cargo clippy -p larql-cli --bins --tests --no-default-features --features research --locked -- -D warnings
 
   test:
     runs-on: ubuntu-latest

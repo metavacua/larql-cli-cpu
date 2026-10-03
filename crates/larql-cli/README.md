@@ -16,8 +16,15 @@ larql serve model.vindex3 --port 8080
 ```
 
 Add Cargo's release target directory to PATH. Build `larql-server` for
-`serve`, which dispatches to that binary. Linux/Windows builds need
-`--no-default-features` because the default GPU feature uses Metal.
+`serve`, which dispatches to that binary. `serve` needs the `net` feature.
+
+This is a CPU-only build with no GPU feature. Default features are `research`
+(the `larql dev` tree and other research tooling) and `net` (networking:
+`pull`, `hf`, `publish`, `serve`, `--ffn`, the VINDEX3 shard transports).
+`--no-default-features --features net` is the shape the tagged release
+binaries ship; `--no-default-features` is local-only, where network commands
+still exist but refuse with an error naming the missing `net` feature. See
+[Networking and the `net` feature](../../docs/cli.md#networking-and-the-net-feature).
 
 The [execution guide](../../docs/vindex3/execution.md) covers source admission,
 encoding and generation. [Observation and intervention](../../docs/vindex3/observation-and-intervention.md)

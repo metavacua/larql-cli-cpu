@@ -9,6 +9,42 @@ pre-1.0 phase. Forward-looking work lives in [`ROADMAP.md`](ROADMAP.md).
 Entries migrated from ROADMAP.md on 2026-05-10; pre-2026-05-10 entries
 preserve the date and voice they were originally written in.
 
+## [2026-10-02] — `net` feature: networking behind a default-on cargo feature
+
+larql-cli gains a `net` cargo feature, **on by default**, so default builds
+behave as before. Defaults are now `research` and `net`.
+
+- `reqwest` and `larql-router` are optional dependencies enabled only by
+  `net` (which also enables `larql-core/http`). Without it the local part of
+  the CLI builds with no networking of its own.
+- **Loud refusal, not a missing command.** The clap surface is identical in
+  every build. Without `net`, `pull`, `model pull`, `publish`, `hf`, `serve`,
+  `server-capabilities`, `recipe estimate`, `dec-bench capture|replay|drift`,
+  the `k3-ledger` geometry subcommands, `dev ffn-latency` and `dev bfs`
+  without `--mock` still exist and refuse with ``needs networking; this larql
+  binary was built without the `net` cargo feature (rebuild with `--features
+  net`)``. Mixed commands (`run`, `chat`, `bench`, `walk`, `build`,
+  `vindex3 plan|encode`) keep every flag and refuse at the first point a
+  network flag or `hf://` source is used, before any model is resolved or
+  loaded. A cache hit for an `hf://` or `owner/name` model still works
+  offline.
+- **Release workflow.** `release.yml` now builds every leg with
+  `--no-default-features --features net`. Bare `--no-default-features` would
+  have silently stripped networking from tagged binaries.
+- **CI.** `larql-cli.yml` and `extraction-check.yml` clippy-check four shapes
+  under `-D warnings` (default, release, local-only, research-without-net) and
+  `larql-cli.yml` tests the local-only and release shapes on Linux. The new
+  `net-closure` workflow (`scripts/net_closure_report.sh`, metadata only)
+  gates that `reqwest` and `larql-router` enter larql-cli only through `net`.
+  `lql-strategy-matrix.yml` and `scripts/check_tls_dependencies.py` pass
+  `--features larql-cli/net` to keep their old meaning.
+- **Deferred.** The library crates (`larql-inference`, `larql-vindex`,
+  `larql-lql`, `larql-factory`, `larql-kv`, `larql-router-protocol`) have no
+  `net` features yet, so a no-`net` binary still links `reqwest`, `tonic` and
+  `tokio`, and `larql repl` / `lql` `USE REMOTE` and `USE "hf://..."` still
+  reach the network. The net-closure job reports these leaks. A
+  `--no-default-features` cell in `target-matrix.yml` is a follow-up.
+
 ## [2026-09-30] — CPU-only: the GPU surface leaves the CLI
 
 This repository was extracted from metavacua/larql-to-sparql at `f02693c90`

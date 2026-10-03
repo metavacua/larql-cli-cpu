@@ -270,6 +270,10 @@ impl CapturePool {
     }
 
     /// Open and validate a pool directory.
+    #[cfg_attr(
+        not(feature = "net"),
+        allow(dead_code, reason = "used only by net-gated replay_runtime")
+    )]
     pub fn open(dir: &Path) -> Result<Self, String> {
         let manifest_path = dir.join(MANIFEST_FILE);
         let manifest_json = std::fs::read_to_string(&manifest_path)
@@ -339,6 +343,10 @@ impl CapturePool {
     }
 
     /// Number of prompts in the pool — the maximum replay batch size.
+    #[cfg_attr(
+        not(feature = "net"),
+        allow(dead_code, reason = "used only by net-gated replay_runtime")
+    )]
     pub fn num_prompts(&self) -> usize {
         self.manifest.prompts.len()
     }
@@ -407,6 +415,10 @@ impl CapturePool {
     /// Build a `batch × hidden` contiguous row block for `(step, layer)`:
     /// row `i` is prompt `i`'s pre-normed residual at that step and layer.
     /// Distinct prompts per row keep MoE routing union realistic.
+    #[cfg_attr(
+        not(feature = "net"),
+        allow(dead_code, reason = "used only by net-gated replay_runtime")
+    )]
     pub fn rows(&self, batch: usize, step: usize, layer: usize) -> Result<Vec<f32>, String> {
         self.plane_rows(&self.data, batch, step, layer)
     }

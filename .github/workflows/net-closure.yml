@@ -1,0 +1,48 @@
+# Network-closure gate for larql-cli's `net` feature.
+#
+# Metadata only: `cargo tree --locked`, no compile and no OpenBLAS, so it is
+# cheap enough to run on every relevant change (it is its own workflow, not
+# a job in a path-filtered one, so nothing skips it). The hard gates prove
+# that `reqwest` and `larql-router` enter larql-cli's graph only through the
+# `net` feature; the informational part lists what the library crates still
+# pull under --no-default-features. See scripts/net_closure_report.sh.
+
+name: net-closure
+
+on:
+  push:
+    paths:
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/larql-cli/**'
+      - 'scripts/net_closure_report.sh'
+      - '.github/workflows/net-closure.yml'
+  pull_request:
+    paths:
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/larql-cli/**'
+      - 'scripts/net_closure_report.sh'
+      - '.github/workflows/net-closure.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  closure:
+    name: net closure - larql-cli
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Net closure report
+        run: bash scripts/net_closure_report.sh

@@ -1,11 +1,14 @@
 # larql-cli cross-platform CI
 #
-# Top-level `larql` binary, CPU-only. Default features are just `research`,
-# so the same surface — research tooling included — builds and tests on
-# Linux, Windows and macOS.
+# Top-level `larql` binary, CPU-only. Default features are `research` and
+# `net`, so the same surface — research tooling and networking included —
+# builds and tests on Linux, Windows and macOS.
 #
-# Tagged release binaries are built WITHOUT `research` (release.yml), so
-# each OS also runs clippy on that exact release shape.
+# Tagged release binaries are built WITHOUT `research` but WITH `net`
+# (`--no-default-features --features net`, release.yml), so each OS also
+# runs clippy on that exact release shape. Two further shapes are
+# clippy-checked: local-only (`--no-default-features`, no networking, the
+# network verbs refuse loudly) and research-without-net.
 #
 # `convert_moe_to_per_layer` example currently doesn't build against
 # the post-refactor `larql-inference` API; CI checks bins + tests
@@ -147,16 +150,37 @@ jobs:
       - name: Clippy
         run: cargo clippy -p larql-cli --bins --tests --no-deps -- -D warnings
 
-      # The shapes release.yml ships: no `research` feature. A research-only
+      # The shape release.yml ships: no `research`, `net` on. A research-only
       # helper left reachable from a shipped verb (or dead without it) reds
       # here, not in a tagged release build.
-      - name: Clippy (release shape, no research)
+      - name: Clippy (release shape, no research, net on)
+        run: cargo clippy -p larql-cli --bins --tests --no-default-features --features net --no-deps -- -D warnings
+
+      # Local-only: no networking. Every cfg(feature = "net") item must leave
+      # no unused import / dead code behind, and the net verbs refuse loudly.
+      - name: Clippy (local-only, no research, no net)
         run: cargo clippy -p larql-cli --bins --tests --no-default-features --no-deps -- -D warnings
+
+      # research without net: a research verb that reaches the network must
+      # still compile (and refuse) here.
+      - name: Clippy (research, no net)
+        run: cargo clippy -p larql-cli --bins --tests --no-default-features --features research --no-deps -- -D warnings
 
       # Includes `current_documentation_facts_match_clap`, which holds
       # docs/generated/current-facts.json to the actual Clap tree.
       - name: Tests
         run: cargo test -p larql-cli
+
+      # The no-net run exercises net_gate's unit tests and
+      # tests/net_refusal.rs (loud refusal for every net verb and for
+      # `run`/`bench --ffn` before any model resolution).
+      - name: Tests (local-only, no net)
+        if: runner.os == 'Linux'
+        run: cargo test -p larql-cli --no-default-features
+
+      - name: Tests (release shape, net without research)
+        if: runner.os == 'Linux'
+        run: cargo test -p larql-cli --no-default-features --features net
 
       # R3B: validates the checked-out PR's own registry/index.json +
       # registry/models/*.json, through the exact assembly/validation
@@ -194,4 +218,4 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Coverage summary
-        run: cargo llvm-cov --package larql-cli --no-default-features --features research --summary-only
+        run: cargo llvm-cov --package larql-cli --no-default-features --features research,net --summary-only

@@ -154,7 +154,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # larql-cli's default features are just `research` (no `gpu`
+          # larql-cli's default features are `research` and `net` (no `gpu`
           # exists in this workspace) - bare `cargo check`/`test` already
           # gets the right feature set, no extra flags needed.
           - crate: larql-cli

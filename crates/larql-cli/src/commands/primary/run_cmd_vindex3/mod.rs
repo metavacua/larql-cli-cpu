@@ -278,15 +278,24 @@ fn refuse_inapplicable_flags(args: &RunArgs) -> Result<(), BoxErr> {
     .into_iter()
     .filter_map(|(flag, given)| given.then_some(flag))
     .collect();
-    if set.is_empty() {
-        return Ok(());
+    if !set.is_empty() {
+        return Err(format!(
+            "a VINDEX3 container runs its own program through the VINDEX3 interpreter; these \
+             flags describe the dense VINDEX2 engine and are not honoured here: {}",
+            set.join(", ")
+        )
+        .into());
     }
-    Err(format!(
-        "a VINDEX3 container runs its own program through the VINDEX3 interpreter; these \
-         flags describe the dense VINDEX2 engine and are not honoured here: {}",
-        set.join(", ")
-    )
-    .into())
+    // Last, so the flag-conflict diagnostics above keep precedence: the
+    // network workers exist only in a `net` build.
+    #[cfg(not(feature = "net"))]
+    crate::net_gate::refuse_flags(&[
+        ("--v3-shards", !args.v3_shards.is_empty()),
+        ("--v3-ffn-shards", !args.v3_ffn_shards.is_empty()),
+        ("--v3-ffn-wire", args.v3_ffn_wire.is_some()),
+        ("--v3-shard-token-env", args.v3_shard_token_env.is_some()),
+    ])?;
+    Ok(())
 }
 
 /// The run, once the backend is a concrete type.
@@ -309,72 +318,82 @@ impl BackendVisitor for Runner<'_> {
     fn visit<B: PlanBackend>(self, backend: &B) -> Result<(), BoxErr> {
         let loading = Instant::now();
         // The expensive, immutable half — once, for every prompt.
-        let routed = self
-            .prepared
-            .plan
-            .layers
-            .iter()
-            .any(|l| l.ffn.as_ref().and_then(|f| f.routed()).is_some());
-        let ops = if !self.args.v3_ffn_shards.is_empty() && routed {
-            if self
-                .args
-                .v3_ffn_wire
-                .as_deref()
-                .is_some_and(|w| w != "binary")
-            {
-                return Err("routed expert placement currently requires binary HTTP".into());
-            }
-            let token = self
-                .args
-                .v3_shard_token_env
-                .as_deref()
-                .map(std::env::var)
-                .transpose()?;
-            let transport = larql_router::vindex3_experts::HttpExpertShards::connect(
-                &self.args.v3_ffn_shards,
-                token.as_deref(),
-            )?;
-            larql_inference::vindex3::routed_experts::prepare_coordinator(
-                self.container,
-                &self.prepared.plan,
-                (&self.prepared.store).into(),
-                backend,
-                transport,
-            )?
-        } else if !self.args.v3_ffn_shards.is_empty() {
-            let token = self
-                .args
-                .v3_shard_token_env
-                .as_deref()
-                .map(std::env::var)
-                .transpose()?;
-            let connect = if self.args.v3_ffn_wire.as_deref() == Some("json") {
-                larql_router::vindex3_ffn::HttpFfnShards::connect
-            } else if self.args.v3_ffn_wire.as_deref() == Some("stream") {
-                larql_router::vindex3_ffn::HttpFfnShards::connect_stream
-            } else {
-                larql_router::vindex3_ffn::HttpFfnShards::connect_binary
-            };
-            let transport = connect(&self.args.v3_ffn_shards, token.as_deref())?;
-            larql_inference::vindex3::dense_ffn::prepare_coordinator(
-                self.container,
-                &self.prepared.plan,
-                (&self.prepared.store).into(),
-                backend,
-                transport,
-            )?
-        } else {
-            PreparedOperands::load(
-                &self.prepared.plan,
-                &self.prepared.store,
-                backend,
-                if self.args.v3_shards.is_empty() {
-                    ExecutionSlice::Full
+        #[cfg(feature = "net")]
+        let ops = {
+            let routed = self
+                .prepared
+                .plan
+                .layers
+                .iter()
+                .any(|l| l.ffn.as_ref().and_then(|f| f.routed()).is_some());
+            if !self.args.v3_ffn_shards.is_empty() && routed {
+                if self
+                    .args
+                    .v3_ffn_wire
+                    .as_deref()
+                    .is_some_and(|w| w != "binary")
+                {
+                    return Err("routed expert placement currently requires binary HTTP".into());
+                }
+                let token = self
+                    .args
+                    .v3_shard_token_env
+                    .as_deref()
+                    .map(std::env::var)
+                    .transpose()?;
+                let transport = larql_router::vindex3_experts::HttpExpertShards::connect(
+                    &self.args.v3_ffn_shards,
+                    token.as_deref(),
+                )?;
+                larql_inference::vindex3::routed_experts::prepare_coordinator(
+                    self.container,
+                    &self.prepared.plan,
+                    (&self.prepared.store).into(),
+                    backend,
+                    transport,
+                )?
+            } else if !self.args.v3_ffn_shards.is_empty() {
+                let token = self
+                    .args
+                    .v3_shard_token_env
+                    .as_deref()
+                    .map(std::env::var)
+                    .transpose()?;
+                let connect = if self.args.v3_ffn_wire.as_deref() == Some("json") {
+                    larql_router::vindex3_ffn::HttpFfnShards::connect
+                } else if self.args.v3_ffn_wire.as_deref() == Some("stream") {
+                    larql_router::vindex3_ffn::HttpFfnShards::connect_stream
                 } else {
-                    ExecutionSlice::Endpoints
-                },
-            )?
+                    larql_router::vindex3_ffn::HttpFfnShards::connect_binary
+                };
+                let transport = connect(&self.args.v3_ffn_shards, token.as_deref())?;
+                larql_inference::vindex3::dense_ffn::prepare_coordinator(
+                    self.container,
+                    &self.prepared.plan,
+                    (&self.prepared.store).into(),
+                    backend,
+                    transport,
+                )?
+            } else {
+                PreparedOperands::load(
+                    &self.prepared.plan,
+                    &self.prepared.store,
+                    backend,
+                    if self.args.v3_shards.is_empty() {
+                        ExecutionSlice::Full
+                    } else {
+                        ExecutionSlice::Endpoints
+                    },
+                )?
+            }
         };
+        #[cfg(not(feature = "net"))]
+        let ops = PreparedOperands::load(
+            &self.prepared.plan,
+            &self.prepared.store,
+            backend,
+            ExecutionSlice::Full,
+        )?;
         let engine = format!("{ENGINE_PREFIX}-{}", backend.name());
         let identity = resolved_display_name(&self.prepared.model_name, self.container);
         if self.args.verbose {
@@ -407,6 +426,10 @@ impl BackendVisitor for Runner<'_> {
 
 /// One loaded model, ready to answer any number of prompts.
 struct ResidentModel<'a, B: PlanBackend> {
+    #[cfg_attr(
+        not(feature = "net"),
+        allow(dead_code, reason = "read only by the net-only generate_remote")
+    )]
     container: &'a Path,
     family: &'a str,
     plan: &'a ComponentOpPlan,
@@ -414,6 +437,10 @@ struct ResidentModel<'a, B: PlanBackend> {
     /// The base operands `ops` was prepared from. A distributed coordinator
     /// selects each remote slice's pins from it, to derive the execution
     /// identity a shard must present (RESIDUAL-BUS-2 I3).
+    #[cfg_attr(
+        not(feature = "net"),
+        allow(dead_code, reason = "read only by the net-only generate_remote")
+    )]
     store: &'a OperandStore,
     backend: &'a B,
     tokenizer: &'a Tokenizer,

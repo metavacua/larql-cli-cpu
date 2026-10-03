@@ -33,6 +33,10 @@ pub struct FfnLatencyArgs {
 }
 
 pub fn run(args: FfnLatencyArgs) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(not(feature = "net"))]
+    crate::net_gate::require_net(
+        "`larql dev ffn-latency` (it measures HTTP round-trips to a larql-server)",
+    )?;
     let layers: Vec<usize> = args
         .layers
         .split(',')

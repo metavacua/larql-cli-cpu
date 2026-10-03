@@ -128,6 +128,8 @@ pub struct WalkArgs {
     /// — the comparison backends expect local FFN weights.
     ///
     /// Example: `--ffn-remote http://127.0.0.1:8080`
+    ///
+    /// Requires the `net` cargo feature (refused without it); also reached by `larql run --ffn`.
     #[arg(long, value_name = "URL")]
     pub ffn_remote: Option<String>,
 
@@ -165,6 +167,12 @@ impl IndexLoadCallbacks for VerboseLoadCallbacks {
 }
 
 pub fn run(args: WalkArgs) -> Result<(), Box<dyn std::error::Error>> {
+    // Single choke point for `larql dev walk`, the legacy `larql walk` and
+    // `larql run` (via `build_walk_args`). Must precede every index/weights
+    // load: `skip_ffn` below is derived from `ffn_remote`, so without a
+    // remote available the FFN-less model must never be loaded.
+    #[cfg(not(feature = "net"))]
+    crate::net_gate::refuse_flags(&[("--ffn-remote", args.ffn_remote.is_some())])?;
     let verbose = args.verbose;
     // Validated once, here, because `run` fans out to several forward paths
     // and only some of them read the spec. Rejecting an unparseable one up

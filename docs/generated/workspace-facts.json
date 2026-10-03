@@ -119,9 +119,15 @@
       "description": "LARQL command-line interface for artifacts, execution, observation, representation, LQL and serving.",
       "features": {
         "default": [
-          "research"
+          "research",
+          "net"
         ],
-        "research": []
+        "research": [],
+        "net": [
+          "dep:reqwest",
+          "dep:larql-router",
+          "larql-core/http"
+        ]
       },
       "local_dependencies": [
         {
@@ -141,8 +147,12 @@
           "path": "crates/larql-core",
           "target": null,
           "optional": false,
-          "default_features": true,
-          "features": []
+          "default_features": false,
+          "features": [
+            "msgpack",
+            "io",
+            "engine"
+          ]
         },
         {
           "name": "larql-factory",
@@ -200,7 +210,7 @@
           "kind": "dependencies",
           "path": "crates/larql-router",
           "target": null,
-          "optional": false,
+          "optional": true,
           "default_features": false,
           "features": []
         },

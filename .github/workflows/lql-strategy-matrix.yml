@@ -109,14 +109,16 @@ jobs:
         id: fmt
         continue-on-error: true
         run: cargo fmt --all -- --check
+      # `--features larql-cli/net` keeps this leg's old meaning (research off,
+      # networking on); the local-only shape is covered by larql-cli.yml.
       - name: clippy — LQL stack (loud, no exemption)
         id: clippy
         continue-on-error: true
-        run: cargo clippy -p larql-lql -p larql-cli -p larql-inference -p larql-vindex -p larql-core -p larql-kv -p larql-models --no-default-features -- -D warnings
+        run: cargo clippy -p larql-lql -p larql-cli -p larql-inference -p larql-vindex -p larql-core -p larql-kv -p larql-models --no-default-features --features larql-cli/net -- -D warnings
       - name: test — LQL stack (comparative signal for the matrix)
         id: test
         continue-on-error: true
-        run: cargo test -p larql-lql -p larql-cli -p larql-inference -p larql-vindex -p larql-core -p larql-kv -p larql-models --no-default-features
+        run: cargo test -p larql-lql -p larql-cli -p larql-inference -p larql-vindex -p larql-core -p larql-kv -p larql-models --no-default-features --features larql-cli/net
       - name: Report + fail loud if any check failed
         run: |
           {
