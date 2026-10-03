@@ -59,6 +59,7 @@ jobs:
       strict: true
       include_bitnet2b: false
       include_mistral7b: false
+      quality: false
       runs_on: ${{ inputs.runs_on }}
       tag: ${{ inputs.target }}
     secrets: inherit
