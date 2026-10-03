@@ -21,6 +21,14 @@ on:
         description: "Fail the run if any conformance invariant is violated"
         type: boolean
         default: false
+      include_bitnet2b:
+        description: "Include BitNet-2B-4T legs -- off for the crate gate, which covers SmolLM2-135M base and instruct only"
+        type: boolean
+        default: false
+      include_mistral7b:
+        description: "Run the Mistral-7B-v0.1 goldens against the real model -- off for the crate gate"
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       strict:
@@ -58,7 +66,7 @@ jobs:
       - id: gen
         env:
           # push carries no `inputs` context; default to excluded.
-          INCLUDE_BITNET2B: ${{ github.event.inputs.include_bitnet2b || 'false' }}
+          INCLUDE_BITNET2B: ${{ inputs.include_bitnet2b || 'false' }}
         run: |
           legs=$(python3 scripts/lql_matrix/gen_legs.py)
           echo "legs=$legs" >> "$GITHUB_OUTPUT"
@@ -356,12 +364,12 @@ jobs:
       # workflow validator (confirmed on run 36650454348, "failed because
       # of a workflow file issue") -- gating has to be per-step, not per-job.
       - name: Pre-download snapshot (${{ matrix.model.hf }})
-        if: matrix.model.id != 'bitnet2b' || github.event.inputs.include_bitnet2b == 'true'
+        if: matrix.model.id != 'bitnet2b' || format('{0}', inputs.include_bitnet2b) == 'true'
         run: |
           python -m pip install --quiet huggingface_hub
           python -c "from huggingface_hub import snapshot_download; snapshot_download('${{ matrix.model.hf }}')"
       - name: Run model-level lifecycle corpus (${{ matrix.model.id }})
-        if: matrix.model.id != 'bitnet2b' || github.event.inputs.include_bitnet2b == 'true'
+        if: matrix.model.id != 'bitnet2b' || format('{0}', inputs.include_bitnet2b) == 'true'
         run: |
           mkdir -p out
           LARQL_BIN=./bin/larql \
@@ -604,7 +612,7 @@ jobs:
   # failure here may be a stale pin, and its text says which kind it is.
   mistral-expected-goldens:
     needs: build
-    if: github.event.inputs.include_mistral7b == 'true'
+    if: format('{0}', inputs.include_mistral7b) == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 240
     env:

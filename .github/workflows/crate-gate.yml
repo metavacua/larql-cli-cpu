@@ -9,7 +9,8 @@
 #                               targets of target-matrix.yml), --no-default-features, with
 #                               the core/alloc/std restriction lints, -D warnings
 #   3. lql-strategy-matrix      strict, run last because it builds the whole CLI and runs
-#                               the full LQL corpus
+#                               the full LQL corpus. For now only SmolLM2-135M (base and
+#                               instruct) must pass; heavier models are switched off.
 #
 # There is no expected-fail tolerance here, unlike target-matrix.yml's policy files. A
 # crate that does not yet compile on a target is red, and the red cell names what has to be
@@ -116,6 +117,9 @@ jobs:
     needs: [resolve, fmt, targets]
     if: needs.resolve.outputs.crate != ''
     uses: ./.github/workflows/lql-strategy-matrix.yml
+    # SmolLM2-135M base and instruct only for now: the heavier models stay off here.
     with:
       strict: true
+      include_bitnet2b: false
+      include_mistral7b: false
     secrets: inherit
