@@ -4,11 +4,9 @@
 #                 for an integer ladder: RV32I (the floor; no RV64I target exists), RV64IM, RV64IMAC. No
 #                 FPU, no OS, so larql-cli cannot target these; the CLI is reduced
 #                 at runtime instead (below).
-# Runtime axis  - the same `larql` command set runs on x86_64-gnu (reference) and on
-#                 riscv64gc-gnu under qemu-user with progressively fewer CPU
-#                 features. scripts/riscv_reduction/classify.py labels each command
-#                 identical / similar / refused / divergent. `refused` is strict
-#                 inclusion (the reduced build does less); `divergent` fails the job.
+# Runtime axis  - the crates' own `cargo test`, natively on x86_64-gnu (reference) and on
+#                 riscv64gc-gnu under qemu-user, with the CPU progressively constrained.
+#                 The raw cargo/test output in the job logs is the evidence.
 #
 # Triggers: push to experiment/** and any pull_request, so this is testable from
 # a branch with nothing merged to main. workflow_dispatch is deliberately absent:
@@ -136,91 +134,41 @@ jobs:
       # dependent's default `std` is enabled on every lower crate and the `core` layer is
       # never actually tested. Per crate, `--no-default-features` applies to that package
       # and its own dependency closure is what gets measured. Cargo builds dependencies
-      # first, so the first failures in each log are the root causes; later ones cascade.
-      - name: cargo check --keep-going, one crate at a time
+      # first, so the first `could not compile` lines in each group are the root causes.
+      # Cargo's output goes to the job log unmodified; a failing crate does not stop the loop.
+      - name: cargo check --keep-going, one crate at a time (raw output)
         run: |
-          mkdir -p logs
-          CRATES=$(cargo metadata --no-deps --format-version 1 | python3 -c "
-          import json,sys
-          for p in json.load(sys.stdin)['packages']:
-              if p['name'] in ('larql-cli','larql-continuation-fixture'): continue
-              if any('lib' in t['kind'] for t in p['targets']): print(p['name'])")
-          {
-            echo "### ${{ matrix.target }} (${{ matrix.layer }}) — per-crate result, first root-cause failures"
-            echo '| crate | result | first failing crates (build order) |'; echo '|---|---|---|'
-          } >> "$GITHUB_STEP_SUMMARY"
-          for c in $CRATES; do
-            set +e
-            cargo check --keep-going -Zbuild-std=${{ matrix.build_std }} --target ${{ matrix.target }} \
-              -p "$c" --lib --no-default-features > "logs/$c.log" 2>&1
-            ec=$?
-            set -e
-            first=$(grep -oE 'could not compile `[^`]+`' "logs/$c.log" | sed -E 's/could not compile //' | awk '!s[$0]++' | head -5 | tr '\n' ' ')
-            echo "| $c | $([ $ec -eq 0 ] && echo pass || echo FAIL) | $first |" >> "$GITHUB_STEP_SUMMARY"
+          for c in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name != "larql-cli" and .name != "larql-continuation-fixture") | select(any(.targets[]; .kind | index("lib"))) | .name'); do
+            echo "::group::$c"
+            cargo check --keep-going -Zbuild-std=${{ matrix.build_std }} --target ${{ matrix.target }} -p "$c" --lib --no-default-features || echo "RESULT $c: FAILED"
+            echo "::endgroup::"
           done
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: inventory-${{ matrix.target }}
-          path: logs/
-          retention-days: 7
 
+  # Runtime: the crates' own tests, run natively and under QEMU user-mode with the CPU
+  # constrained. cargo test's output is the evidence; compare the logs directly.
   runtime-matrix:
-    name: runtime · x86_64-gnu vs riscv64gc-gnu (qemu cpu masks)
+    name: runtime · cargo test, x86_64-gnu vs riscv64gc-gnu under QEMU
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 45
+    env:
+      TEST_CRATES: -p larql-execution -p larql-vindex-spec -p larql-boundary -p larql-core -p larql-models
+      CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER: riscv64-linux-gnu-gcc
+      QEMU_LD_PREFIX: /usr/riscv64-linux-gnu
     steps:
       - uses: actions/checkout@v7
-      - name: Install toolchains, QEMU and native OpenBLAS
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-riscv64-linux-gnu g++-riscv64-linux-gnu \
-            libc6-dev-riscv64-cross qemu-user-static libopenblas-dev pkg-config
-          rustup target add riscv64gc-unknown-linux-gnu
-      - name: Install OpenBLAS for riscv64 (ports archive)
-        run: |
-          sudo dpkg --add-architecture riscv64
-          CODENAME=$(lsb_release -cs)
-          {
-            echo "deb [arch=riscv64] http://ports.ubuntu.com/ubuntu-ports $CODENAME main universe"
-            echo "deb [arch=riscv64] http://ports.ubuntu.com/ubuntu-ports $CODENAME-updates main universe"
-            echo "deb [arch=riscv64] http://ports.ubuntu.com/ubuntu-ports $CODENAME-security main universe"
-          } | sudo tee /etc/apt/sources.list.d/ports-riscv64.list
-          sudo apt-get update -o Dir::Etc::sourcelist="sources.list.d/ports-riscv64.list" \
-            -o Dir::Etc::sourceparts="-" -o APT::Get::List-Cleanup="0"
-          sudo apt-get install -y libopenblas-dev:riscv64
-          {
-            echo "PKG_CONFIG_ALLOW_CROSS=1"
-            echo "PKG_CONFIG_PATH_riscv64_unknown_linux_gnu=/usr/lib/riscv64-linux-gnu/pkgconfig"
-            echo "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER=riscv64-linux-gnu-gcc"
-            echo "QEMU_LD_PREFIX=/usr/riscv64-linux-gnu"
-          } >> "$GITHUB_ENV"
-      - name: Build larql (x86_64 reference)
-        run: cargo build --locked --release -p larql-cli --bin larql
-      - name: Build larql (riscv64gc)
-        run: cargo build --locked --release --target riscv64gc-unknown-linux-gnu -p larql-cli --bin larql
-      - name: Capture reference, riscv full CPU, riscv without F/D
-        run: |
-          S=scripts/riscv_reduction/capture.sh
-          $S out/x86 target/release/larql
-          $S out/rv-full target/riscv64gc-unknown-linux-gnu/release/larql qemu-riscv64-static -cpu rv64 -L /usr/riscv64-linux-gnu
-          # F/D off: a float instruction then raises SIGILL (rc 132). QEMU rejects a CPU whose
-          # extensions depend on F/D, so discover the accepted mask first and record it.
-          BIN=target/riscv64gc-unknown-linux-gnu/release/larql
-          CPU=$(python3 scripts/riscv_reduction/cpu_mask.py /usr/riscv64-linux-gnu "$BIN")
-          echo "F/D-free CPU: $CPU" | tee -a "$GITHUB_STEP_SUMMARY"
-          $S out/rv-nofd "$BIN" qemu-riscv64-static -cpu "$CPU" -L /usr/riscv64-linux-gnu
-      - name: Classify
-        run: |
-          rc=0
-          {
-            python3 scripts/riscv_reduction/classify.py out/x86 out/rv-full "x86_64 vs riscv64gc (full CPU)" || rc=1
-            python3 scripts/riscv_reduction/classify.py out/x86 out/rv-nofd "x86_64 vs riscv64 without F/D" || rc=1
-          } | tee -a "$GITHUB_STEP_SUMMARY"
-          exit $rc
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: riscv-reduction-captures
-          path: out/
-          retention-days: 7
+      - run: sudo apt-get update && sudo apt-get install -y gcc-riscv64-linux-gnu libc6-dev-riscv64-cross qemu-user-static
+      - run: rustup target add riscv64gc-unknown-linux-gnu
+      - name: x86_64-unknown-linux-gnu, native (reference)
+        run: cargo test --locked $TEST_CRATES
+      - name: riscv64gc-unknown-linux-gnu under QEMU, full CPU
+        env:
+          CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUNNER: qemu-riscv64-static -cpu rv64 -L /usr/riscv64-linux-gnu
+        run: cargo test --locked --target riscv64gc-unknown-linux-gnu $TEST_CRATES
+      # F and D removed. QEMU rejects a CPU whose extensions depend on F/D, so zfa is disabled
+      # too (found by running with only f/d off: "Zfa extension requires F extension"). The
+      # binaries use F/D, so a SIGILL is the expected, measured result; it must not fail the job.
+      - name: riscv64gc-unknown-linux-gnu under QEMU, F/D off (expected to fault)
+        continue-on-error: true
+        env:
+          CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUNNER: qemu-riscv64-static -cpu rv64,f=false,d=false,zfa=false -L /usr/riscv64-linux-gnu
+        run: cargo test --locked --target riscv64gc-unknown-linux-gnu $TEST_CRATES
