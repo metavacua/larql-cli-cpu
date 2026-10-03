@@ -25,6 +25,7 @@ fn public_path_fixture() -> (Vec<u8>, Q8KActivation, usize, usize) {
     (quantize_q4_k(&w_f32), quantize_x_to_q8k(&x), rows, cols)
 }
 
+mod cpu_floor;
 mod fused_and_q6k_paths;
 mod public_execution_path_q4k_q8k_matvec_par;
 mod q8k_quantize_and_matvec;

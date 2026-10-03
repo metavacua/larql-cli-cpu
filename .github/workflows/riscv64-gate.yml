@@ -1,0 +1,96 @@
+# riscv64gc narrow PR gate: the cross-compiled plugin and child-process tests.
+#
+# Issue #13. The full riscv64 gate is a leg of target-matrix.yml, which has no
+# push or pull_request trigger (dispatch and a monthly cron only). That leg is
+# what found issue #7 (a plugin fixture built for the host architecture, then a
+# child process with no QEMU sysroot) and issue #4 (openssl-sys cross-build),
+# and each of those sat in the tree for days until someone dispatched it.
+#
+# This is the cheap slice of it: larql-cli only, and only the test binaries
+# whose behaviour depends on the target architecture. It runs when the files
+# that can break them change. The full matrix stays on dispatch and cron.
+#
+# Toolchain, QEMU and OpenBLAS setup is shared with target-matrix.yml through
+# .github/actions/riscv64-qemu, which also records why QEMU_LD_PREFIX is
+# required.
+
+name: riscv64-gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/larql-cli/**'
+      - 'crates/larql-continuation-fixture/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/actions/riscv64-qemu/**'
+      - '.github/workflows/riscv64-gate.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/larql-cli/**'
+      - 'crates/larql-continuation-fixture/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/actions/riscv64-qemu/**'
+      - '.github/workflows/riscv64-gate.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  plugin-and-child-process:
+    name: larql-cli plugin tests, riscv64gc under QEMU
+    runs-on: ubuntu-latest
+    # About 9 minutes of test time under QEMU for larql-cli (run 36770918520),
+    # plus a cold cross build.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: riscv64gc cross toolchain + QEMU user-mode runner
+        uses: ./.github/actions/riscv64-qemu
+
+      - name: Cache cargo registry (downloads only, never target/)
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-reg2-riscv64-gate-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-reg2-riscv64-gate-
+
+      - name: No compiled workspace artefacts may be restored
+        run: |
+          if [ -e target ]; then
+            echo "::error::target/ was restored from cache - the cache key or path is wrong"
+            exit 1
+          fi
+
+      # In-process: the fixture cdylib must be built for the test binary's own
+      # target (issue #7), and loaded from that target's output directory.
+      #
+      # A name filter that matches nothing exits 0, so each step also requires
+      # at least one passing test.
+      - name: Plugin loader unit tests
+        run: |
+          set -o pipefail
+          cargo test --locked --target riscv64gc-unknown-linux-gnu -p larql-cli --bin larql continuation_plugin 2>&1 | tee test.log
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' test.log
+
+      # Out-of-process: spawns the riscv64 `larql` binary as a child, which is
+      # what needs QEMU_LD_PREFIX (issue #7, second failure).
+      - name: Plugin CLI tests (child process)
+        run: |
+          set -o pipefail
+          cargo test --locked --target riscv64gc-unknown-linux-gnu -p larql-cli --test test_continuation_plugin_cli 2>&1 | tee test.log
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' test.log

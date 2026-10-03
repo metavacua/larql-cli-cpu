@@ -1,0 +1,9 @@
+{
+  "untested_members": {
+    "larql-continuation-fixture": "Test-only cdylib with no tests of its own. larql-cli's plugin tests build it for the test binary's target and dlopen it, so it is exercised by the larql-cli workflow and by riscv64-gate.yml."
+  },
+  "dispatch_only_workflows": {
+    "bench-regress.yml": "Deliberately manual: its header makes it a qualified instrument that a reviewer requests, with a no-op and a known-slowdown control, because a per-push perf gate on shared runners was measured to be noise."
+  },
+  "skip_run_check": {}
+}

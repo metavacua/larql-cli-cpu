@@ -1,0 +1,79 @@
+# Does CI still exercise what the repository builds?
+#
+# Runs scripts/check_ci_liveness.py. The static half is cheap and runs on every
+# change to the workspace layout or the workflows. The Actions-API half runs on
+# a schedule and by dispatch: a scheduled workflow that GitHub has disabled
+# after 60 days of inactivity, or that sits on a branch filter the default
+# branch does not match, produces no signal at all, and nothing else reports it.
+#
+# Issue #5 is the motivating case: quality.yml (cargo-audit) filtered on
+# `branches: [main]` while the default branch had another name, so it never ran.
+
+name: ci-liveness
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'crates/*/Cargo.toml'
+      - '.github/workflows/**'
+      - '.github/actions/**'
+      - 'scripts/check_ci_liveness.py'
+      - 'scripts/test_ci_liveness.py'
+      - 'scripts/ci_liveness_policy.json'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'crates/*/Cargo.toml'
+      - '.github/workflows/**'
+      - '.github/actions/**'
+      - 'scripts/check_ci_liveness.py'
+      - 'scripts/test_ci_liveness.py'
+      - 'scripts/ci_liveness_policy.json'
+  schedule:
+    - cron: '0 7 * * 2'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  liveness:
+    name: workspace members and workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Liveness gate controls
+        run: python3 -m unittest discover -s scripts -p test_ci_liveness.py
+      - name: Every member is tested per change, every trigger can fire
+        run: python3 scripts/check_ci_liveness.py --default-branch "${{ github.event.repository.default_branch }}"
+
+  runs:
+    name: scheduled workflows have fired
+    # Runs on pull requests too. A workflow added in the same change has no
+    # history yet and is given a grace period, so nothing here needs the change
+    # to merge first, and the job's own token permissions (actions: read) are
+    # exercised before merge, not after. scripts/check_ci_liveness.py rejects a
+    # job in a pull-request workflow that is gated off pull requests.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Scheduled workflows are enabled and recent
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/check_ci_liveness.py --default-branch "${{ github.event.repository.default_branch }}" --runs "${{ github.repository }}"

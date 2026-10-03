@@ -1,0 +1,145 @@
+# larql-router cross-platform CI, plus a repeat-run flake detector.
+#
+# Until this file existed the router had no workflow of its own. Its tests ran
+# on Linux only, through the temporary extraction-check, and on Windows only
+# for one filtered test in portability.yml (added after the fact). Issue #6 was
+# a router test that raced OS connect-refused timing and failed on Windows the
+# first time anything ran it there; nothing on Linux could have shown it.
+#
+# The repeat job is the control for that class. A test that depends on timing
+# passes on most runs, so a single green run is weak evidence. Running the whole
+# suite many times on each OS turns "flaky" from an anecdote into a failure.
+# It runs on every change to the crate (a few seconds per repetition once
+# built) and weekly on a schedule, with a longer count.
+#
+# Coverage is not gated here: that is issue #12 and needs its own baseline.
+
+name: larql-router
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/larql-router/**'
+      - 'crates/larql-router-protocol/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'Makefile'
+      - '.github/workflows/larql-router.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/larql-router/**'
+      - 'crates/larql-router-protocol/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'Makefile'
+      - '.github/workflows/larql-router.yml'
+  schedule:
+    - cron: '0 5 * * 3'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: test · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      # macOS runs off pull requests: the router has no macOS-specific surface
+      # and runner queue time dominates the PR wall clock (see larql-core.yml).
+      matrix:
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest", "windows-latest"]' || '["ubuntu-latest", "windows-latest", "macos-14"]') }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Activate the pinned Rust toolchain
+        run: rustup show active-toolchain
+
+      # larql-router-protocol's build.rs skips protoc on non-Windows; a protoc
+      # on PATH satisfies the Windows path.
+      - name: Install protoc (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install protoc -y --no-progress
+
+      - name: Cache cargo registry (downloads only, never target/)
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-reg2-router-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-reg2-router-
+
+      - name: No compiled workspace artefacts may be restored
+        shell: bash
+        run: |
+          if [ -e target ]; then
+            echo "::error::target/ was restored from cache - the cache key or path is wrong"
+            exit 1
+          fi
+
+      - name: Format check
+        run: cargo fmt -p larql-router -- --check
+
+      - name: Clippy
+        run: cargo clippy --locked -p larql-router --all-targets --no-deps -- -D warnings
+
+      - name: Tests
+        run: cargo test --locked -p larql-router
+
+  repeat:
+    name: repeat × ${{ github.event_name == 'schedule' && '50' || '20' }} · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest", "windows-latest"]' || '["ubuntu-latest", "windows-latest", "macos-14"]') }}
+    env:
+      REPETITIONS: ${{ github.event_name == 'schedule' && '50' || '20' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Activate the pinned Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Install protoc (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install protoc -y --no-progress
+
+      - name: Cache cargo registry (downloads only, never target/)
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-reg2-router-repeat-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-reg2-router-repeat-
+
+      - name: Build the test binaries once
+        run: cargo test --locked -p larql-router --no-run
+
+      # Every repetition is a full run of the suite. The first failure stops
+      # the job and names the repetition, so a flake reports itself with a
+      # count instead of as a mystery red.
+      - name: Run the suite repeatedly
+        shell: bash
+        run: |
+          for i in $(seq 1 "$REPETITIONS"); do
+            if ! cargo test --locked -p larql-router -q; then
+              echo "::error::larql-router tests failed on repetition $i of $REPETITIONS on ${{ matrix.os }}"
+              exit 1
+            fi
+          done

@@ -167,8 +167,11 @@ fn q6k_q8k_zero_dims_are_empty_and_short_weights_are_refused() {
 #[cfg(target_arch = "x86_64")]
 #[test]
 fn q8k_matvec_avx2_matches_scalar() {
-    if !is_x86_feature_detected!("avx2") {
-        return; // Skip on hardware without AVX2.
+    // A host without AVX2 skips, unless the CI leg declared AVX2 required, in
+    // which case it fails: an unconditional `return` here let a leg without
+    // the feature pass without running the parity check.
+    if !super::cpu_floor::feature_or_skip("avx2", is_x86_feature_detected!("avx2")) {
+        return;
     }
     let cols = 1024;
     let rows = 7;

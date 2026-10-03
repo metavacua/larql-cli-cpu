@@ -103,6 +103,24 @@ multiple-versions = "warn"      # informational: the graph legitimately carries
                                 # several windows-sys / syn generations
 highlight = "all"
 
+# System TLS (OpenSSL) must not re-enter the shipped graph. Cargo unifies
+# features across the whole build, so one unqualified `reqwest` or a
+# `tungstenite/native-tls` anywhere reintroduces `openssl-sys` for every
+# crate, and it then fails to cross-compile. That regressed once already
+# (issue #4: fixed for larql-vindex in 892dea37, undone for the other six
+# crates and for larql-router's tungstenite). `wrappers` lists the only direct
+# dependents allowed, so a new edge to any of these fails here, at the edge,
+# instead of at a cross build days later. `ureq` is a host-side build
+# dependency (see scripts/check_tls_dependencies.py for the shipped-graph
+# gate); it is the one route that remains.
+deny = [
+    { crate = "native-tls", wrappers = ["ureq"], reason = "system TLS; use rustls (issue #4)" },
+    { crate = "openssl", wrappers = ["native-tls"], reason = "system TLS; use rustls (issue #4)" },
+    { crate = "openssl-sys", wrappers = ["openssl", "native-tls"], reason = "needs system OpenSSL headers; cannot cross-compile (issue #4)" },
+    { crate = "tokio-native-tls", reason = "system TLS; use rustls (issue #4)" },
+    { crate = "hyper-tls", reason = "system TLS; use rustls (issue #4)" },
+]
+
 # `wildcards` is "warn", not "deny", and that is a deliberate, temporary
 # setting. The workspace's own crates depend on each other by bare `path`
 # with no `version` key, which cargo-deny counts as a wildcard. Its
