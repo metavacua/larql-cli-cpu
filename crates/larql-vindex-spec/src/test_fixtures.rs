@@ -2,7 +2,9 @@
 //! test suites. Feature-gated (`test-utils`) so production builds
 //! never compile this.
 
-use std::collections::BTreeMap;
+use alloc::collections::BTreeMap;
+use alloc::string::ToString;
+use alloc::vec;
 
 use crate::{
     ExtractLevel, LayerEntry, QuantFormat, Source, StorageDtype, VindexManifest,

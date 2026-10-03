@@ -4,8 +4,10 @@
 //! own parts; only the names and aliases live here, so a new preset is a
 //! compile error in every consumer that has not decided what it means.
 
-use std::fmt;
-use std::str::FromStr;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::fmt;
+use core::str::FromStr;
 
 /// The name a recipe uses for the unsliced extract output. Not a slice
 /// preset: nothing is removed.

@@ -14,6 +14,8 @@
 //! isn't validated by this crate in v1 — the FP4 compliance gate
 //! already lives in `larql-vindex` and runs at extract time.
 
+use alloc::vec::Vec;
+
 use crate::{QuantFormat, StorageDtype};
 
 /// Validation thresholds for one (quant, dtype) combination.
@@ -56,13 +58,13 @@ pub fn sampled_layers(num_layers: u32) -> Vec<u32> {
         return Vec::new();
     }
     let last = num_layers - 1;
-    let mut out = vec![
+    let mut out = Vec::from([
         0,
         num_layers / 4,
         num_layers / 2,
         (3 * num_layers) / 4,
         last,
-    ];
+    ]);
     out.sort_unstable();
     out.dedup();
     out
