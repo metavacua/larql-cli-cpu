@@ -132,26 +132,37 @@ jobs:
       # Host-side build scripts (tonic/prost, system BLAS probing) run on the runner; install
       # what they need so their failure does not hide the target-side result.
       - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libopenblas-dev pkg-config
-      - name: cargo check --keep-going (workspace minus larql-cli)
+      # One invocation per library crate: a workspace-wide check unifies features, so a
+      # dependent's default `std` is enabled on every lower crate and the `core` layer is
+      # never actually tested. Per crate, `--no-default-features` applies to that package
+      # and its own dependency closure is what gets measured. Cargo builds dependencies
+      # first, so the first failures in each log are the root causes; later ones cascade.
+      - name: cargo check --keep-going, one crate at a time
         run: |
-          set +e
-          cargo check --keep-going -Zbuild-std=${{ matrix.build_std }} --target ${{ matrix.target }} \
-            --workspace --exclude larql-cli --exclude larql-continuation-fixture --lib --no-default-features \
-            2>&1 | tee check.log
-          set -e
+          mkdir -p logs
+          CRATES=$(cargo metadata --no-deps --format-version 1 | python3 -c "
+          import json,sys
+          for p in json.load(sys.stdin)['packages']:
+              if p['name'] in ('larql-cli','larql-continuation-fixture'): continue
+              if any('lib' in t['kind'] for t in p['targets']): print(p['name'])")
           {
-            echo "### ${{ matrix.target }} (${{ matrix.layer }})"
-            echo "Crates that failed to compile:"; echo '```'
-            grep -oE 'could not compile `[^`]+`' check.log | sort -u; echo '```'
-            echo "Error classes:"; echo '```'
-            grep -oE '^error(\[E[0-9]+\])?: .*' check.log | sed -E 's/`[^`]*`/`_`/g' | sort | uniq -c | sort -rn | head -25
-            echo '```'
-          } | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "### ${{ matrix.target }} (${{ matrix.layer }}) — per-crate result, first root-cause failures"
+            echo '| crate | result | first failing crates (build order) |'; echo '|---|---|---|'
+          } >> "$GITHUB_STEP_SUMMARY"
+          for c in $CRATES; do
+            set +e
+            cargo check --keep-going -Zbuild-std=${{ matrix.build_std }} --target ${{ matrix.target }} \
+              -p "$c" --lib --no-default-features > "logs/$c.log" 2>&1
+            ec=$?
+            set -e
+            first=$(grep -oE 'could not compile `[^`]+`' "logs/$c.log" | sed -E 's/could not compile //' | awk '!s[$0]++' | head -5 | tr '\n' ' ')
+            echo "| $c | $([ $ec -eq 0 ] && echo pass || echo FAIL) | $first |" >> "$GITHUB_STEP_SUMMARY"
+          done
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: inventory-${{ matrix.target }}
-          path: check.log
+          path: logs/
           retention-days: 7
 
   runtime-matrix:
