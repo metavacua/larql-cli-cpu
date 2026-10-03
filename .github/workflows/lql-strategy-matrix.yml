@@ -47,9 +47,11 @@ on:
 permissions:
   contents: read
 
+# A push to main is never cancelled by the next one: the record of each main commit is the
+# point of running there. Only a superseded pull-request run is. Dispatches get a unique group.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   RUST_BACKTRACE: "1"

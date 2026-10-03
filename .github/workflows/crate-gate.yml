@@ -23,8 +23,12 @@
 name: crate-gate
 
 on:
+  # Crate PRs are based on experiment/crate-gate, not main: GitHub filters pull_request on
+  # the base branch and has no head-branch filter, so this is what keeps fifteen crate PRs
+  # from also waking every shared workflow (quality, portability, mutants, ...) fifteen
+  # times. scripts/test_workflow_triggers.py asserts it.
   pull_request:
-    branches: [main]
+    branches: [main, experiment/crate-gate]
 
 permissions:
   contents: read
@@ -37,6 +41,18 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Which workflows a crate branch wakes, and every workflow's permissions and concurrency,
+  # are themselves under test, so an edit cannot silently start another round of cancelled
+  # and queued runs or widen a token.
+  triggers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 -m pip install --quiet pyyaml
+      - run: python3 scripts/test_workflow_triggers.py
+      - run: python3 scripts/test_workflow_hygiene.py
+
   resolve:
     runs-on: ubuntu-latest
     timeout-minutes: 5
