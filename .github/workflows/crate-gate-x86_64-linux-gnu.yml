@@ -1,0 +1,24 @@
+# Crate gate, wrapper: x86_64-unknown-linux-gnu, with the lql matrix run natively.
+# Takes its crate from the branch name (experiment/crate/<package>); see crate-gate-run.yml
+# for the stages and crate-gate-chain.yml for the per-target order. Crate PRs are based on
+# experiment/crate-gate, not main: GitHub filters pull_request on the base branch and has no
+# head-branch filter, so this is what keeps fifteen crate PRs from waking every shared
+# workflow fifteen times (scripts/test_workflow_triggers.py asserts it).
+name: crate-gate-x86_64-linux-gnu
+
+on:
+  pull_request:
+    branches: [main, experiment/crate-gate]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    uses: ./.github/workflows/crate-gate-run.yml
+    with:
+      targets: '[{"target":"x86_64-unknown-linux-gnu","runs_on":"ubuntu-latest","features":"","clippy_args":"","lql":true}]'

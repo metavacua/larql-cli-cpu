@@ -27,6 +27,15 @@ WORKFLOWS = Path(__file__).resolve().parent.parent / ".github" / "workflows"
 GATE_BASE = "experiment/crate-gate"
 CRATE_BRANCH = "experiment/crate/larql-core"
 CRATE_FILE = "crates/larql-core/src/lib.rs"
+# One wrapper workflow per target family, so each is its own run (its own artifacts and
+# concurrency group): the freestanding set plus each selected gnu target.
+GATES = {
+    "crate-gate",
+    "crate-gate-x86_64-linux-gnu",
+    "crate-gate-aarch64-linux-gnu",
+    "crate-gate-x86_64-windows-gnu",
+    "crate-gate-riscv64gc-linux-gnu",
+}
 
 
 def load():
@@ -100,19 +109,21 @@ class CrateBranchTriggers(unittest.TestCase):
             with self.subTest(changed=changed):
                 self.assertEqual(woken("push", CRATE_BRANCH, changed), set())
 
-    def test_crate_pr_into_the_gate_base_wakes_only_the_gate(self):
+    def test_crate_pr_into_the_gate_base_wakes_only_the_gates(self):
         for changed in ([], [CRATE_FILE], ["Cargo.lock", ".github/workflows/crate-gate.yml"]):
             with self.subTest(changed=changed):
-                self.assertEqual(woken("pull_request", GATE_BASE, changed), {"crate-gate"})
+                self.assertEqual(woken("pull_request", GATE_BASE, changed), GATES)
 
     def test_ordinary_pr_into_main_still_wakes_the_usual_workflows(self):
         got = woken("pull_request", "main", [CRATE_FILE, "Cargo.lock"])
-        for expected in ("commit-messages", "quality", "larql-core", "crate-gate"):
+        for expected in ("commit-messages", "quality", "larql-core", *GATES):
             self.assertIn(expected, got)
 
-    def test_the_gate_itself_is_pull_request_only(self):
+    def test_the_gates_are_pull_request_only(self):
         # A push trigger as well would start the heavy strict matrix twice per commit.
-        self.assertFalse(triggers(load()["crate-gate"], "push", CRATE_BRANCH, [CRATE_FILE]))
+        for name in GATES:
+            with self.subTest(gate=name):
+                self.assertFalse(triggers(load()[name], "push", CRATE_BRANCH, [CRATE_FILE]))
 
 
 if __name__ == "__main__":
