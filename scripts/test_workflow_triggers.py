@@ -27,15 +27,8 @@ WORKFLOWS = Path(__file__).resolve().parent.parent / ".github" / "workflows"
 GATE_BASE = "experiment/crate-gate"
 CRATE_BRANCH = "experiment/crate/larql-core"
 CRATE_FILE = "crates/larql-core/src/lib.rs"
-# One wrapper workflow per target family, so each is its own run (its own artifacts and
-# concurrency group): the freestanding set plus each selected gnu target.
-GATES = {
-    "crate-gate",
-    "crate-gate-x86_64-linux-gnu",
-    "crate-gate-aarch64-linux-gnu",
-    "crate-gate-x86_64-windows-gnu",
-    "crate-gate-riscv64gc-linux-gnu",
-}
+# One gate workflow: fmt once per crate, then every target's chain in the same run.
+GATES = {"crate-gate"}
 
 
 def load():

@@ -1,6 +1,6 @@
 # One crate on one target: clippy, then build, then (where the CLI can run) the strict
 # lql-strategy-matrix. Each stage needs the one before; a failure ends this target only.
-# Called once per target by crate-gate-run.yml.
+# Called once per target by crate-gate.yml.
 name: crate-gate-chain
 
 on:
@@ -60,4 +60,5 @@ jobs:
       include_bitnet2b: false
       include_mistral7b: false
       runs_on: ${{ inputs.runs_on }}
+      tag: ${{ inputs.target }}
     secrets: inherit

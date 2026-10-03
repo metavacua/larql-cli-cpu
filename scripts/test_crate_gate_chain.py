@@ -2,25 +2,28 @@
 # /// script
 # dependencies = ["pyyaml"]
 # ///
-"""The order a crate is gated in, per target.
+"""The order a crate is gated in, and what is shared between targets.
 
-  fmt                                  once per run; a failure ends the run
-  clippy                               per target; a failure ends that target
-  build (cargo build --lib)            per target, only after its clippy; a failure ends it
-  lql-strategy-matrix                  per target, only after its build, and only where the
-                                       CLI can run (the freestanding targets have no OS)
+One workflow run per crate (crate-gate.yml):
 
-Each target family is its own wrapper workflow (so its own run: artifact names and
-concurrency groups cannot collide between two lql instances), sharing crate-gate-run.yml
-(resolve + fmt + a matrix over targets) and crate-gate-chain.yml (clippy -> build -> lql).
+  fmt                                  ONCE per crate, not per target; a failure ends the run
+  per target (16, in parallel):
+    clippy                             target-specific lints, so per target; a failure ends it
+    build (cargo build --lib)          only after that target's clippy
+    lql-strategy-matrix                only after that target's build, and only where the CLI
+                                       can run (the freestanding targets have no OS)
+
+Two lql instances can run in one workflow run (x86_64 and aarch64), so everything an
+instance shares with the run -- artifact names, download globs, the concurrency group --
+carries a per-instance tag, or the second instance would read or cancel the first.
 
 Run: uv run scripts/test_crate_gate_chain.py
 """
 
-import json
 import unittest
+from pathlib import Path
 
-from test_workflow_triggers import GATES, load
+from test_workflow_triggers import GATES, WORKFLOWS, load
 
 FREESTANDING = {
     "wasm32v1-none", "riscv32i-unknown-none-elf", "riscv32im-unknown-none-elf",
@@ -29,14 +32,13 @@ FREESTANDING = {
     "riscv64imac-unknown-none-elf", "aarch64-unknown-none", "x86_64-unknown-none",
     "aarch64-unknown-uefi", "x86_64-unknown-uefi",
 }
+# The gnu targets, and the runner the lql matrix can use for them today (None: not wired).
 GNU = {
-    "crate-gate-x86_64-linux-gnu": "x86_64-unknown-linux-gnu",
-    "crate-gate-aarch64-linux-gnu": "aarch64-unknown-linux-gnu",
-    "crate-gate-x86_64-windows-gnu": "x86_64-pc-windows-gnu",
-    "crate-gate-riscv64gc-linux-gnu": "riscv64gc-unknown-linux-gnu",
+    "x86_64-unknown-linux-gnu": "ubuntu-latest",
+    "aarch64-unknown-linux-gnu": "ubuntu-24.04-arm",
+    "x86_64-pc-windows-gnu": None,
+    "riscv64gc-unknown-linux-gnu": None,
 }
-# The gnu targets whose CLI the lql matrix can run today: native runners.
-LQL_RUNNERS = {"x86_64-unknown-linux-gnu": "ubuntu-latest", "aarch64-unknown-linux-gnu": "ubuntu-24.04-arm"}
 
 
 def needs(job):
@@ -44,8 +46,13 @@ def needs(job):
     return {n} if isinstance(n, str) else set(n)
 
 
-def targets_of(wrapper):
-    return json.loads(load()[wrapper]["jobs"]["gate"]["with"]["targets"])
+def steps(workflow):
+    for job in workflow["jobs"].values():
+        yield from job.get("steps", [])
+
+
+def targets():
+    return load()["crate-gate"]["jobs"]["chain"]["strategy"]["matrix"]["t"]
 
 
 class Order(unittest.TestCase):
@@ -60,48 +67,81 @@ class Order(unittest.TestCase):
         self.assertIn("inputs.lql", lql["if"])
         self.assertEqual(lql["uses"], "./.github/workflows/lql-strategy-matrix.yml")
         self.assertIs(lql["with"]["strict"], True)
+        self.assertIn("inputs.target", lql["with"]["tag"])
 
-    def test_run_is_fmt_first_and_every_target_waits_for_it(self):
-        jobs = load()["crate-gate-run"]["jobs"]
+    def test_fmt_runs_once_per_crate_and_every_target_waits_for_it(self):
+        jobs = load()["crate-gate"]["jobs"]
         self.assertEqual(needs(jobs["fmt"]), {"resolve"})
         self.assertEqual(needs(jobs["chain"]), {"resolve", "fmt"})
         self.assertEqual(jobs["chain"]["uses"], "./.github/workflows/crate-gate-chain.yml")
-        self.assertIs(jobs["chain"]["strategy"]["fail-fast"], False)  # one red target hides no other
+        self.assertIs(jobs["chain"]["strategy"]["fail-fast"], False)  # a red target hides no other
+
+    def test_fmt_appears_exactly_once_in_the_whole_gate(self):
+        hits = [
+            (path.name, step.get("run"))
+            for path in sorted(WORKFLOWS.glob("crate-gate*.yml"))
+            for step in steps(load()[path.stem])
+            if "cargo fmt" in str(step.get("run", ""))
+        ]
+        self.assertEqual(len(hits), 1, hits)
+        self.assertEqual(hits[0][0], "crate-gate.yml")
 
 
 class Targets(unittest.TestCase):
-    def test_every_gate_is_a_thin_wrapper_over_the_shared_run(self):
-        for name in GATES:
-            with self.subTest(gate=name):
-                job = load()[name]["jobs"]["gate"]
-                self.assertEqual(job["uses"], "./.github/workflows/crate-gate-run.yml")
+    def test_one_gate_workflow_and_no_per_family_wrappers(self):
+        self.assertEqual({p.stem for p in WORKFLOWS.glob("crate-gate*.yml")}, GATES | {"crate-gate-chain"})
 
-    def test_freestanding_targets_are_gated_without_lql(self):
-        got = targets_of("crate-gate")
-        self.assertEqual({t["target"] for t in got}, FREESTANDING)
-        for t in got:
+    def test_every_selected_target_is_gated(self):
+        self.assertEqual({t["target"] for t in targets()}, FREESTANDING | set(GNU))
+
+    def test_freestanding_targets_have_no_lql_and_the_no_std_lints(self):
+        for t in targets():
+            if t["target"] not in FREESTANDING:
+                continue
             with self.subTest(target=t["target"]):
                 self.assertFalse(t["lql"], "no OS to run the CLI on")
                 self.assertEqual(t["features"], "--no-default-features")
                 self.assertIn("std_instead_of_core", t["clippy_args"])
 
-    def test_gnu_targets_run_default_features_and_lql_where_runnable(self):
-        for wrapper, target in GNU.items():
+    def test_gnu_targets_use_default_features_and_lql_where_runnable(self):
+        got = {t["target"]: t for t in targets()}
+        for target, runner in GNU.items():
             with self.subTest(target=target):
-                (t,) = targets_of(wrapper)
-                self.assertEqual(t["target"], target)
+                t = got[target]
                 self.assertEqual(t["features"], "")
-                self.assertEqual(t["lql"], target in LQL_RUNNERS)
-                if t["lql"]:
-                    self.assertEqual(t["runs_on"], LQL_RUNNERS[target])
+                self.assertEqual(t["lql"], runner is not None)
+                if runner:
+                    self.assertEqual(t["runs_on"], runner)
 
-    def test_lql_matrix_takes_its_runner_as_an_input(self):
+
+class LqlInstancesDoNotCollide(unittest.TestCase):
+    def artifact_steps(self):
+        for step in steps(load()["lql-strategy-matrix"]):
+            if str(step.get("uses", "")).startswith("actions/") and "artifact" in step["uses"]:
+                yield step
+
+    def test_takes_its_runner_and_a_tag_as_inputs(self):
         wf = load()["lql-strategy-matrix"]
-        self.assertIn("runs_on", wf[True]["workflow_call"]["inputs"])
+        for name in ("runs_on", "tag"):
+            self.assertIn(name, wf[True]["workflow_call"]["inputs"])
         for name, job in wf["jobs"].items():
             if "runs-on" in job:
                 with self.subTest(job=name):
                     self.assertIn("inputs.runs_on", job["runs-on"])
+
+    def test_every_artifact_name_carries_the_tag(self):
+        for step in self.artifact_steps():
+            with self.subTest(step=step.get("name", step["with"])):
+                self.assertIn("env.TAG", step["with"].get("name", step["with"].get("pattern", "")))
+
+    def test_downloading_everything_is_filtered_to_this_instance(self):
+        for step in self.artifact_steps():
+            if "download" in step["uses"] and "name" not in step["with"]:
+                with self.subTest(step=step.get("name", step["with"])):
+                    self.assertIn("env.TAG", step["with"].get("pattern", ""))
+
+    def test_concurrency_group_is_per_instance(self):
+        self.assertIn("inputs.tag", load()["lql-strategy-matrix"]["concurrency"]["group"])
 
 
 if __name__ == "__main__":
