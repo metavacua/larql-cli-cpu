@@ -49,7 +49,8 @@ def main() -> None:
     if errors:
         raise SystemExit("\n".join(errors))
     # Metadata only: no cross compiler, target stdlib or OpenBLAS install needed.
-    # Normal edges exclude OpenBLAS/Swagger's host-side download build tools.
+    # Normal edges only: this gates the shipped graph, and BLAS is linked through
+    # the in-repo larql-blas-link crate (no build-time download tooling).
     tree = subprocess.run(
         ["cargo", "tree", "--locked", "--target", args.target, "--no-default-features",
          "-p", "larql-cli", "-p", "larql-router",

@@ -7,8 +7,6 @@
 //! --features heavy_tests`.
 #![cfg(feature = "heavy_tests")]
 
-extern crate blas_src;
-
 use larql_compute::cpu::q4::quantize_q4_0;
 use larql_compute::cpu_backend;
 use ndarray::Array2;

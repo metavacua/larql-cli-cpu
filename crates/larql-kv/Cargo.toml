@@ -23,23 +23,11 @@ thiserror = { workspace = true }
 ndarray = "0.16"
 zip = { version = "2", default-features = false }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+# BLAS: `ndarray`'s `blas` feature is enabled per platform; the native link
+# (Accelerate / system OpenBLAS) is forced by `larql-compute`, which this
+# crate depends on. Windows has no BLAS backend (see `larql-compute/Cargo.toml`).
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))'.dependencies]
 ndarray = { version = "0.16", features = ["blas"] }
-blas-src = { version = "0.10", features = ["openblas"], default-features = false }
-openblas-src = { version = "0.10", features = ["system"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-ndarray = { version = "0.16", features = ["blas"] }
-blas-src = { version = "0.10", features = ["accelerate"] }
-
-# Windows: no BLAS backend. See `larql-compute/Cargo.toml` for the
-# rationale — the system OpenBLAS race manifests primarily here,
-# where most of the "compare two compute paths against self" tests
-# live (vindex_compare, markov_residual). `blas-src` kept featureless
-# so existing `extern crate blas_src;` declarations still compile.
-[target.'cfg(target_os = "windows")'.dependencies]
-ndarray = "0.16"
-blas-src = { version = "0.10", default-features = false }
 
 [dev-dependencies]
 # CONTINUATION-MEM-1's harness reads KvView::backing_addresses (test-utils only).

@@ -17,9 +17,9 @@
 #      compile and run" bar as the Tier-1 legs. i686-unknown-linux-gnu is
 #      dropped for now (2026-09-30): confirmed `libopenblas-dev:i386`
 #      does not exist in Ubuntu noble's archives at all, and this crate's
-#      OpenBLAS linkage is unconditional system linking with no
-#      from-source fallback - a real dependency-graph gap (Cargo.toml,
-#      not this CI file) to close before i686 comes back.
+#      OpenBLAS linkage (larql-blas-link) is unconditional system
+#      linking with no from-source fallback - a real dependency-graph
+#      gap (Cargo.toml, not this CI file) to close before i686 comes back.
 #   2. For the LIBRARY crates with no obviously-unconditional OS coupling,
 #      how far would a `#![no_std]` port get today, across both a
 #      "decomposition" set (wasm32v1-none, the riscv32/64-*-none-elf
@@ -177,11 +177,12 @@ jobs:
         run: rustup target add wasm32-unknown-unknown wasm32-unknown-emscripten wasm32-wasip1
 
       # OpenBLAS is a SYSTEM dependency here, not vendored:
-      # `larql-compute`'s Linux target-cfg block pulls in
-      # `openblas-src = { features = ["system"] }`, which links the
-      # system `libopenblas` rather than building one, so every one of
-      # this job's binary crates needs it on PATH via pkg-config to even
-      # check successfully (larql-cli reaches larql-compute transitively
+      # `larql-compute`'s Linux target-cfg block pulls in the in-repo
+      # `larql-blas-link` crate, which links the system `libopenblas`
+      # (a plain `-lopenblas`, no pkg-config probe, no download) rather
+      # than building one, so every one of this job's binary crates needs
+      # it on the linker path to link successfully (larql-cli reaches
+      # larql-compute transitively
       # through larql-inference; larql-router has no larql-compute
       # dependency at all - installing it unconditionally is simpler and
       # harmless).
@@ -548,8 +549,11 @@ jobs:
             -o Dir::Etc::sourceparts="-" \
             -o APT::Get::List-Cleanup="0"
           sudo apt-get install -y libopenblas-dev:riscv64 pkg-config
-          echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
-          echo "PKG_CONFIG_PATH_riscv64_unknown_linux_gnu=/usr/lib/riscv64-linux-gnu/pkgconfig" >> "$GITHUB_ENV"
+          # larql-blas-link does no pkg-config probe: tell its build script
+          # where the riscv64 libopenblas lives. The variable is target-scoped
+          # so the host-built continuation fixture is not handed a riscv64
+          # directory on its x86_64 link line.
+          echo "OPENBLAS_LIB_DIR_riscv64gc_unknown_linux_gnu=/usr/lib/riscv64-linux-gnu" >> "$GITHUB_ENV"
 
       # A real linker (the cross-gcc above) for building, and a runner
       # that hands the resulting binary to qemu-riscv64-static with the
@@ -631,7 +635,7 @@ jobs:
         # forgotten:
         #
         #   larql-compute         - rayon + a per-target BLAS backend
-        #                            (blas-src/openblas-src) are
+        #                            (blas-src / larql-blas-link) are
         #                            unconditional, core to the crate's
         #                            purpose, and behind no feature.
         #   larql-factory         - reqwest is unconditional with no

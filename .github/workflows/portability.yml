@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'crates/larql-compute/**'
+      - 'crates/larql-blas-link/**'
       - 'crates/larql-cli/**'
       - 'crates/larql-continuation-fixture/**'
       - 'crates/larql-router/**'
@@ -16,6 +17,7 @@ on:
     branches: [main]
     paths:
       - 'crates/larql-compute/**'
+      - 'crates/larql-blas-link/**'
       - 'crates/larql-cli/**'
       - 'crates/larql-continuation-fixture/**'
       - 'crates/larql-router/**'

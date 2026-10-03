@@ -23,8 +23,6 @@
 //! the `neon` rows are today's production path. A future `asm` kernel adds
 //! a third row here and must stay bit-identical to `scalar`.
 
-extern crate blas_src;
-
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use larql_compute::cpu::ops::q4_common::quantize_q4_k;
 use larql_compute::cpu::ops::q4k_q8k_dot::{
