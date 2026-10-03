@@ -14,6 +14,13 @@ name: lql-strategy-matrix
 on:
   push:
     branches: [main]
+  # Also callable as a gate: crate-gate.yml runs it per crate with strict=true.
+  workflow_call:
+    inputs:
+      strict:
+        description: "Fail the run if any conformance invariant is violated"
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       strict:
@@ -407,7 +414,7 @@ jobs:
           path: artifacts
       - name: Run conformance oracle
         env:
-          STRICT_INPUT: ${{ github.event.inputs.strict }}
+          STRICT_INPUT: ${{ inputs.strict }}
         run: |
           STRICT=""
           [ "$STRICT_INPUT" = "true" ] && STRICT="--strict"

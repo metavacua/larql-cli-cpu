@@ -1,0 +1,121 @@
+# Per-crate gate. One branch per crate in larql-cli's dependency graph, named
+# experiment/crate/<package>, carries one draft PR; this workflow reads the crate
+# from that branch name, so every crate is gated by the same file and no crate's
+# run shares a concurrency group with another's. Queuing is fine; blocking is not.
+#
+# A crate must pass, in order:
+#   1. fmt                      cargo fmt -p <crate> --check
+#   2. compile + clippy         once per selected target (the 12 Tier 2 without-host-tools
+#                               targets of target-matrix.yml), --no-default-features, with
+#                               the core/alloc/std restriction lints, -D warnings
+#   3. lql-strategy-matrix      strict, run last because it builds the whole CLI and runs
+#                               the full LQL corpus
+#
+# There is no expected-fail tolerance here, unlike target-matrix.yml's policy files. A
+# crate that does not yet compile on a target is red, and the red cell names what has to be
+# gated, split out or deleted. What does not survive a lack of std does not survive; its
+# tests, examples and callers move with it. Nothing is skipped to turn a cell green.
+#
+# Branches that are not experiment/crate/* skip every job, so the existing experiment PRs
+# are unaffected. pull_request only: a push trigger as well would start the heavy strict
+# matrix twice for one commit.
+name: crate-gate
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      crate: ${{ steps.r.outputs.crate }}
+      kind: ${{ steps.r.outputs.kind }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: r
+        run: |
+          branch="${GITHUB_HEAD_REF}"
+          crate="${branch#experiment/crate/}"
+          if [ "$crate" = "$branch" ]; then
+            echo "not a crate branch ($branch): nothing to gate"
+            echo "crate=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          meta=$(cargo metadata --no-deps --format-version 1)
+          echo "$meta" | jq -e --arg c "$crate" '.packages[] | select(.name == $c)' > /dev/null \
+            || { echo "::error::$branch names no workspace package '$crate'"; exit 1; }
+          kind=bin
+          echo "$meta" | jq -e --arg c "$crate" '.packages[] | select(.name == $c) | .targets[] | select(.kind | index("lib"))' > /dev/null && kind=lib
+          echo "crate=$crate" >> "$GITHUB_OUTPUT"
+          echo "kind=$kind" >> "$GITHUB_OUTPUT"
+          echo "gating $crate ($kind)"
+
+  fmt:
+    needs: resolve
+    if: needs.resolve.outputs.crate != ''
+    name: fmt · ${{ needs.resolve.outputs.crate }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - run: cargo fmt -p ${{ needs.resolve.outputs.crate }} -- --check
+
+  targets:
+    needs: resolve
+    if: needs.resolve.outputs.crate != ''
+    name: ${{ needs.resolve.outputs.crate }} · ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - wasm32v1-none
+          - riscv32i-unknown-none-elf
+          - riscv32im-unknown-none-elf
+          - riscv32imac-unknown-none-elf
+          - riscv32imafc-unknown-none-elf
+          - riscv32imc-unknown-none-elf
+          - riscv64gc-unknown-none-elf
+          - riscv64imac-unknown-none-elf
+          - aarch64-unknown-none
+          - x86_64-unknown-none
+          - aarch64-unknown-uefi
+          - x86_64-unknown-uefi
+    env:
+      CRATE: ${{ needs.resolve.outputs.crate }}
+      KIND: ${{ needs.resolve.outputs.kind }}
+    steps:
+      - uses: actions/checkout@v7
+      # All twelve ship prebuilt core+alloc: no -Zbuild-std, no nightly.
+      - run: rustup target add ${{ matrix.target }}
+      # Build scripts run on the runner whatever the target is.
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libopenblas-dev pkg-config
+      - name: compile
+        run: cargo check --locked --target ${{ matrix.target }} -p "$CRATE" --$KIND --no-default-features
+      - name: clippy
+        if: ${{ !cancelled() }}
+        run: |
+          cargo clippy --locked --target ${{ matrix.target }} -p "$CRATE" --$KIND --no-default-features --no-deps -- \
+            -D warnings \
+            -W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core
+
+  lql-strategy-matrix:
+    needs: [resolve, fmt, targets]
+    if: needs.resolve.outputs.crate != ''
+    uses: ./.github/workflows/lql-strategy-matrix.yml
+    with:
+      strict: true
+    secrets: inherit
