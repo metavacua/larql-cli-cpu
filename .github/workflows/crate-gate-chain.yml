@@ -1,0 +1,63 @@
+# One crate on one target: clippy, then build, then (where the CLI can run) the strict
+# lql-strategy-matrix. Each stage needs the one before; a failure ends this target only.
+# Called once per target by crate-gate-run.yml.
+name: crate-gate-chain
+
+on:
+  workflow_call:
+    inputs:
+      crate: {type: string, required: true}
+      kind: {type: string, required: true, description: "lib, or bin for a crate with no library"}
+      target: {type: string, required: true}
+      runs_on: {type: string, required: true, description: "Runner for clippy, build and (if lql) the matrix"}
+      features: {type: string, default: ""}
+      clippy_args: {type: string, default: "", description: "Extra lints after the -D warnings"}
+      lql: {type: boolean, default: false}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  clippy:
+    name: clippy · ${{ inputs.target }}
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup target add ${{ inputs.target }}
+      # Build scripts run on the runner whatever the target is.
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libopenblas-dev pkg-config
+      - run: >-
+          cargo clippy --locked --target ${{ inputs.target }} -p ${{ inputs.crate }}
+          --${{ inputs.kind == 'bin' && 'bins' || 'lib' }} ${{ inputs.features }} --no-deps
+          -- -D warnings ${{ inputs.clippy_args }}
+
+  build:
+    name: build · ${{ inputs.target }}
+    needs: clippy
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup target add ${{ inputs.target }}
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libopenblas-dev pkg-config
+      - run: >-
+          cargo build --locked --target ${{ inputs.target }} -p ${{ inputs.crate }}
+          --${{ inputs.kind == 'bin' && 'bins' || 'lib' }} ${{ inputs.features }}
+
+  # The CLI is built from this branch, so it carries the crate as it now stands, and the
+  # CLI (a binary) is what the matrix runs. SmolLM2-135M base and instruct only for now.
+  lql:
+    name: lql · ${{ inputs.target }}
+    needs: build
+    if: inputs.lql
+    uses: ./.github/workflows/lql-strategy-matrix.yml
+    with:
+      strict: true
+      include_bitnet2b: false
+      include_mistral7b: false
+      runs_on: ${{ inputs.runs_on }}
+    secrets: inherit
