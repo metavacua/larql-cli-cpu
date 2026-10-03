@@ -5,22 +5,32 @@
 /// The test validates only the dispatch half — registry.call(op, args) → result.
 ///
 /// Requires larql-experts to be pre-built:
-///   cd crates/larql-experts && cargo build --target wasm32-wasip1 --release
+///   cargo build --manifest-path crates/larql-experts/Cargo.toml \
+///     --target wasm32-unknown-unknown --release
 use std::path::PathBuf;
 
-use larql_inference::experts::ExpertRegistry;
+use larql_inference::experts::{
+    built_experts_required, expert_build_command, expert_wasm_dir_in, ExpertRegistry,
+    REQUIRE_EXPERTS_ENV,
+};
 use serde_json::{json, Value};
 
 // ── Infrastructure ────────────────────────────────────────────────────────────
 
 fn wasm_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../larql-experts/target/wasm32-wasip1/release")
+    expert_wasm_dir_in(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../larql-experts"))
 }
 
 fn registry() -> Option<ExpertRegistry> {
     let dir = wasm_dir();
     if !dir.exists() {
-        eprintln!("skip: wasm dir missing — run `cargo build --target wasm32-wasip1 --release` in larql-experts");
+        assert!(
+            !built_experts_required(),
+            "{REQUIRE_EXPERTS_ENV} is set but the built experts are missing at {} — run `{}`",
+            dir.display(),
+            expert_build_command()
+        );
+        eprintln!("skip: wasm dir missing — run `{}`", expert_build_command());
         return None;
     }
     Some(ExpertRegistry::load_dir(&dir).expect("load_dir"))

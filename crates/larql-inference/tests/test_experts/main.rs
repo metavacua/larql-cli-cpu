@@ -1,17 +1,41 @@
 /// Integration tests for the WASM expert registry.
 ///
 /// Requires the larql-experts workspace to be pre-built:
-///   cd crates/larql-experts && cargo build --target wasm32-wasip1 --release
+///   cargo build --manifest-path crates/larql-experts/Cargo.toml \
+///     --target wasm32-unknown-unknown --release
+///
+/// Set LARQL_REQUIRE_WASM_EXPERTS=1 (CI does) to turn a missing build into a
+/// failure instead of a skip.
 ///
 /// Each test loads the expert under test from the release WASM directory and
 /// invokes ops with structured args, asserting on typed JSON values.
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use larql_inference::experts::ExpertRegistry;
+use larql_inference::experts::{
+    built_experts_required, expert_build_command, expert_wasm_dir_in, ExpertRegistry,
+    REQUIRE_EXPERTS_ENV,
+};
 use serde_json::{json, Value};
 
 fn wasm_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../larql-experts/target/wasm32-wasip1/release")
+    expert_wasm_dir_in(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../larql-experts"))
+}
+
+/// True when `path` (a built expert or the build directory) is absent and the
+/// caller should skip. Panics instead when `LARQL_REQUIRE_WASM_EXPERTS` is set,
+/// so a wrong path or an unbuilt workspace cannot make the suite pass vacuously.
+fn skip_if_missing(path: &Path) -> bool {
+    if path.exists() {
+        return false;
+    }
+    assert!(
+        !built_experts_required(),
+        "{REQUIRE_EXPERTS_ENV} is set but {} is missing — run `{}`",
+        path.display(),
+        expert_build_command()
+    );
+    eprintln!("skip (missing wasm): {}", path.display());
+    true
 }
 
 fn wasm(name: &str) -> PathBuf {
@@ -22,8 +46,7 @@ fn wasm(name: &str) -> PathBuf {
 /// Returns None if the expert binary is missing (skip) or the expert declined.
 fn call(expert: &str, op: &str, args: Value) -> Option<Value> {
     let path = wasm(expert);
-    if !path.exists() {
-        eprintln!("skip (missing wasm): {}", expert);
+    if skip_if_missing(&path) {
         return None;
     }
     let mut reg = ExpertRegistry::default();
@@ -100,4 +123,5 @@ mod additional_op_coverage_at_least_one_test_2;
 mod arithmetic;
 mod date;
 mod luhn;
+mod no_imports;
 mod statistics;

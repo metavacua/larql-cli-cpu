@@ -81,8 +81,9 @@ sandboxed modules with an explicit ABI. The model shouldn't need to know
 how an op is implemented; it only needs to select the op and supply the
 advertised args. WASM is a good fit for that boundary: deterministic
 execution, host-controlled memory, low language coupling (today every
-expert is Rust, but a Zig, C, TinyGo, or other WASI-compatible language
-could plug in behind the same ABI), and trust + validation + resource
+expert is Rust, but a Zig, C, TinyGo, or other language that compiles to a
+freestanding `wasm32` module with no imports could plug in behind the same
+ABI; the host provides no WASI), and trust + validation + resource
 control land back on the host where they belong.
 
 The `Dispatcher` trait is therefore the load-bearing abstraction.
@@ -107,8 +108,10 @@ instead of theoretical.
 Going in:
 
 - **`crates/larql-experts/`** — a nested workspace with 19 WASM cdylibs
-  (arithmetic, conway, date, …) targeting `wasm32-wasip1`, sharing the
-  `expert-interface` crate. Each cdylib advertised metadata as a flat
+  (arithmetic, conway, date, …) targeting `wasm32-unknown-unknown` (they
+  were originally `wasm32-wasip1`; the experts use no time, env, fs, rand or
+  print, so the WASI imports were dropped and the host no longer links
+  `wasmtime-wasi`), sharing the `expert-interface` crate. Each cdylib advertised metadata as a flat
   `Vec<String>` of op names.
 - **`crates/larql-inference/src/experts/`** — `ExpertRegistry` with
   wasmtime + lazy instantiation + `.cwasm` cache. A handful of dispatch
@@ -665,9 +668,10 @@ crates/larql-server/tests/test_expert_endpoint.rs      # rename callers
 ## How to use it
 
 ```sh
-# Build the WASM modules once.
+# Build the WASM modules once (`rustup target add wasm32-unknown-unknown`
+# first). They import nothing; the loader uses a plain wasmtime Linker.
 cd crates/larql-experts
-cargo build --target wasm32-wasip1 --release
+cargo build --target wasm32-unknown-unknown --release
 cd ../..
 
 # Run a focused tool-use session. In practice, always scope ops via --ops —
