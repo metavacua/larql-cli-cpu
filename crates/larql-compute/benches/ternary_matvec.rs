@@ -7,8 +7,6 @@
 //!
 //! Run: `cargo bench -p larql-compute --bench ternary_matvec`
 
-extern crate blas_src;
-
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use larql_compute::cpu::ops::ternary_matvec::{
     matvec_i2s_f32_into, matvec_i2s_q8_into, quantize_activation_i8, BitLinearWeight,

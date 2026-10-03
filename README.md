@@ -29,7 +29,7 @@ the import record each change the extraction made, one topic per commit.
 
 | Kept | Why |
 |---|---|
-| `larql-cli`, and the 13 crates `cargo tree -p larql-cli --no-default-features` reaches | the binary and its whole dependency closure |
+| `larql-cli`, and the 14 crates `cargo tree -p larql-cli --no-default-features` reaches (one of them, `larql-blas-link`, is new here: it links the system OpenBLAS) | the binary and its whole dependency closure |
 | `larql-continuation-fixture` | the CLI's plugin tests build it by package name |
 | `larql-experts` (nested workspace) | `larql run --experts` finds its WASM modules by path |
 | `registry/`, `data/`, test fixtures | compiled in with `include_str!`, or read by tests |
@@ -48,6 +48,7 @@ rustup fetches it automatically.
 
 ```bash
 # Linux needs a system OpenBLAS: sudo apt-get install libopenblas-dev
+# (linked by the in-repo larql-blas-link crate; set OPENBLAS_LIB_DIR if it is not on the linker path)
 # macOS uses Accelerate; Windows builds without a BLAS.
 cargo build --release -p larql-cli
 ```

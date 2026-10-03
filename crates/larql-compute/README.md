@@ -30,7 +30,8 @@ primitives from this crate but is a different interface from `ComputeBackend`.
 
 ## Platforms and checks
 
-The manifest selects Accelerate on macOS, system OpenBLAS on Linux/FreeBSD,
+The manifest selects Accelerate on macOS, system OpenBLAS on Linux/FreeBSD
+(linked by the in-repo [larql-blas-link](../larql-blas-link/README.md) crate),
 and the ndarray path without a BLAS backend on Windows. CPU compute has no
 Metal feature. The `gpu` flags exposed by consumers select the sibling crate.
 

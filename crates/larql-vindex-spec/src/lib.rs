@@ -31,8 +31,16 @@
 //! evolution channel.
 
 #![deny(missing_docs)]
+#![cfg_attr(not(feature = "std"), no_std)]
 
-use std::collections::BTreeMap;
+extern crate alloc;
+#[cfg(test)]
+#[macro_use]
+extern crate std;
+
+use alloc::collections::BTreeMap;
+use alloc::string::String;
+use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 

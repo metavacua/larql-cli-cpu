@@ -1,0 +1,18 @@
+[package]
+name = "larql-blas-link"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Links the system OpenBLAS on Linux/FreeBSD without openblas-src and its HTTP-client build chain. Exposes nothing."
+keywords = ["blas", "openblas", "link"]
+categories = ["external-ffi-bindings"]
+build = "build.rs"
+
+# Deliberately empty and it must stay that way: the point of this crate is a
+# native link with no network-capable crate anywhere in the build graph.
+[dependencies]
+
+[lints]
+workspace = true

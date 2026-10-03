@@ -22,7 +22,7 @@
 //! All matrix operations route through `larql_compute` (BLAS on CPU,
 //! Metal GPU when `--features metal`).
 
-// BLAS provided by larql-compute dependency (no direct blas_src needed)
+// BLAS link is forced by larql-compute (larql-blas-link / Accelerate); no direct dependency needed.
 
 // ── Module structure ──
 pub mod clustering;

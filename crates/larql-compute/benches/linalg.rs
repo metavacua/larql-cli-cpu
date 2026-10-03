@@ -4,8 +4,6 @@
 //!
 //! Run: `cargo bench -p larql-compute --bench linalg`
 
-extern crate blas_src;
-
 #[path = "support/qual_slowdown.rs"]
 mod qual_slowdown;
 

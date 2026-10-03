@@ -9,13 +9,23 @@ description = "Public contract for the vindex on-disk format: Rust types, JSON S
 keywords = ["vindex", "spec", "schema", "manifest"]
 categories = ["data-structures", "encoding"]
 
+# Declared here rather than via `workspace = true`: a workspace dependency
+# cannot turn default features off for one member, and `std` is exactly what the
+# `no_std` build has to shed. The versions and the rest of the features track
+# the workspace entries (serde `derive`, serde_json `float_roundtrip`, thiserror 2).
 [dependencies]
-serde = { workspace = true }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc", "float_roundtrip"] }
+thiserror = { version = "2", default-features = false }
 
+# Two layers. `std` (default) is the OS-services layer every current consumer
+# builds against. Without it the crate is `#![no_std]` + `alloc`: the manifest
+# owns `String`, `Vec` and `BTreeMap`, so there is no heap-free `core` layer to
+# offer. That is what lets a bootloader-stage or freestanding tool read a
+# manifest. `cargo check --no-default-features` is the no_std shape.
 [features]
-default = []
+default = ["std"]
+std = ["serde/std", "serde_json/std", "thiserror/std"]
 # Minimal `VindexManifest` builders for downstream test suites. Off by
 # default so production builds never compile fixture code. Enable from
 # a consumer's `[dev-dependencies]` entry, e.g.
