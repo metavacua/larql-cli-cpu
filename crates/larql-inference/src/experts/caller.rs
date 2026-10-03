@@ -2,8 +2,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use wasmtime::{Instance, Memory, Store, TypedFunc};
 
-use super::loader::ExpertStore;
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExpertResult {
     pub value: Value,
@@ -31,15 +29,25 @@ pub struct ExpertMetadata {
 
 /// Write a UTF-8 string into WASM linear memory via `larql_alloc`, return (ptr, len).
 pub(crate) fn write_str(
-    store: &mut Store<ExpertStore>,
+    store: &mut Store<()>,
     instance: &Instance,
     s: &str,
 ) -> anyhow::Result<(u32, u32)> {
     let bytes = s.as_bytes();
-    let len = bytes.len() as u32;
+    let len = u32::try_from(bytes.len()).map_err(|_| {
+        anyhow::anyhow!(
+            "string of {} bytes exceeds the 32-bit guest address space",
+            bytes.len()
+        )
+    })?;
 
     let alloc: TypedFunc<u32, u32> = instance.get_typed_func(&mut *store, "larql_alloc")?;
     let ptr = alloc.call(&mut *store, len)?;
+    // A null pointer for a non-empty buffer means the guest allocator failed; writing
+    // there would clobber guest address 0 instead of reporting the failure.
+    if ptr == 0 && len != 0 {
+        anyhow::bail!("larql_alloc returned a null pointer for {len} bytes");
+    }
 
     let memory: Memory = instance
         .get_memory(&mut *store, "memory")
@@ -53,7 +61,7 @@ pub(crate) fn write_str(
 /// Returns the decoded string plus the number of UTF-8 bytes before the null
 /// terminator — callers need this to free the buffer (allocated as `bytes + 1`).
 pub(crate) fn read_cstring(
-    store: &mut Store<ExpertStore>,
+    store: &mut Store<()>,
     instance: &Instance,
     ptr: u32,
 ) -> anyhow::Result<(String, u32)> {
@@ -62,17 +70,21 @@ pub(crate) fn read_cstring(
         .ok_or_else(|| anyhow::anyhow!("no memory export"))?;
     let data = memory.data(&*store);
     let start = ptr as usize;
-    let end = data[start..]
+    // The pointer comes from the guest: an out-of-range value is an error, not a host panic.
+    let tail = data
+        .get(start..)
+        .ok_or_else(|| anyhow::anyhow!("string pointer {ptr} is outside guest memory"))?;
+    let end = tail
         .iter()
         .position(|&b| b == 0)
         .ok_or_else(|| anyhow::anyhow!("no null terminator"))?;
-    let s = String::from_utf8(data[start..start + end].to_vec())?;
+    let s = String::from_utf8(tail[..end].to_vec())?;
     Ok((s, end as u32))
 }
 
 /// Call `larql_dealloc(ptr, len)` inside the module. Errors are swallowed: a
 /// failed free should not mask a successful result.
-fn dealloc(store: &mut Store<ExpertStore>, instance: &Instance, ptr: u32, len: u32) {
+fn dealloc(store: &mut Store<()>, instance: &Instance, ptr: u32, len: u32) {
     if let Ok(f) = instance.get_typed_func::<(u32, u32), ()>(&mut *store, "larql_dealloc") {
         let _ = f.call(&mut *store, (ptr, len));
     }
@@ -85,7 +97,7 @@ fn dealloc(store: &mut Store<ExpertStore>, instance: &Instance, ptr: u32, len: u
 /// (op string, args string, result string) is freed via `larql_dealloc` before
 /// returning. Without this, a long-running registry leaks ~140 bytes per call.
 pub fn call(
-    store: &mut Store<ExpertStore>,
+    store: &mut Store<()>,
     instance: &Instance,
     op: &str,
     args: &Value,
@@ -116,10 +128,7 @@ pub fn call(
 }
 
 /// Call `larql_metadata` and return the parsed `ExpertMetadata`.
-pub fn metadata(
-    store: &mut Store<ExpertStore>,
-    instance: &Instance,
-) -> anyhow::Result<ExpertMetadata> {
+pub fn metadata(store: &mut Store<()>, instance: &Instance) -> anyhow::Result<ExpertMetadata> {
     let meta_fn: TypedFunc<(), u32> = instance.get_typed_func(&mut *store, "larql_metadata")?;
     let ptr = meta_fn.call(&mut *store, ())?;
     let (json, json_len) = read_cstring(&mut *store, instance, ptr)?;

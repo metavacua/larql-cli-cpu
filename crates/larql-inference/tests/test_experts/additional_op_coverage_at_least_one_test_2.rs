@@ -33,7 +33,7 @@ fn graph_bipartite_no() {
 #[test]
 fn registry_load_dir_tier_order() {
     let dir = wasm_dir();
-    if !dir.exists() {
+    if skip_if_missing(&dir) {
         return;
     }
     let reg = ExpertRegistry::load_dir(&dir).expect("load dir");
@@ -49,7 +49,7 @@ fn registry_load_dir_tier_order() {
 #[test]
 fn registry_dispatches_by_op() {
     let dir = wasm_dir();
-    if !dir.exists() {
+    if skip_if_missing(&dir) {
         return;
     }
     let mut reg = ExpertRegistry::load_dir(&dir).expect("load dir");
@@ -61,7 +61,7 @@ fn registry_dispatches_by_op() {
 #[test]
 fn registry_unknown_op_returns_none() {
     let dir = wasm_dir();
-    if !dir.exists() {
+    if skip_if_missing(&dir) {
         return;
     }
     let mut reg = ExpertRegistry::load_dir(&dir).expect("load dir");
@@ -71,7 +71,7 @@ fn registry_unknown_op_returns_none() {
 #[test]
 fn registry_all_experts_have_metadata() {
     let dir = wasm_dir();
-    if !dir.exists() {
+    if skip_if_missing(&dir) {
         return;
     }
     let reg = ExpertRegistry::load_dir(&dir).expect("load dir");
@@ -93,7 +93,7 @@ fn registry_memory_stable_across_many_calls() {
     // memory grew by ~140 bytes per call (op + args + result strings leaked).
     // This test locks that regression down.
     let path = wasm("arithmetic");
-    if !path.exists() {
+    if skip_if_missing(&path) {
         return;
     }
     let mut reg = ExpertRegistry::default();
@@ -133,7 +133,7 @@ fn module_cache_file_is_written_and_reused() {
     // to the .wasm, so using the shared fixture makes this mtime assertion
     // race-prone.
     let wasm_path = wasm("arithmetic");
-    if !wasm_path.exists() {
+    if skip_if_missing(&wasm_path) {
         return;
     }
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -174,7 +174,7 @@ fn module_cache_file_is_written_and_reused() {
 #[test]
 fn registry_experts_are_lazy_instantiated() {
     let dir = wasm_dir();
-    if !dir.exists() {
+    if skip_if_missing(&dir) {
         return;
     }
     let mut reg = ExpertRegistry::load_dir(&dir).expect("load dir");
@@ -226,7 +226,7 @@ fn registry_experts_are_lazy_instantiated() {
 #[test]
 fn registry_ops_are_discoverable() {
     let dir = wasm_dir();
-    if !dir.exists() {
+    if skip_if_missing(&dir) {
         return;
     }
     let reg = ExpertRegistry::load_dir(&dir).expect("load dir");

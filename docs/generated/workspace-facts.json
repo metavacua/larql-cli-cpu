@@ -372,7 +372,15 @@
       "workspace": "Cargo.toml",
       "version": "0.2.0",
       "description": "Execution-refusal semantics shared across LARQL's runtime crates. Zero larql-* deps.",
-      "features": {},
+      "features": {
+        "default": [
+          "std"
+        ],
+        "std": [
+          "alloc"
+        ],
+        "alloc": []
+      },
       "local_dependencies": [],
       "examples": []
     },

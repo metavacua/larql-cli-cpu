@@ -1,6 +1,8 @@
 //! Shared ABI for LARQL WASM expert modules.
 //!
-//! Each expert is a `wasm32-wasip1` cdylib that exposes two C-ABI functions:
+//! Each expert is a `wasm32-unknown-unknown` cdylib that imports nothing (no
+//! WASI, no host functions: the host instantiates it with an empty linker and
+//! refuses a module that declares any import). It exposes two C-ABI functions:
 //!
 //!   extern "C" fn larql_call(
 //!       op_ptr: u32, op_len: u32,
@@ -98,9 +100,17 @@ pub fn write_metadata(meta: &ExpertMetadata) -> u32 {
 
 fn write_cstring(s: &str) -> u32 {
     let bytes = s.as_bytes();
+    // SAFETY: `ptr` is checked non-null below and was allocated with room for
+    // `bytes.len() + 1` bytes, so the copy and the trailing NUL write stay in
+    // bounds; the source and destination cannot overlap (fresh allocation).
     unsafe {
         let layout = alloc::alloc::Layout::from_size_align(bytes.len() + 1, 1).unwrap();
         let ptr = alloc::alloc::alloc(layout);
+        if ptr.is_null() {
+            // A null result would otherwise be returned as pointer 0, which the
+            // host reads as "expert declined". Trap loudly instead.
+            alloc::alloc::handle_alloc_error(layout);
+        }
         core::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
         *ptr.add(bytes.len()) = 0;
         ptr as u32

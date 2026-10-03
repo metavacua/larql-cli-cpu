@@ -16,5 +16,13 @@ categories = ["data-structures"]
 # a dependency-light contract several crates depend on.
 [dependencies]
 
+# Three nested layers: `std` (OS services) implies `alloc` (heap), which sits on
+# `core`. `std` is on by default so every current consumer builds exactly as
+# before; --no-default-features is `core` only, --features alloc adds the heap.
+[features]
+default = ["std"]
+std = ["alloc"]
+alloc = []
+
 [lints]
 workspace = true

@@ -7,6 +7,10 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+use larql_inference::experts::{
+    built_experts_required, expert_build_command, expert_wasm_dir_in, REQUIRE_EXPERTS_ENV,
+};
+
 fn larql_bin() -> PathBuf {
     // CARGO_BIN_EXE_<name> is set by Cargo for integration tests of bin crates.
     PathBuf::from(env!("CARGO_BIN_EXE_larql"))
@@ -91,8 +95,8 @@ fn find_test_vindex() -> Option<PathBuf> {
 
 /// Locate the WASM expert build directory for `--experts-dir`.
 fn find_wasm_dir() -> Option<PathBuf> {
-    let workspace_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../larql-experts/target/wasm32-wasip1/release");
+    let workspace_dir =
+        expert_wasm_dir_in(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../larql-experts"));
     if workspace_dir.is_dir()
         && std::fs::read_dir(&workspace_dir).ok()?.any(|e| {
             e.ok()
@@ -113,7 +117,12 @@ fn experts_chat_mode_dispatches_via_stdin() {
         return;
     };
     let Some(wasm_dir) = find_wasm_dir() else {
-        eprintln!("skip: WASM experts not built. Run `cargo build --target wasm32-wasip1 --release` in crates/larql-experts.");
+        let build = expert_build_command();
+        assert!(
+            !built_experts_required(),
+            "{REQUIRE_EXPERTS_ENV} is set but the WASM experts are not built. Run `{build}`."
+        );
+        eprintln!("skip: WASM experts not built. Run `{build}`.");
         return;
     };
 

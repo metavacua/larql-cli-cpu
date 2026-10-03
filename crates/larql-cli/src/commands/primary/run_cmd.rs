@@ -221,8 +221,10 @@ pub struct RunArgs {
     pub experts: bool,
 
     /// Override the WASM experts directory. Defaults to the workspace build
-    /// dir at `crates/larql-experts/target/wasm32-wasip1/release/`, or
-    /// `$LARQL_EXPERTS_DIR` if set.
+    /// dir at `crates/larql-experts/target/wasm32-unknown-unknown/release/`, or
+    /// `$LARQL_EXPERTS_DIR` if set. Modules must be built for
+    /// `wasm32-unknown-unknown` and import nothing (no WASI); a module with
+    /// any import is refused at load.
     #[arg(long, value_name = "DIR")]
     pub experts_dir: Option<PathBuf>,
 

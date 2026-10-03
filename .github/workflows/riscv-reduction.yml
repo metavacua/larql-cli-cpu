@@ -1,0 +1,174 @@
+# Reduction experiment: how much of larql survives when the ISA is cut down?
+#
+# Compile axis  - the no_std leaf crates must build, with core/alloc built from source,
+#                 for an integer ladder: RV32I (the floor; no RV64I target exists), RV64IM, RV64IMAC. No
+#                 FPU, no OS, so larql-cli cannot target these; the CLI is reduced
+#                 at runtime instead (below).
+# Runtime axis  - the crates' own `cargo test`, natively on x86_64-gnu (reference) and on
+#                 riscv64gc-gnu under qemu-user, with the CPU progressively constrained.
+#                 The raw cargo/test output in the job logs is the evidence.
+#
+# Triggers: push to experiment/** and any pull_request, so this is testable from
+# a branch with nothing merged to main. workflow_dispatch is deliberately absent:
+# GitHub only offers it once the file is on the default branch.
+name: riscv-reduction
+
+on:
+  push:
+    branches: ['experiment/**']
+  pull_request:
+
+permissions:
+  contents: read
+
+# push and pull_request both fire once a PR exists for the branch. Keying on the
+# branch name (head_ref for PRs, ref_name for pushes) makes them one group, so the
+# duplicate is cancelled instead of run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  # core and alloc are built from source (-Zbuild-std), so no target needs a
+  # prebuilt rust-std and the RV64 integer ladder below is reachable. RUSTC_BOOTSTRAP
+  # keeps the compiler on the pinned toolchain instead of switching to nightly.
+  # The stable-only rule belongs to target-matrix.yml, not to this experiment.
+  compile-nostd:
+    name: compile · ${{ matrix.target }}+${{ matrix.layer }} · ${{ matrix.crate }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUSTC_BOOTSTRAP: '1'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { crate: larql-execution, target: riscv32i-unknown-none-elf, layer: alloc, build_std: 'core,alloc', features: '--no-default-features --features alloc' }
+          - { crate: larql-execution, target: riscv32i-unknown-none-elf, layer: core,  build_std: 'core',       features: '--no-default-features' }
+          - { crate: larql-execution, target: riscv64im-unknown-none-elf, layer: alloc, build_std: 'core,alloc', features: '--no-default-features --features alloc' }
+          - { crate: larql-execution, target: riscv64im-unknown-none-elf, layer: core,  build_std: 'core',       features: '--no-default-features' }
+          - { crate: larql-execution, target: riscv64imac-unknown-none-elf, layer: alloc, build_std: 'core,alloc', features: '--no-default-features --features alloc' }
+          - { crate: larql-execution, target: riscv64imac-unknown-none-elf, layer: core,  build_std: 'core',       features: '--no-default-features' }
+          - { crate: larql-execution, target: riscv64gc-unknown-none-elf, layer: alloc, build_std: 'core,alloc', features: '--no-default-features --features alloc' }
+          - { crate: larql-execution, target: riscv64gc-unknown-none-elf, layer: core,  build_std: 'core',       features: '--no-default-features' }
+          - { crate: larql-execution, target: x86_64-unknown-none, layer: alloc, build_std: 'core,alloc', features: '--no-default-features --features alloc' }
+          - { crate: larql-execution, target: x86_64-unknown-none, layer: core,  build_std: 'core',       features: '--no-default-features' }
+          - { crate: larql-execution, target: aarch64-unknown-none, layer: alloc, build_std: 'core,alloc', features: '--no-default-features --features alloc' }
+          - { crate: larql-execution, target: aarch64-unknown-none, layer: core,  build_std: 'core',       features: '--no-default-features' }
+          - { crate: larql-execution, target: x86_64-unknown-uefi, layer: alloc, build_std: 'core,alloc', features: '--no-default-features --features alloc' }
+          - { crate: larql-execution, target: x86_64-unknown-uefi, layer: core,  build_std: 'core',       features: '--no-default-features' }
+          - { crate: larql-execution, target: aarch64-unknown-uefi, layer: alloc, build_std: 'core,alloc', features: '--no-default-features --features alloc' }
+          - { crate: larql-execution, target: aarch64-unknown-uefi, layer: core,  build_std: 'core',       features: '--no-default-features' }
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup component add rust-src
+      - name: cargo check --lib -Zbuild-std (checked against no-std-policy.json)
+        run: |
+          set +e
+          cargo check -Zbuild-std=${{ matrix.build_std }} --target ${{ matrix.target }} -p ${{ matrix.crate }} --lib ${{ matrix.features }}
+          ec=$?
+          set -e
+          python3 scripts/check_no_std_policy.py "${{ matrix.crate }}" "${{ matrix.target }}+${{ matrix.layer }}" "$ec" check \
+            "crates/${{ matrix.crate }}/no-std-policy.json"
+      # CI-only: --fix rewrites files, so it never runs on the dev machine. The tree
+      # must come back clean; a diff is the fix to commit. Lints are per target
+      # because clippy's findings depend on the cfg set the target selects.
+      - name: 'cargo clippy --fix: core/alloc/std restriction lints (target-scoped)'
+        run: |
+          set +e
+          cargo clippy --fix --allow-dirty --allow-staged -Zbuild-std=${{ matrix.build_std }} \
+            --target ${{ matrix.target }} -p ${{ matrix.crate }} --lib --no-deps ${{ matrix.features }} -- \
+            -W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core
+          clippy_ec=$?
+          mkdir -p fixes
+          git diff -- "crates/${{ matrix.crate }}" | tee "fixes/${{ matrix.crate }}-${{ matrix.target }}-${{ matrix.layer }}.patch"
+          [ -s "fixes/${{ matrix.crate }}-${{ matrix.target }}-${{ matrix.layer }}.patch" ] || rm -f "fixes/${{ matrix.crate }}-${{ matrix.target }}-${{ matrix.layer }}.patch"
+          git diff --exit-code -- "crates/${{ matrix.crate }}" > /dev/null
+          diff_ec=$?
+          set -e
+          if [ "$clippy_ec" -ne 0 ]; then ec=$clippy_ec; else ec=$diff_ec; fi
+          python3 scripts/check_no_std_policy.py "${{ matrix.crate }}" "${{ matrix.target }}+${{ matrix.layer }}" "$ec" clippy-fix \
+            "crates/${{ matrix.crate }}/no-std-policy.json"
+      # Apply on the dev machine with: gh run download <id> -n clippy-fix-<crate>-<target> && git apply fixes/*.patch
+      - name: Upload clippy --fix patch (only when it is non-empty)
+        if: always() && hashFiles(format('fixes/{0}-{1}.patch', matrix.crate, format('{0}-{1}', matrix.target, matrix.layer))) != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: clippy-fix-${{ matrix.crate }}-${{ matrix.target }}-${{ matrix.layer }}
+          path: fixes/
+          retention-days: 7
+      - name: host tests still pass with the crate no_std
+        if: matrix.target == 'riscv64imac-unknown-none-elf' && matrix.layer == 'alloc'
+        run: cargo test --locked -p ${{ matrix.crate }}
+
+  # Informational: every library crate except the larql-cli binary is expected to compile
+  # across the chain (std on gnu, core+alloc on uefi, core on none). Where one does not,
+  # that is the data for how to rearrange it, so this job records every failing crate in
+  # one pass (--keep-going) instead of gating. Nothing here fails the PR.
+  inventory-chain:
+    name: inventory · ${{ matrix.target }} (${{ matrix.layer }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    continue-on-error: true
+    env:
+      RUSTC_BOOTSTRAP: '1'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: riscv32i-unknown-none-elf,    layer: core,       build_std: core }
+          - { target: riscv64im-unknown-none-elf,   layer: core,       build_std: core }
+          - { target: riscv64imac-unknown-none-elf, layer: core,       build_std: core }
+          - { target: riscv64gc-unknown-none-elf,   layer: core,       build_std: core }
+          - { target: aarch64-unknown-none,         layer: core,       build_std: core }
+          - { target: x86_64-unknown-none,          layer: core,       build_std: core }
+          - { target: x86_64-unknown-uefi,          layer: core+alloc, build_std: 'core,alloc' }
+          - { target: aarch64-unknown-uefi,         layer: core+alloc, build_std: 'core,alloc' }
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup component add rust-src
+      # Host-side build scripts (tonic/prost, system BLAS probing) run on the runner; install
+      # what they need so their failure does not hide the target-side result.
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libopenblas-dev pkg-config
+      # One invocation per library crate: a workspace-wide check unifies features, so a
+      # dependent's default `std` is enabled on every lower crate and the `core` layer is
+      # never actually tested. Per crate, `--no-default-features` applies to that package
+      # and its own dependency closure is what gets measured. Cargo builds dependencies
+      # first, so the first `could not compile` lines in each group are the root causes.
+      # Cargo's output goes to the job log unmodified; a failing crate does not stop the loop.
+      - name: cargo check --keep-going, one crate at a time (raw output)
+        run: |
+          for c in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name != "larql-cli" and .name != "larql-continuation-fixture") | select(any(.targets[]; .kind | index("lib"))) | .name'); do
+            echo "::group::$c"
+            cargo check --keep-going -Zbuild-std=${{ matrix.build_std }} --target ${{ matrix.target }} -p "$c" --lib --no-default-features || echo "RESULT $c: FAILED"
+            echo "::endgroup::"
+          done
+
+  # Runtime: the crates' own tests, run natively and under QEMU user-mode with the CPU
+  # constrained. cargo test's output is the evidence; compare the logs directly.
+  runtime-matrix:
+    name: runtime · cargo test, x86_64-gnu vs riscv64gc-gnu under QEMU
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      TEST_CRATES: -p larql-execution -p larql-vindex-spec -p larql-boundary -p larql-core -p larql-models
+      CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER: riscv64-linux-gnu-gcc
+      QEMU_LD_PREFIX: /usr/riscv64-linux-gnu
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update && sudo apt-get install -y gcc-riscv64-linux-gnu libc6-dev-riscv64-cross qemu-user-static
+      - run: rustup target add riscv64gc-unknown-linux-gnu
+      - name: x86_64-unknown-linux-gnu, native (reference)
+        run: cargo test --locked $TEST_CRATES
+      - name: riscv64gc-unknown-linux-gnu under QEMU, full CPU
+        env:
+          CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUNNER: qemu-riscv64-static -cpu rv64 -L /usr/riscv64-linux-gnu
+        run: cargo test --locked --target riscv64gc-unknown-linux-gnu $TEST_CRATES
+      # F and D removed. QEMU rejects a CPU whose extensions depend on F/D, so zfa is disabled
+      # too (found by running with only f/d off: "Zfa extension requires F extension"). The
+      # binaries use F/D, so a SIGILL is the expected, measured result; it must not fail the job.
+      - name: riscv64gc-unknown-linux-gnu under QEMU, F/D off (expected to fault)
+        continue-on-error: true
+        env:
+          CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_RUNNER: qemu-riscv64-static -cpu rv64,f=false,d=false,zfa=false -L /usr/riscv64-linux-gnu
+        run: cargo test --locked --target riscv64gc-unknown-linux-gnu $TEST_CRATES

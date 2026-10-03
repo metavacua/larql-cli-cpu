@@ -242,17 +242,25 @@ mod tests {
     use std::path::PathBuf;
 
     fn wasm_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../larql-experts/target/wasm32-wasip1/release")
+        crate::experts::expert_wasm_dir_in(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../larql-experts"),
+        )
     }
 
     fn registry_or_skip() -> Option<ExpertRegistry> {
         let dir = wasm_dir();
         if !dir.exists() {
-            eprintln!("skip: wasm dir missing at {} — run `cargo build --target wasm32-wasip1 --release` in larql-experts", dir.display());
+            let hint = crate::experts::expert_build_command();
+            assert!(
+                !crate::experts::built_experts_required(),
+                "{} is set but the built experts are missing at {} — run `{hint}`",
+                crate::experts::REQUIRE_EXPERTS_ENV,
+                dir.display()
+            );
+            eprintln!("skip: wasm dir missing at {} — run `{hint}`", dir.display());
             return None;
         }
-        ExpertRegistry::load_dir(&dir).ok()
+        Some(ExpertRegistry::load_dir(&dir).expect("load_dir"))
     }
 
     #[test]

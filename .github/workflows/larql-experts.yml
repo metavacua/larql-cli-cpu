@@ -1,0 +1,135 @@
+# larql-experts: the nested WASM expert workspace
+#
+# crates/larql-experts is its own cargo workspace, so `make ci` and every
+# workspace-wide sweep skip it. Until this workflow existed nothing built the
+# experts or ran a test against a real module; the dispatch tests skip when
+# the build directory is missing.
+#
+# The experts are built for wasm32-unknown-unknown and import NOTHING (no
+# WASI). larql-inference instantiates them with a plain wasmtime Linker and
+# does not depend on wasmtime-wasi, which would compile in socket code and pull
+# tokio-net / cap-net-ext into the local graph. This workflow is the verifier
+# for that claim: it cannot be checked from source alone, because wasm-ld turns
+# any unresolved symbol into an `env` import and the failure would only appear
+# when the host tries to instantiate the module.
+#
+# Jobs:
+#   build-experts  - host unit tests of the nested workspace, then build for
+#                    wasm32-unknown-unknown and publish the modules
+#   host-dispatch  - load the built modules through larql-inference and the CLI.
+#                    tests/test_experts/no_imports.rs asserts, through wasmtime itself,
+#                    that every module imports nothing and exports the ABI
+#                    (LARQL_REQUIRE_WASM_EXPERTS=1 makes a missing build a failure)
+#
+# That wasmtime-wasi and cap-net-ext stay out of the graph is enforced by cargo-deny's
+# [bans] in deny.toml (the quality workflow), not here.
+
+name: larql-experts
+
+on:
+  push:
+    branches: [main, 'experiment/**']
+    paths:
+      - 'crates/larql-experts/**'
+      - 'crates/larql-inference/src/experts/**'
+      - 'crates/larql-inference/tests/**'
+      - 'crates/larql-inference/Cargo.toml'
+      - 'crates/larql-cli/src/commands/primary/run_cmd.rs'
+      - 'crates/larql-cli/src/commands/primary/run_cmd/**'
+      - 'crates/larql-cli/tests/test_run_experts.rs'
+      - 'Makefile'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/larql-experts.yml'
+  pull_request:
+    paths:
+      - 'crates/larql-experts/**'
+      - 'crates/larql-inference/src/experts/**'
+      - 'crates/larql-inference/tests/**'
+      - 'crates/larql-inference/Cargo.toml'
+      - 'crates/larql-cli/src/commands/primary/run_cmd.rs'
+      - 'crates/larql-cli/src/commands/primary/run_cmd/**'
+      - 'crates/larql-cli/tests/test_run_experts.rs'
+      - 'Makefile'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/larql-experts.yml'
+  workflow_dispatch: {}
+
+concurrency:
+  # push to experiment/** and its pull_request share one group (keyed on the branch), so
+  # the duplicate run is cancelled; main pushes stay one run each (run_id), as above.
+  group: ${{ github.workflow }}-${{ github.head_ref || (startsWith(github.ref, 'refs/heads/experiment/') && github.ref_name) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/experiment/') }}
+
+env:
+  EXPERTS_TARGET: wasm32-unknown-unknown
+  EXPERTS_WASM_DIR: crates/larql-experts/target/wasm32-unknown-unknown/release
+
+jobs:
+  build-experts:
+    name: build experts
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Activate the pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Add the guest target
+        run: rustup target add "$EXPERTS_TARGET"
+      - name: Host unit tests (the nested workspace, host target)
+        run: cargo test --locked --manifest-path crates/larql-experts/Cargo.toml --workspace
+      - name: Build the experts for wasm32-unknown-unknown
+        run: cargo build --locked --manifest-path crates/larql-experts/Cargo.toml --target "$EXPERTS_TARGET" --release
+      - name: Upload the built modules
+        uses: actions/upload-artifact@v4
+        with:
+          name: expert-wasm
+          path: ${{ env.EXPERTS_WASM_DIR }}/*.wasm
+          if-no-files-found: error
+          retention-days: 3
+
+  host-dispatch:
+    name: host loads the modules with a plain Linker
+    needs: build-experts
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # The dispatch tests skip when the build directory is missing. Where a
+      # test honours this flag, a missing directory or module is a failure.
+      LARQL_REQUIRE_WASM_EXPERTS: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - name: Activate the pinned Rust toolchain
+        run: rustup show active-toolchain
+      - name: Install OpenBLAS
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopenblas-dev pkg-config
+      - name: Fetch the built modules
+        uses: actions/download-artifact@v4
+        with:
+          name: expert-wasm
+          path: ${{ env.EXPERTS_WASM_DIR }}
+      # Not --locked: the root Cargo.lock still lists wasmtime-wasi until the
+      # cargo-lock-patch artifact is applied.
+      - name: larql-inference expert unit tests
+        run: 'cargo test -p larql-inference --lib experts::'
+      # LARQL_REQUIRE_WASM_EXPERTS turns a missing wasm dir into a failure for the lib tests
+      # above, test_experts, test_expert_dispatch and test_run_experts; test_experts and
+      # test_expert_dispatch are the ones that run against the built modules here.
+      - name: larql-inference expert dispatch tests
+        run: >-
+          cargo test -p larql-inference
+          --test test_experts
+          --test test_expert_dispatch
+      # These three skip on a missing model before they could use the experts,
+      # so they are compile checks only; running them proves nothing here.
+      - name: larql-inference model-backed dispatch tests compile
+        run: >-
+          cargo test -p larql-inference --no-run
+          --test test_trie_dispatch
+          --test test_constrained_dispatch
+          --test test_llm_dispatch
+      - name: larql run --experts directory resolution
+        run: cargo test -p larql-cli resolve_

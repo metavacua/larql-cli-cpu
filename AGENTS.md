@@ -91,8 +91,8 @@ larql-continuation-fixture
                   test-only cdylib: the C5 continuation provider as a plugin.
                   Nothing links it; larql-cli's plugin gate builds it by
                   package name and dlopens the result.
-larql-experts     nested workspace of WASM virtual experts (wasm32-wasip1
-                  cdylibs, JSON ABI) the engine dispatches to
+larql-experts     nested workspace of WASM virtual experts (wasm32-unknown-unknown
+                  cdylibs, no WASI imports, JSON ABI) the engine dispatches to
 
 # Portable (no larql-* deps)
 larql-vindex-spec     public vindex on-disk contract: Rust types, JSON Schema,
@@ -103,7 +103,7 @@ larql-execution       execution-refusal semantics (RefusalKind) shared across
 
 Upstream also has `larql-compute-metal`, `larql-server`, `larql-demos`, `vindex-cli`, `larql-python` and `model-compute`. None of them is here, and nothing in `larql`'s build reaches them.
 
-**`crates/larql-experts` is its own nested workspace** (own Cargo.toml with `[workspace]` members) — it builds the `wasm32-wasip1` expert modules that `larql-inference`'s WASM expert registry loads for `larql run --experts`. Root `cargo build --workspace` does not include it — which also means the workspace-wide `clippy`, `coverage` and `test` sweeps miss it, so code there is not gated by `make ci`.
+**`crates/larql-experts` is its own nested workspace** (own Cargo.toml with `[workspace]` members) — it builds the `wasm32-unknown-unknown` expert modules that `larql-inference`'s WASM expert registry loads for `larql run --experts`. The modules import nothing (no WASI): the loader instantiates them with a plain wasmtime `Linker`, and `larql-inference` does not depend on `wasmtime-wasi` (it compiles in socket code and pulls `tokio-net` and `cap-net-ext`, which must not be in the local graph) — keep it that way, and never build the experts for a `-wasi*` target. Root `cargo build --workspace` does not include the nested workspace — which also means the workspace-wide `clippy`, `coverage` and `test` sweeps miss it, so code there is not gated by `make ci`; the `larql-experts` workflow (`.github/workflows/larql-experts.yml`) builds it, asserts every `.wasm` has zero imports, and runs the expert dispatch tests (its `host-dispatch` job). Locally, `make build-experts` adds the target, builds the modules and asserts zero imports, and `make test-experts` runs only the nested workspace's host unit tests. There is no Makefile target for the dispatch tests: after `make build-experts`, run `LARQL_REQUIRE_WASM_EXPERTS=1 cargo test -p larql-inference --test test_experts --test test_expert_dispatch`.
 **There is no GPU backend here.** Backends are chosen through a registry, never a cfg: `larql-compute`'s `BackendKind` + `backend_from_spec`, fed by `larql-cli`'s `backend_select::backend_registry()` (empty in this build), and `larql-inference`'s `default_engine_backend()` / `default_async_engine_backend()` / `default_compute_backend()` factories. A backend crate added later (upstream's Metal backend is the model: its own crate, the same trait surface, its own kernels) implements the `ComputeBackend` traits and registers in those places, with no edits to callers. Code named `gpu` in `larql-inference` (for example `layer_graph/generate/gpu/`) is trait-generic dispatch that probes backend capabilities; it is not GPU code and compiles everywhere.
 
 The `install_edge` primitive
