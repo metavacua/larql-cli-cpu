@@ -14,20 +14,20 @@ a local directory path — see [Model resolution](#model-resolution) below.
 |---|---|
 | `run <model> [prompt]` | Run inference. One-shot if prompt given; chat loop if not. |
 | `chat <model>` | Alias for `run <model>` with no prompt. |
-| `pull <model>` | Download a vindex from HuggingFace and cache locally. |
-| `model <subcmd>` | Manage HuggingFace **model** repos (companion to `pull`, which is vindex-only). |
+| `pull <model>` | Download a vindex from HuggingFace and cache locally. *(needs `net`)* |
+| `model <subcmd>` | Manage HuggingFace **model** repos (companion to `pull`, which is vindex-only). `model pull` needs `net`. |
 | `link <path>` | Register a local vindex directory with the cache so `run` / `list` / `show` find it by shorthand. |
 | `list` | Show cached vindexes (model, size, layers, hidden). |
 | `show <model>` | Vindex metadata and file inventory. |
 | `slice <source>` | Carve a subset of a vindex (`client` / `attn` / `embed` / `server` / `browse` / `router` / `expert-server`). |
-| `publish <source>` | Publish a vindex to HuggingFace — full + slice siblings + collections. |
+| `publish <source>` | Publish a vindex to HuggingFace — full + slice siblings + collections. *(needs `net`, including `--dry-run`)* |
 | `rm <model>` | Evict a cached vindex. |
 | `bench <model>` | Benchmark decode throughput on a real vindex or VINDEX3 container (Metal / CPU / Ollama). |
 | `accuracy <model>` | Split-axis accuracy suite for KV engines — parametric vs in-context vs conflict, scored by top-1 match and Shannon bits/token. |
-| `dec-bench <subcmd>` | DEC residual-replay loadgen — `capture` a residual pool, `replay` batch × wire × dispatch sweeps, `drift` the C6 wire-fidelity gate. |
+| `dec-bench <subcmd>` | DEC residual-replay loadgen — `capture` a residual pool, `replay` batch × wire × dispatch sweeps, `drift` the C6 wire-fidelity gate. `capture`, `replay` and `drift` need `net`; `window-union` is local. |
 | `k3-ledger <subcmd>` | K3 serving ledger — miss budget, weight touch, dense-precision frontier and speculative block economics, derived from the checkpoint's own tensor table. *(research builds only — see [the `research` feature](#research-tooling-and-the-research-feature))* |
 | `shannon <subcmd>` | Next-token bit scoring, slot probes, repetition probes, layer lens, demo arithmetic coding. `shannon verify` is research builds only. |
-| `serve <model>` | Serve a vindex over HTTP + gRPC. |
+| `serve <model>` | Serve a vindex over HTTP + gRPC. *(needs `net`)* |
 
 ## Build / extract
 
@@ -38,7 +38,7 @@ a local directory path — see [Model resolution](#model-resolution) below.
 | `build` | Build a custom vindex from a Vindexfile (FROM + PATCH + INSERT). |
 | `compile` | Compile vindex patches into model weights (AOT). |
 | `convert` | Convert between formats (GGUF ↔ vindex, safetensors → vindex; `quantize` for FP4/Q4_K_M). |
-| `hf` | HuggingFace Hub: download / publish a vindex. |
+| `hf` | HuggingFace Hub: download / publish a vindex. *(needs `net`)* |
 | `verify` | Verify vindex file integrity (SHA256 checksums). |
 | `diag` | Engine diagnostic — print which kernel paths fire for a vindex, validate Q4_K/Q6_K strides, optional `--probe` runs a real forward pass. |
 | `parity` | Cross-backend numerical diff (`reference` / `cpu` / `metal`) at well-known checkpoints. *(research builds only — see [the `research` feature](#research-tooling-and-the-research-feature))* |
@@ -55,8 +55,8 @@ VINDEX3 container verbs.
 |---|---|
 | `recipe validate <FILE>` | Structurally validate a recipe file; prints every problem found. |
 | `recipe build-id <FILE>` | Print a recipe's `build_id` (content hash over source+extractor+outputs). |
-| `recipe estimate <FILE>` | Upstream size, per-output size, executor recommendation, and a cost band. Touches the network. |
-| `recipe build <FILE> [--scratch-dir DIR]` | Run PREFLIGHT→RELEASE: fetch the pinned revision, extract, slice, verify checksums, publish private, then flip public. Prints a `BuildRecord` as JSON; exits non-zero on a stage failure. |
+| `recipe estimate <FILE>` | Upstream size, per-output size, executor recommendation, and a cost band. Touches the network. *(needs `net`)* |
+| `recipe build <FILE> [--scratch-dir DIR]` | Run PREFLIGHT→RELEASE: fetch the pinned revision, extract, slice, verify checksums, publish private, then flip public. Prints a `BuildRecord` as JSON; exits non-zero on a stage failure. *(needs `net`)* |
 | `capabilities` | Print this release's capability manifest — recognised architectures and what each supports. |
 | `card render` | Render a Hub model card from a recipe, manifest, and verification report. |
 | `inspect-hf <dir>` | Machine-readable architecture inventory of an HF checkpoint dir — identity, per-layer attention policy, tensors, and every config key this build does not consume. |
@@ -90,10 +90,77 @@ without the `research` cargo feature (rebuild with `--features research`)
 ```
 
 To build the release shape locally: `cargo build -p larql-cli
---no-default-features` (CPU-only) or `--no-default-features --features gpu`
-(Metal). `dec-bench` and `accuracy` are **not** gated: the DEC driver
-scripts run `dec-bench replay` from the release archive, and `accuracy` is
-the KV-engine quality suite that sits beside `bench`.
+--no-default-features --features net` (no `research`, networking kept; there
+is no `gpu` feature in this CPU-only build). `dec-bench` and `accuracy` are
+**not** research-gated: the DEC driver scripts run `dec-bench replay` from
+the release archive (it ships because `net` is on), and `accuracy` is the
+KV-engine quality suite that sits beside `bench`.
+
+## Networking and the `net` feature
+
+Everything in larql-cli that talks over a network (HTTP clients, remote FFN
+and MoE shards, the VINDEX3 HTTP shard transports, HuggingFace downloads,
+`serve`) is compiled only when the `net` cargo feature is on. It is a
+**default** feature, so `cargo build` and `cargo install --path
+crates/larql-cli` include it, and the tagged release binaries are built with
+`--no-default-features --features net` (`.github/workflows/release.yml`), so
+they keep it too. The clap surface is identical in every build: a command or
+flag that needs the network still exists and shows in `--help`, but a build
+without `net` refuses it loudly, before any model is resolved or loaded:
+
+```
+Error: `larql pull` needs networking; this larql binary was built without
+the `net` cargo feature (rebuild with `--features net`)
+```
+
+**Verbs that refuse without `net`:** `pull`, `model pull`, `publish`
+(including `--dry-run`), `hf`, `serve` (including `serve --help`),
+`server-capabilities`, `recipe estimate`, `recipe build`, `dec-bench capture|replay|drift`,
+the `k3-ledger` geometry subcommands, `dev ffn-latency`, `dev bfs` without
+`--mock`, `build` on a Vindexfile with `hf://` directives, `vindex3 plan` and
+`vindex3 encode` of `hf://` repos, and any `hf://` or `owner/name` model
+argument that is not already in the local cache (a cache hit still works
+offline).
+
+**Flags that refuse without `net`:**
+
+| Command | Flags |
+|---|---|
+| `run`, `chat` | `--ffn`, `--moe-shards`, `--moe-units-manifest`, `--v3-shards`, `--v3-ffn-shards`, `--v3-ffn-wire`, `--v3-shard-token-env` |
+| `bench` | `--ffn`, `--wire`, `--moe-shards`, `--bench-grid`, `--ollama` |
+| `walk` (research) | `--ffn-remote` |
+
+`bench --bench-grid-lan` is not refused: it only spawns child `larql bench`
+runs, which refuse for themselves.
+
+**What stays local, with or without `net`:** `run` and `bench` on local
+vindexes, `extract` / `convert` / `compile`, `show` / `list` / `link` / `rm` /
+`slice`, `vindex3 exec` on local containers, `dec-bench window-union`,
+`k3-ledger formats|freq-mass|retention`, `dev bfs --mock`, `recipe
+validate|build-id`, `shannon`, and LQL on local vindexes.
+
+**The four build shapes** (all four are clippy-checked under `-D warnings`):
+
+| Shape | Command |
+|---|---|
+| default (`research` + `net`) | `cargo build -p larql-cli` |
+| release (`net`, no `research`) | `cargo build -p larql-cli --no-default-features --features net` |
+| local-only (neither) | `cargo build -p larql-cli --no-default-features` |
+| research without `net` | `cargo build -p larql-cli --no-default-features --features research` |
+
+**Known gap (deferred, not a no-`net` guarantee).** `net` removes larql-cli's
+*own* network dependencies (`reqwest`, `larql-router`). The library crates it
+links (`larql-inference`, `larql-vindex`, `larql-lql`, `larql-factory`,
+`larql-kv`, `larql-router-protocol`) do not yet have `net` features of their
+own, so a no-`net` binary still links `reqwest`, `tonic` and `tokio`. In
+particular, `larql repl` and `larql lql` are **not** gated: `USE REMOTE` and
+`USE "hf://..."` can still reach the network in a no-`net` binary, and do not
+refuse naming the `net` feature. Closing this needs a `net` feature (or a
+runtime hook) in `larql-lql`, enabled by larql-cli's `net`; until then, treat
+a no-`net` build as "no network from the larql-cli verbs listed above", not
+"no network at all". The `net-closure` workflow
+(`scripts/net_closure_report.sh`) hard-gates what `net` does remove and
+reports what the library crates still pull.
 
 ## Research / interpretability tools — `larql dev <subcmd>`
 
@@ -1791,8 +1858,9 @@ Vindex Factory tooling — [docs/vindex-factory.md](vindex-factory.md) is
 the full spec; [crates/larql-factory/README.md](../crates/larql-factory/README.md)
 is the crate reference. `recipe estimate` fetches the upstream repo's
 file listing and `config.json` over HTTP; `recipe build` goes further
-and actually runs the pipeline (network + Hub credentials + disk) —
-everything else here is local and read-only. The recipe repo's
+and actually runs the pipeline (network + Hub credentials + disk); both
+refuse without the `net` cargo feature — everything else here is local and
+read-only. The recipe repo's
 remaining PR checks (upstream existence, licence allowlist, Hub name
 collision) aren't built yet.
 

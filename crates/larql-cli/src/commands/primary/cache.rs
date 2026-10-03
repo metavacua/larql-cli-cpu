@@ -29,6 +29,10 @@
 //!    on the entry name. Local entries match on their full name; HF
 //!    entries match on the `name` half of `owner/name`. Ambiguous
 //!    shorthands error out and list candidates.
+//!
+//! Without the `net` cargo feature, steps 1 and 3 never download: an
+//! `hf://` or `owner/name` argument resolves only from the local cache and
+//! otherwise is refused with an error naming the missing `net` feature.
 
 use larql_vindex::format::filenames::*;
 use std::path::{Path, PathBuf};
@@ -259,6 +263,24 @@ pub fn resolve_shorthand_from(
     }
 }
 
+/// Fetch a vindex from the Hugging Face Hub (or its local cache).
+#[cfg(feature = "net")]
+fn fetch_hf_vindex(spec: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    Ok(larql_vindex::resolve_hf_vindex(spec)?)
+}
+
+/// Without `net`: an already-pulled snapshot still resolves offline;
+/// anything else is a loud refusal, never a fall-through to a path.
+#[cfg(not(feature = "net"))]
+fn fetch_hf_vindex(spec: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if let Ok(hit) = resolve_cached(spec) {
+        return Ok(hit.snapshot);
+    }
+    Err(crate::net_gate::net_required(&format!(
+        "fetching `{spec}` from the Hugging Face Hub (it is not a local directory or in the local cache)"
+    )))
+}
+
 /// Resolve a user-supplied `<model>` string to a local vindex directory.
 ///
 /// See the module docstring for the precedence order. Plain-name lookups
@@ -267,7 +289,7 @@ pub fn resolve_shorthand_from(
 pub fn resolve_model(model: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
     // 1. hf:// URI — defer to the vindex crate. Downloads if not cached.
     if model.starts_with("hf://") {
-        return Ok(larql_vindex::resolve_hf_vindex(model)?);
+        return fetch_hf_vindex(model);
     }
 
     // 2. Already a local directory.
@@ -286,7 +308,7 @@ pub fn resolve_model(model: &str) -> Result<PathBuf, Box<dyn std::error::Error>>
         if let Some(hit) = cache.iter().find(|c| c.repo == model) {
             return Ok(hit.snapshot.clone());
         }
-        return Ok(larql_vindex::resolve_hf_vindex(&format!("hf://{model}"))?);
+        return fetch_hf_vindex(&format!("hf://{model}"));
     }
 
     // 4. Plain name — look up by cache shorthand.
@@ -625,6 +647,16 @@ mod tests {
         let hit = resolve_cached_from("my-extract", &cache).unwrap();
         assert_eq!(hit.repo, "my-extract");
         assert_eq!(hit.source, CacheSource::Local);
+    }
+
+    #[cfg(not(feature = "net"))]
+    #[test]
+    fn resolve_model_refuses_uncached_hub_spec_without_net() {
+        let err = resolve_model("hf://larql-test-nonexistent/never-cached").unwrap_err();
+        assert!(
+            err.to_string().contains("the `net` cargo feature"),
+            "got: {err}"
+        );
     }
 
     #[test]

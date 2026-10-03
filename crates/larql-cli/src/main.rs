@@ -23,6 +23,8 @@ mod backend_select;
 mod commands;
 mod formatting;
 mod image_input;
+#[cfg(not(feature = "net"))]
+mod net_gate;
 mod trampoline;
 mod utils;
 
@@ -33,6 +35,29 @@ use commands::diagnostics::*;
 use commands::extraction::*;
 use commands::primary::*;
 use commands::query::*;
+
+// Whole-network verbs stay in the clap tree in every build shape so
+// `larql --help` does not lie. Without `net` they take a catch-all stub
+// payload and refuse in the dispatch arm (see `net_gate`).
+#[cfg(feature = "net")]
+mod net_args {
+    pub(crate) use crate::commands::extraction::hf_cmd::HfArgs;
+    pub(crate) use crate::commands::primary::{
+        model_cmd::ModelArgs, publish_cmd::PublishArgs, pull_cmd::PullArgs, serve_cmd::ServeArgs,
+        server_capabilities_cmd::ServerCapabilitiesArgs,
+    };
+}
+#[cfg(not(feature = "net"))]
+mod net_args {
+    use crate::net_gate::NetStubArgs;
+
+    pub(crate) type HfArgs = NetStubArgs;
+    pub(crate) type ModelArgs = NetStubArgs;
+    pub(crate) type PublishArgs = NetStubArgs;
+    pub(crate) type PullArgs = NetStubArgs;
+    pub(crate) type ServeArgs = NetStubArgs;
+    pub(crate) type ServerCapabilitiesArgs = NetStubArgs;
+}
 
 #[derive(Parser)]
 #[command(
@@ -59,6 +84,11 @@ struct Cli {
 // Variants marked `#[cfg(feature = "research")]` exist only in research
 // builds (the default); tagged release binaries are built without them,
 // and `trampoline::prepare_argv` refuses those names with a clear error.
+//
+// Network verbs (pull, model, publish, hf, serve, server-capabilities) are
+// listed in every build; without the `net` cargo feature they refuse via
+// `net_gate` naming the feature. Mixed commands (run, chat, bench,
+// dec-bench, dev walk, ...) keep every flag and refuse at the point of use.
 // ══════════════════════════════════════════════════════════════════════
 
 #[derive(Subcommand)]
@@ -71,12 +101,14 @@ enum Commands {
     Chat(ChatArgs),
 
     /// Download a vindex from HuggingFace and cache it locally.
-    Pull(pull_cmd::PullArgs),
+    #[cfg_attr(not(feature = "net"), command(disable_help_flag = true))]
+    Pull(net_args::PullArgs),
 
     /// Manage HuggingFace *model* repos (safetensors + tokenizer + config).
     /// Companion to `pull` (which is vindex-only). Use `model pull` to
     /// stage a raw HF model for `convert safetensors-to-vindex`.
-    Model(model_cmd::ModelArgs),
+    #[cfg_attr(not(feature = "net"), command(disable_help_flag = true))]
+    Model(net_args::ModelArgs),
 
     /// Register a local vindex directory with the cache so `run` / `list`
     /// / `show` can find it by shorthand.
@@ -92,7 +124,8 @@ enum Commands {
     Slice(slice_cmd::SliceArgs),
 
     /// Publish a vindex to HuggingFace — full vindex plus slice siblings.
-    Publish(publish_cmd::PublishArgs),
+    #[cfg_attr(not(feature = "net"), command(disable_help_flag = true))]
+    Publish(net_args::PublishArgs),
 
     /// Validate the VINDEX3 production registry (registry/index.json +
     /// registry/models/*.json).
@@ -129,14 +162,15 @@ enum Commands {
     // `larql-server --help`, which owns the flag list.
     #[command(next_help_heading = "Server", disable_help_flag = true)]
     /// Serve a vindex over HTTP + gRPC (flags: `larql serve --help`).
-    Serve(serve_cmd::ServeArgs),
+    Serve(net_args::ServeArgs),
 
     #[command(next_help_heading = "Server")]
+    #[cfg_attr(not(feature = "net"), command(disable_help_flag = true))]
     /// Ask a running LARQL server what it will and will not do
     /// (`GET /v1/capabilities`). Distinct from `capabilities`, which
     /// reports what this release recognises rather than what one
     /// server offers.
-    ServerCapabilities(server_capabilities_cmd::ServerCapabilitiesArgs),
+    ServerCapabilities(net_args::ServerCapabilitiesArgs),
 
     // ── LQL ─────────────────────────────────────────────────────────
     #[command(next_help_heading = "LQL")]
@@ -170,7 +204,8 @@ enum Commands {
 
     #[command(next_help_heading = "Build")]
     /// HuggingFace Hub: upload a vindex.
-    Hf(hf_cmd::HfArgs),
+    #[cfg_attr(not(feature = "net"), command(disable_help_flag = true))]
+    Hf(net_args::HfArgs),
 
     #[command(next_help_heading = "Build")]
     /// Verify vindex file integrity (SHA256 checksums).
@@ -360,6 +395,13 @@ fn main() {
     std::process::exit(code);
 }
 
+fn run_lql(args: &LqlArgs) -> Result<(), Box<dyn std::error::Error>> {
+    for line in larql_lql::run_batch(&args.statement)? {
+        println!("{line}");
+    }
+    Ok(())
+}
+
 fn real_main() -> i32 {
     let raw_args: Vec<String> = std::env::args().collect();
     let args = match trampoline::prepare_argv(raw_args) {
@@ -381,13 +423,22 @@ fn real_main() -> i32 {
         Commands::K3Ledger(args) => k3_ledger::run(args),
         Commands::Accuracy(args) => accuracy_cmd::run(args),
         Commands::Shannon(cmd) => shannon_cmd::run(cmd),
+        #[cfg(feature = "net")]
         Commands::Pull(args) => pull_cmd::run(args),
+        #[cfg(not(feature = "net"))]
+        Commands::Pull(_) => net_gate::refuse_command("pull"),
+        #[cfg(feature = "net")]
         Commands::Model(args) => model_cmd::run(args),
+        #[cfg(not(feature = "net"))]
+        Commands::Model(_) => net_gate::refuse_command("model"),
         Commands::Link(args) => link_cmd::run(args),
         Commands::List(args) => list_cmd::run(args),
         Commands::Show(args) => show_cmd::run(args),
         Commands::Slice(args) => slice_cmd::run(args),
+        #[cfg(feature = "net")]
         Commands::Publish(args) => publish_cmd::run(args),
+        #[cfg(not(feature = "net"))]
+        Commands::Publish(_) => net_gate::refuse_command("publish"),
         Commands::Registry(cmd) => registry_cmd::run(cmd),
         Commands::Rm(args) => rm_cmd::run(args),
 
@@ -397,7 +448,10 @@ fn real_main() -> i32 {
         Commands::Build(args) => build_cmd::run(args),
         Commands::Compile(args) => compile_cmd::run(args),
         Commands::Convert(args) => convert_cmd::run(args),
+        #[cfg(feature = "net")]
         Commands::Hf(args) => hf_cmd::run(args),
+        #[cfg(not(feature = "net"))]
+        Commands::Hf(_) => net_gate::refuse_command("hf"),
         Commands::Verify(args) => verify_cmd::run(args),
         Commands::Diag(args) => diag_cmd::run(args),
         #[cfg(feature = "research")]
@@ -412,24 +466,23 @@ fn real_main() -> i32 {
         Commands::Filter(args) => filter_cmd::run(args),
 
         // ── LQL ──
+        // `larql repl` / `larql lql` stay available without `net`: the CLI cannot see
+        // inside larql-lql's executor and must not sniff LQL text, so USE REMOTE and
+        // hf:// can still reach the network until larql-lql gets its own `net` feature.
+        // That leak is recorded in docs/cli.md and reported by the net-closure workflow.
         Commands::Repl => {
             larql_lql::run_repl();
             Ok(())
         }
-        Commands::Lql(args) => match larql_lql::run_batch(&args.statement) {
-            Ok(lines) => {
-                for line in &lines {
-                    println!("{line}");
-                }
-                Ok(())
-            }
-            Err(e) => Err(e),
-        },
+        Commands::Lql(args) => run_lql(&args),
 
         // ── Factory ──
         Commands::Recipe(cmd) => recipe_cmd::run(cmd),
         Commands::Capabilities => capabilities_cmd::run(),
+        #[cfg(feature = "net")]
         Commands::ServerCapabilities(args) => server_capabilities_cmd::run(args),
+        #[cfg(not(feature = "net"))]
+        Commands::ServerCapabilities(_) => net_gate::refuse_command("server-capabilities"),
         Commands::InspectHf(args) => inspect_hf_cmd::run(args),
         Commands::Vindex3(cmd) => vindex3_cmd::run(cmd),
         #[cfg(feature = "research")]
@@ -437,7 +490,10 @@ fn real_main() -> i32 {
         Commands::Card(cmd) => card_cmd::run(cmd),
 
         // ── Serve (exec into larql-server) ──
+        #[cfg(feature = "net")]
         Commands::Serve(args) => serve_cmd::run_serve(args),
+        #[cfg(not(feature = "net"))]
+        Commands::Serve(_) => net_gate::refuse_command("serve"),
 
         // ── Research / dev tools ──
         #[cfg(feature = "research")]
@@ -465,5 +521,28 @@ mod documentation_tests {
         let mut names: Vec<_> = vindex3.get_subcommands().map(|c| c.get_name()).collect();
         names.sort_unstable();
         assert_eq!(facts["commands"]["larql_vindex3"], serde_json::json!(names));
+    }
+
+    #[test]
+    fn net_verbs_are_listed_in_every_feature_state() {
+        let command = super::Cli::command();
+        for name in [
+            "pull",
+            "model",
+            "publish",
+            "hf",
+            "serve",
+            "server-capabilities",
+        ] {
+            assert!(command.find_subcommand(name).is_some(), "missing {name}");
+        }
+    }
+
+    #[cfg(not(feature = "net"))]
+    #[test]
+    fn net_verb_help_reaches_the_refusal_without_net() {
+        use clap::Parser;
+        let cli = super::Cli::try_parse_from(["larql", "pull", "--help"]).unwrap();
+        assert!(matches!(cli.command, super::Commands::Pull(_)));
     }
 }

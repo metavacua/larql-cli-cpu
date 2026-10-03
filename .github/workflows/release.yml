@@ -6,15 +6,19 @@
 # build artifacts, versioned by tag, with no semver/API-stability
 # commitment attached.
 #
-# Feature flags: never larql-cli's `research` feature. `research` is a
-# larql-cli default (dev builds and CI keep the `larql dev` tree, k3-ledger,
-# moe-locality, optimizer-mcp and `shannon verify`), so every leg passes
-# --no-default-features. larql-cli.yml carries a clippy step for exactly
-# this release shape.
+# Feature flags: larql-cli's defaults are `research` and `net`. Release
+# binaries drop only `research` (dev builds and CI keep the `larql dev`
+# tree, k3-ledger, moe-locality, optimizer-mcp and `shannon verify`) and
+# KEEP `net`, so every leg passes `--no-default-features --features net`.
+# Passing bare --no-default-features would silently strip networking
+# (pull, hf, publish, serve, server-capabilities, `dec-bench replay`,
+# `--ffn` and the `--v3-*-shards` transports) from the tagged archives.
+# larql-cli.yml carries a clippy step for exactly this release shape.
 #
 # `dec-bench` is deliberately NOT research-gated: upstream's DEC drivers
-# run `dec-bench replay` from a release archive. Those drivers, and the
-# `larql-server` they pair it with, are not part of this repository.
+# run `dec-bench replay` from a release archive, and `replay` ships
+# because `net` is on. Those drivers, and the `larql-server` they pair
+# it with, are not part of this repository.
 
 name: release
 
@@ -35,7 +39,7 @@ jobs:
         include:
           - os: macos-14
             target: aarch64-apple-darwin
-            features: "--no-default-features"
+            features: "--no-default-features --features net"
           # Pinned to 22.04, NOT ubuntu-latest: the runner's glibc sets the
           # binary's minimum. 24.04 (glibc 2.39) emitted a GLIBC_2.38
           # requirement, which will not load on Colab or any 22.04-class rented
@@ -43,10 +47,10 @@ jobs:
           # only when every DEC target host has moved past it.
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            features: "--no-default-features"
+            features: "--no-default-features --features net"
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            features: "--no-default-features"
+            features: "--no-default-features --features net"
 
     steps:
       - uses: actions/checkout@v7

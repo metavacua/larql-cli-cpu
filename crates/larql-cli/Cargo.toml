@@ -12,8 +12,8 @@ name = "larql"
 path = "src/main.rs"
 
 [dependencies]
-larql-router = { path = "../larql-router", default-features = false }
-larql-core = { path = "../larql-core" }
+larql-router = { path = "../larql-router", default-features = false, optional = true }
+larql-core = { path = "../larql-core", default-features = false, features = ["msgpack", "io", "engine"] }
 larql-compute = { path = "../larql-compute" }
 larql-inference = { path = "../larql-inference" }
 larql-kv = { path = "../larql-kv" }
@@ -24,7 +24,7 @@ larql-vindex-spec = { path = "../larql-vindex-spec" }
 larql-factory = { path = "../larql-factory" }
 clap = { version = "4", features = ["derive", "env"] }
 indicatif = "0.17"
-reqwest = { workspace = true, features = ["blocking", "json"] }
+reqwest = { workspace = true, features = ["blocking", "json"], optional = true }
 base64 = "0.22"
 tokenizers = "0.21"
 safetensors = "0.7"
@@ -46,12 +46,19 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 tempfile = "3"
 
 [features]
-default = ["research"]
+default = ["research", "net"]
 # Research / interpretability tooling: the `larql dev` tree (incl. ov-rd),
 # `k3-ledger`, `parity`, `moe-locality`, `optimizer-mcp` and
 # `shannon verify`. On for dev builds and CI; tagged release binaries
 # (.github/workflows/release.yml) are built without it.
 research = []
+# Networking: HF download/publish, remote FFN/MoE, VINDEX3 HTTP shard
+# transports, server probes. On by default. Tagged release binaries build
+# `--no-default-features --features net`. Without it these commands refuse
+# loudly, naming the feature. Library crates (larql-inference, -vindex,
+# -lql, -factory, -router-protocol) still link reqwest/tonic/tokio until
+# they grow their own `net` features; see scripts/net_closure_report.sh.
+net = ["dep:reqwest", "dep:larql-router", "larql-core/http"]
 
 [dev-dependencies]
 # `test-utils` exposes `larql_models::test_fixtures::make_test_weights`,

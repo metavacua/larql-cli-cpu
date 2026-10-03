@@ -101,6 +101,10 @@ fn run_build_id(args: RecipeArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_estimate(args: RecipeArgs) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(not(feature = "net"))]
+    crate::net_gate::require_net(
+        "`larql recipe estimate` (it asks the Hugging Face API for the source repo's size)",
+    )?;
     let recipe = load_recipe(&args.recipe)?;
     let estimate = larql_factory::estimate_size(&recipe)?;
     println!("{}", serde_json::to_string_pretty(&estimate)?);
@@ -108,6 +112,10 @@ fn run_estimate(args: RecipeArgs) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_build(args: BuildArgs) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(not(feature = "net"))]
+    crate::net_gate::require_net(
+        "`larql recipe build` (it fetches the source repo and publishes over the network)",
+    )?;
     let recipe = load_recipe(&args.recipe)?;
     let runner = larql_factory::SubprocessRunner::current_exe()
         .map_err(|e| format!("resolving the larql binary to self-invoke: {e}"))?;
@@ -246,6 +254,7 @@ spec:
         assert!(run(RecipeCommand::Validate(args)).is_ok());
     }
 
+    #[cfg(feature = "net")]
     #[test]
     #[ignore = "hits the real HuggingFace API — network-dependent, not for CI; run with --ignored to smoke-test the live path"]
     fn run_estimate_against_a_real_public_repo() {

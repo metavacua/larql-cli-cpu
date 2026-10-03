@@ -569,9 +569,13 @@ larql-lql-coverage-summary:
 
 larql-lql-ci: larql-lql-fmt-check larql-lql-lint larql-lql-test larql-lql-examples larql-lql-bench-test
 
-# larql-cli — top-level `larql` binary. Default features are just `research`,
-# so the research tooling stays tested and measured, as in CI. Override
-# with LARQL_CLI_DEFAULT_FEATURES=--no-default-features for the release shape.
+# larql-cli — top-level `larql` binary. Default features are `research` and
+# `net`, so the research tooling and networking stay tested and measured, as
+# in CI. Override with
+#   LARQL_CLI_DEFAULT_FEATURES='--no-default-features --features net'
+# for the release shape (what release.yml ships), or
+#   LARQL_CLI_DEFAULT_FEATURES=--no-default-features
+# for the local-only shape (no networking; net verbs refuse loudly).
 LARQL_CLI_DEFAULT_FEATURES ?=
 
 larql-cli-test:
@@ -580,10 +584,9 @@ larql-cli-test:
 larql-cli-fmt-check:
 	cargo fmt -p larql-cli -- --check
 
-# Lint disabled: 2026-05-10 `larql-cli` carries ~82 pre-existing clippy
-# errors under default features and ~112 under `--no-default-features`
-# (mostly `large_enum_variant` and `dead_code` on metal-only paths).
-# Re-enable `-- -D warnings` after that backlog is cleared.
+# Warnings are not denied here, but CI runs this lint under `-D warnings`
+# (re-enabled 2026-08-06, issue #169; see larql-cli.yml) in the default,
+# release, local-only and research-without-net shapes.
 larql-cli-lint:
 	cargo clippy -p larql-cli --bins --tests $(LARQL_CLI_DEFAULT_FEATURES) --no-deps
 

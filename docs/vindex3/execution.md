@@ -8,8 +8,11 @@ Build the source checkout with the pinned Rust toolchain:
 cargo build --release -p vindex-cli -p larql-cli
 ```
 
-On Linux or Windows add `--no-default-features` to avoid the default Metal
-backend. Examples below use a local Hugging Face checkpoint directory and
+No GPU feature exists in this build. Use `--no-default-features --features net`
+for the release shape (no research tooling, networking kept); bare
+`--no-default-features` builds a local-only binary whose network verbs
+(`pull`, `hf`, `serve`, `--ffn`, the `--v3-shards` transports) refuse.
+Examples below use a local Hugging Face checkpoint directory and
 an admitted text component; replace the paths with your own.
 
 ```bash

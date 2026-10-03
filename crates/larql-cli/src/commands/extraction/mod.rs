@@ -24,6 +24,7 @@ pub mod ffn_latency_cmd;
 pub mod ffn_overlap_cmd;
 #[cfg(feature = "research")]
 pub mod fingerprint_extract_cmd;
+#[cfg(feature = "net")]
 pub mod hf_cmd;
 #[cfg(feature = "research")]
 pub mod index_gates_cmd;

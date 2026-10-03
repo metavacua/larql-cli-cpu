@@ -130,6 +130,8 @@ pub(super) fn report_staging(entry: &artifact::ResolvedArtifact) {
 }
 
 pub(super) fn run_encode(args: EncodeArgs) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(not(feature = "net"))]
+    artifact::refuse_remote_specs(&args.artifacts)?;
     let resolved = artifact::resolve_all(&args.artifacts)?;
     for entry in &resolved {
         report_staging(entry);

@@ -6,6 +6,8 @@ use larql_vindex::format::vindex3::plan::plan_resolved;
 use super::*;
 
 pub(super) fn run_plan(args: PlanArgs) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(not(feature = "net"))]
+    artifact::refuse_remote_specs(&args.artifacts)?;
     let resolved = artifact::resolve_all(&args.artifacts)?;
     for entry in &resolved {
         report_staging(entry);

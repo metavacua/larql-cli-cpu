@@ -14,7 +14,7 @@ target conditions, default-feature choices and explicit example targets.
 | Package | Version | Normal local dependencies | Default features |
 |---|---|---|---|
 | [larql-boundary](../../crates/larql-boundary/Cargo.toml) | `0.2.0` | None | None |
-| [larql-cli](../../crates/larql-cli/Cargo.toml) | `0.2.0` | `larql-compute`, `larql-core`, `larql-factory`, `larql-inference`, `larql-kv`, `larql-lql`, `larql-models`, `larql-router`, `larql-vindex`, `larql-vindex-spec` | `research` |
+| [larql-cli](../../crates/larql-cli/Cargo.toml) | `0.2.0` | `larql-compute`, `larql-core`, `larql-factory`, `larql-inference`, `larql-kv`, `larql-lql`, `larql-models`, `larql-router` (optional), `larql-vindex`, `larql-vindex-spec` | `research`, `net` |
 | [larql-compute](../../crates/larql-compute/Cargo.toml) | `0.2.0` | `larql-execution`, `larql-models` | None |
 | [larql-continuation-fixture](../../crates/larql-continuation-fixture/Cargo.toml) | `0.2.0` | `larql-vindex` | None |
 | [larql-core](../../crates/larql-core/Cargo.toml) | `0.2.0` | None | `http`, `msgpack`, `io`, `engine` |

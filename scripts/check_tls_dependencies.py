@@ -52,6 +52,9 @@ def main() -> None:
     # Normal edges exclude OpenBLAS/Swagger's host-side download build tools.
     tree = subprocess.run(
         ["cargo", "tree", "--locked", "--target", args.target, "--no-default-features",
+         # `net` is larql-cli's networking feature (optional reqwest/larql-router);
+         # it ships in release binaries, so the audited graph must include it.
+         "--features", "larql-cli/net",
          "-p", "larql-cli", "-p", "larql-router",
          "-e", "normal", "--prefix", "none", "--format", "{p}"],
         cwd=ROOT, capture_output=True, text=True,

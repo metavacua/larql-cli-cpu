@@ -21,6 +21,31 @@ pub struct BuildArgs {
     compile: Option<String>,
 }
 
+/// Without `net`, refuse a Vindexfile whose directives (top-level or in any
+/// stage) reference an `hf://` path: the library would download it at build
+/// time. Local-path Vindexfiles are unaffected.
+#[cfg(not(feature = "net"))]
+fn refuse_hub_references(vf: &larql_vindex::Vindexfile) -> Result<(), Box<dyn std::error::Error>> {
+    use larql_vindex::VindexfileDirective;
+    let all = vf
+        .directives
+        .iter()
+        .chain(vf.stages.iter().flat_map(|s| s.directives.iter()));
+    for directive in all {
+        if let VindexfileDirective::From(p)
+        | VindexfileDirective::Patch(p)
+        | VindexfileDirective::Labels(p) = directive
+        {
+            if larql_vindex::is_hf_path(p) {
+                return Err(crate::net_gate::net_required(&format!(
+                    "Vindexfile directive referencing `{p}` (the library would download it at build time)"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn run(args: BuildArgs) -> Result<(), Box<dyn std::error::Error>> {
     let vindexfile_path = args.dir.join("Vindexfile");
     if !vindexfile_path.exists() {
@@ -30,6 +55,8 @@ pub fn run(args: BuildArgs) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Parsing Vindexfile: {}", vindexfile_path.display());
 
     let vf = larql_vindex::parse_vindexfile(&vindexfile_path)?;
+    #[cfg(not(feature = "net"))]
+    refuse_hub_references(&vf)?;
 
     // Summary
     let stage_str = args.stage.as_deref().unwrap_or("(default)");

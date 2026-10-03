@@ -29,7 +29,7 @@ the import record each change the extraction made, one topic per commit.
 
 | Kept | Why |
 |---|---|
-| `larql-cli`, and the 13 crates `cargo tree -p larql-cli --no-default-features` reaches | the binary and its whole dependency closure |
+| `larql-cli`, and the 13 crates `cargo tree -p larql-cli --no-default-features --features net` reaches | the binary and its whole dependency closure |
 | `larql-continuation-fixture` | the CLI's plugin tests build it by package name |
 | `larql-experts` (nested workspace) | `larql run --experts` finds its WASM modules by path |
 | `registry/`, `data/`, test fixtures | compiled in with `include_str!`, or read by tests |
