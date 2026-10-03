@@ -103,6 +103,17 @@ multiple-versions = "warn"      # informational: the graph legitimately carries
                                 # several windows-sys / syn generations
 highlight = "all"
 
+# Socket / network-capable code that must not exist in the local dependency graph.
+# larql-inference instantiates WASM experts with a plain wasmtime Linker; wasmtime-wasi
+# compiles in TCP/UDP socket support and pulls tokio-net and cap-net-ext even when no
+# socket is ever granted. A re-added dependency fails the cargo-deny bans check.
+deny = [
+    { crate = "wasmtime-wasi" },
+    { crate = "wasmtime-wasi-io" },
+    { crate = "wasi-common" },
+    { crate = "cap-net-ext" },
+]
+
 # `wildcards` is "warn", not "deny", and that is a deliberate, temporary
 # setting. The workspace's own crates depend on each other by bare `path`
 # with no `version` key, which cargo-deny counts as a wildcard. Its

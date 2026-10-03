@@ -38,7 +38,7 @@ fn built_experts(dir: &std::path::Path) -> Vec<PathBuf> {
 }
 
 /// Number of expert crates in the nested workspace: directories holding a
-/// `Cargo.toml`, the same rule `scripts/check_wasm_expert_imports.py` applies.
+/// `Cargo.toml`.
 fn expert_crate_count() -> usize {
     let experts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../larql-experts/experts");
     std::fs::read_dir(experts)

@@ -14,15 +14,15 @@
 # when the host tries to instantiate the module.
 #
 # Jobs:
-#   no-wasi-graph  - wasmtime-wasi / cap-net-ext absent from the dependency graph;
-#                    also refreshes Cargo.lock and uploads the diff as a patch
-#   build-experts  - build for wasm32-unknown-unknown, host unit tests, assert
-#                    every .wasm has zero imports and the full ABI exports
-#   host-dispatch  - load the built modules through larql-inference and the CLI
+#   build-experts  - host unit tests of the nested workspace, then build for
+#                    wasm32-unknown-unknown and publish the modules
+#   host-dispatch  - load the built modules through larql-inference and the CLI.
+#                    tests/test_experts/no_imports.rs asserts, through wasmtime itself,
+#                    that every module imports nothing and exports the ABI
+#                    (LARQL_REQUIRE_WASM_EXPERTS=1 makes a missing build a failure)
 #
-# Cargo.lock is not regenerated on the dev machine (no cargo there). Apply the
-# patch with: gh run download <id> -n cargo-lock-patch && git apply cargo-lock.patch
-# Until it is applied, `--locked` jobs elsewhere fail on the stale lockfile.
+# That wasmtime-wasi and cap-net-ext stay out of the graph is enforced by cargo-deny's
+# [bans] in deny.toml (the quality workflow), not here.
 
 name: larql-experts
 
@@ -40,10 +40,6 @@ on:
       - 'Makefile'
       - 'Cargo.toml'
       - 'Cargo.lock'
-      - 'scripts/check_wasm_expert_imports.py'
-      - 'scripts/test_wasm_expert_imports.py'
-      - 'scripts/check_no_wasi_dependencies.py'
-      - 'scripts/test_no_wasi_dependencies.py'
       - '.github/workflows/larql-experts.yml'
   pull_request:
     paths:
@@ -57,10 +53,6 @@ on:
       - 'Makefile'
       - 'Cargo.toml'
       - 'Cargo.lock'
-      - 'scripts/check_wasm_expert_imports.py'
-      - 'scripts/test_wasm_expert_imports.py'
-      - 'scripts/check_no_wasi_dependencies.py'
-      - 'scripts/test_no_wasi_dependencies.py'
       - '.github/workflows/larql-experts.yml'
   workflow_dispatch: {}
 
@@ -75,38 +67,8 @@ env:
   EXPERTS_WASM_DIR: crates/larql-experts/target/wasm32-unknown-unknown/release
 
 jobs:
-  no-wasi-graph:
-    name: no WASI / socket crates in the graph
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-      - name: Activate the pinned Rust toolchain
-        run: rustup show active-toolchain
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Guard controls
-        run: python3 -m unittest discover -s scripts -p test_no_wasi_dependencies.py
-      # Re-resolve WITHOUT --locked so a removed dependency is pruned from the lock.
-      - name: Refresh Cargo.lock (no --locked)
-        run: |
-          cargo metadata --format-version 1 > /dev/null
-          mkdir -p fixes
-          git diff -- Cargo.lock > fixes/cargo-lock.patch
-          [ -s fixes/cargo-lock.patch ] || rm -f fixes/cargo-lock.patch
-      - name: Upload Cargo.lock patch (only when it is non-empty)
-        if: always() && hashFiles('fixes/cargo-lock.patch') != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: cargo-lock-patch
-          path: fixes/
-          retention-days: 7
-      - name: wasmtime-wasi and cap-net-ext are absent
-        run: python3 scripts/check_no_wasi_dependencies.py
-
   build-experts:
-    name: build + zero-import check
+    name: build experts
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -115,17 +77,10 @@ jobs:
         run: rustup show active-toolchain
       - name: Add the guest target
         run: rustup target add "$EXPERTS_TARGET"
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Checker controls
-        run: python3 -m unittest discover -s scripts -p test_wasm_expert_imports.py
       - name: Host unit tests (the nested workspace, host target)
         run: cargo test --locked --manifest-path crates/larql-experts/Cargo.toml --workspace
       - name: Build the experts for wasm32-unknown-unknown
         run: cargo build --locked --manifest-path crates/larql-experts/Cargo.toml --target "$EXPERTS_TARGET" --release
-      - name: Every module imports nothing and exports the ABI
-        run: python3 scripts/check_wasm_expert_imports.py "$EXPERTS_WASM_DIR"
       - name: Upload the built modules
         uses: actions/upload-artifact@v4
         with:

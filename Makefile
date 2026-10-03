@@ -13,7 +13,6 @@ release:
 build-experts:
 	rustup target add wasm32-unknown-unknown
 	cargo build --manifest-path crates/larql-experts/Cargo.toml --target wasm32-unknown-unknown --release
-	python3 scripts/check_wasm_expert_imports.py
 
 test-experts:
 	cargo test --manifest-path crates/larql-experts/Cargo.toml --workspace
