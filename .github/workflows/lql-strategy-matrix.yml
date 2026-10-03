@@ -33,6 +33,10 @@ on:
         description: "Runner label for every job: the CLI is built and run on this runner's architecture"
         type: string
         default: ubuntu-latest
+      tag:
+        description: "Names this instance: artifacts and the concurrency group carry it, so two instances in one workflow run never read or cancel each other"
+        type: string
+        default: default
   workflow_dispatch:
     inputs:
       strict:
@@ -54,11 +58,12 @@ permissions:
 # A push to main is never cancelled by the next one: the record of each main commit is the
 # point of running there. Only a superseded pull-request run is. Dispatches get a unique group.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  group: ${{ github.workflow }}-${{ inputs.tag || 'default' }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   RUST_BACKTRACE: "1"
+  TAG: ${{ inputs.tag || 'default' }}
 
 jobs:
   # Enumerate every leg as JSON → consumed by the matrix via fromJSON. A malformed
@@ -99,7 +104,7 @@ jobs:
       - name: Upload larql binary
         uses: actions/upload-artifact@v4
         with:
-          name: larql-bin
+          name: larql-bin-${{ env.TAG }}
           path: target/release/larql
           retention-days: 1
           if-no-files-found: error
@@ -179,7 +184,7 @@ jobs:
       - name: Download larql binary
         uses: actions/download-artifact@v4
         with:
-          name: larql-bin
+          name: larql-bin-${{ env.TAG }}
           path: bin
       - name: Prep
         run: |
@@ -302,7 +307,7 @@ jobs:
         if: contains(fromJSON('["smol135base.v3","smol135base.native.all","smol135base.xform.q4k"]'), matrix.leg.name)
         uses: actions/upload-artifact@v4
         with:
-          name: vindex-${{ matrix.leg.name }}
+          name: vindex-${{ env.TAG }}-${{ matrix.leg.name }}
           path: out/${{ matrix.leg.name }}.vindex
           retention-days: 1
           if-no-files-found: warn
@@ -321,7 +326,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: results-${{ matrix.leg.name }}
+          name: results-${{ env.TAG }}-${{ matrix.leg.name }}
           retention-days: 1
           path: |
             out/results-${{ matrix.leg.name }}.jsonl
@@ -352,7 +357,7 @@ jobs:
       - name: Download larql binary
         uses: actions/download-artifact@v4
         with:
-          name: larql-bin
+          name: larql-bin-${{ env.TAG }}
           path: bin
       - name: Prep
         run: |
@@ -389,7 +394,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: lifecycle-${{ matrix.model.id }}
+          name: lifecycle-${{ env.TAG }}-${{ matrix.model.id }}
           retention-days: 1
           path: |
             out/lifecycle-${{ matrix.model.id }}.jsonl
@@ -403,6 +408,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v4
         with:
+          pattern: "*-${{ env.TAG }}*"
           path: artifacts
       - name: Build matrix report
         run: |
@@ -413,7 +419,7 @@ jobs:
       - name: Upload combined matrix
         uses: actions/upload-artifact@v4
         with:
-          name: lql-matrix
+          name: lql-matrix-${{ env.TAG }}
           retention-days: 1
           path: lql-matrix.md
 
@@ -425,6 +431,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v4
         with:
+          pattern: "*-${{ env.TAG }}*"
           path: artifacts
       - name: Run conformance oracle
         env:
@@ -440,7 +447,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: conformance
+          name: conformance-${{ env.TAG }}
           retention-days: 1
           path: |
             conformance.md
@@ -454,17 +461,18 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v4
         with:
+          pattern: "*-${{ env.TAG }}*"
           path: artifacts
       - name: Tensor-presence + Q8 resolution
         run: |
           python3 scripts/lql_matrix/tensor_presence.py \
             "artifacts/results-*/manifest-*/listing.json" presence.json
           python3 - <<'PY'
-          import json, glob, sys
+          import json, glob, os, sys
           sys.path.insert(0, "scripts/lql_matrix")
           import tensor_presence as T
           pres = json.load(open("presence.json"))
-          cj = glob.glob("artifacts/conformance/conformance.json")
+          cj = glob.glob(f"artifacts/conformance-{os.environ['TAG']}/conformance.json")
           violations = json.load(open(cj[0]))["violations"] if cj else None
           res = T.render_q8(pres, violations, native_only=True)
           json.dump(res, open("q8.json", "w"), indent=2)
@@ -476,7 +484,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: inventory
+          name: inventory-${{ env.TAG }}
           retention-days: 1
           path: |
             presence.json
@@ -515,11 +523,11 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-cargo-realart-release-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-${{ runner.arch }}-cargo-realart-release-
       - uses: actions/download-artifact@v4
-        with: { name: vindex-smol135base.v3, path: art/smol135base.v3 }
+        with: { name: "vindex-${{ env.TAG }}-smol135base.v3", path: art/smol135base.v3 }
       - uses: actions/download-artifact@v4
-        with: { name: vindex-smol135base.native.all, path: art/smol135base.native.all }
+        with: { name: "vindex-${{ env.TAG }}-smol135base.native.all", path: art/smol135base.native.all }
       - uses: actions/download-artifact@v4
-        with: { name: vindex-smol135base.xform.q4k, path: art/smol135base.xform.q4k }
+        with: { name: "vindex-${{ env.TAG }}-smol135base.xform.q4k", path: art/smol135base.xform.q4k }
       - name: Build test binaries
         run: $CARGO_TEST -p larql-vindex -p larql-inference --no-run
 
@@ -634,7 +642,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v4
         with:
-          name: larql-bin
+          name: larql-bin-${{ env.TAG }}
           path: bin
       - name: Prep
         run: |
