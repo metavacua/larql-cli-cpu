@@ -18,7 +18,7 @@ on:
     # experiment/** so the dependency-graph job (which produces the
     # cargo-lock-patch artifact) runs from a branch with no PR open. Neither a PR
     # nor workflow_dispatch is available before this file is on main.
-    branches: [main, 'experiment/**']
+    branches: [main, 'experiment/**', '!experiment/crate/**']
     paths:
       - 'crates/larql-compute/**'
       - 'crates/larql-blas-link/**'
@@ -50,6 +50,9 @@ on:
 # every main push under `refs/heads/main` would therefore still destroy
 # the CI record for an intermediate main commit when merges land close
 # together, with cancellation disabled or not.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

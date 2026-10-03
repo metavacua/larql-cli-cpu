@@ -10,7 +10,7 @@ name: extraction-check
 
 on:
   push:
-    branches-ignore: [main]
+    branches-ignore: [main, 'experiment/crate/**']
   workflow_dispatch: {}
 
 permissions:

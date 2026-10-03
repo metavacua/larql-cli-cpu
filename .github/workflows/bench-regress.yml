@@ -114,6 +114,9 @@ on:
         type: string
         default: '1.0'
 
+permissions:
+  contents: read
+
 jobs:
   bench:
     # macos-14 = Apple Silicon, where the CPU backend runs through

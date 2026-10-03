@@ -15,8 +15,11 @@ name: riscv-reduction
 
 on:
   push:
-    branches: ['experiment/**']
+    # experiment/crate/** are the crate-gate branches (crate-gate.yml); they are woken by
+    # their PR into experiment/crate-gate, not by this experiment.
+    branches: ['experiment/**', '!experiment/crate/**']
   pull_request:
+    branches: [main]
 
 permissions:
   contents: read
