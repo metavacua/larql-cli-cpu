@@ -140,6 +140,21 @@ class LqlInstancesDoNotCollide(unittest.TestCase):
                 with self.subTest(step=step.get("name", step["with"])):
                     self.assertIn("env.TAG", step["with"].get("pattern", ""))
 
+    def test_the_gate_trims_the_quality_job_and_main_keeps_it(self):
+        # The gate already does fmt and clippy per crate; quality repeats them and adds the
+        # LQL stack's cargo test. Skipped only when a caller passes quality=false: a push to
+        # main or a dispatch has no such input and must still run it.
+        wf = load()["lql-strategy-matrix"]
+        self.assertIs(wf[True]["workflow_call"]["inputs"]["quality"]["default"], True)
+        self.assertEqual(wf["jobs"]["quality"]["if"], "format('{0}', inputs.quality) != 'false'")
+        self.assertIs(load()["crate-gate-chain"]["jobs"]["lql"]["with"]["quality"], False)
+
+    def test_nothing_waits_on_quality(self):
+        # It runs alongside the matrix, never as a dependency of it, so trimming it skips nothing.
+        for name, job in load()["lql-strategy-matrix"]["jobs"].items():
+            with self.subTest(job=name):
+                self.assertNotIn("quality", needs(job))
+
     def test_concurrency_group_is_per_instance(self):
         self.assertIn("inputs.tag", load()["lql-strategy-matrix"]["concurrency"]["group"])
 

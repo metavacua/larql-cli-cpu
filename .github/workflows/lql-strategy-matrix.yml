@@ -33,6 +33,10 @@ on:
         description: "Runner label for every job: the CLI is built and run on this runner's architecture"
         type: string
         default: ubuntu-latest
+      quality:
+        description: "Run the quality job (fmt + clippy + test of the LQL stack). The crate gate turns it off: it does fmt and clippy itself"
+        type: boolean
+        default: true
       tag:
         description: "Names this instance: artifacts and the concurrency group carry it, so two instances in one workflow run never read or cancel each other"
         type: string
@@ -115,6 +119,9 @@ jobs:
     # never skips the matrix — we want both signals on the same run to compare
     # "unit test passed" against "matrix cell crashed" and localise the defect.
     # No exemptions: the backlog is included on purpose. The alarm stays on.
+    # A caller can trim it with quality=false (crate-gate does); push and dispatch have no
+    # such input, so main keeps it.
+    if: format('{0}', inputs.quality) != 'false'
     runs-on: ${{ inputs.runs_on || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v6
