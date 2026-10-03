@@ -72,13 +72,16 @@ async-stream = "0.3"
 futures = "0.3"
 
 # WASM expert registry
-# >=36.0.16: RUSTSEC-2026-0316 (wasmtime, low) / RUSTSEC-2026-0314
-# (wasmtime-wasi, medium) - both published 2026-09-24, fixed >=36.0.16 in
-# the 36.x line. Staying in 36.x rather than jumping to the 48/49 series
-# the advisories also accept, since that is a much larger version jump
+# >=36.0.16: RUSTSEC-2026-0316 (wasmtime, low), published 2026-09-24, fixed
+# >=36.0.16 in the 36.x line. Staying in 36.x rather than jumping to the 48/49
+# series the advisory also accepts, since that is a much larger version jump
 # than a security patch bump warrants.
+# wasmtime-wasi is deliberately NOT a dependency. The experts are built for
+# wasm32-unknown-unknown and import nothing, so the loader instantiates them
+# with a plain `Linker` and no WASI context. wasmtime-wasi compiles in socket
+# code (tokio net, cap-net-ext), which must not exist in the local graph: do
+# not add it back. A module that imports anything is refused by the loader.
 wasmtime = { version = "36.0.16", default-features = false, features = ["cranelift", "runtime"] }
-wasmtime-wasi = "36.0.16"
 anyhow = "1"
 
 

@@ -18,14 +18,21 @@
 
 use super::*;
 use larql_inference::experts::{
-    DispatchOutcome, DispatchSkip, Dispatcher, ExpertRegistry, ExpertSession, FilteredDispatcher,
-    OpNameMask,
+    expert_build_command, expert_wasm_dir_in, DispatchOutcome, DispatchSkip, Dispatcher,
+    ExpertRegistry, ExpertSession, FilteredDispatcher, OpNameMask, EXPERTS_WORKSPACE_REL,
 };
 use larql_inference::prompt::ChatTemplate;
 use larql_inference::WeightFfn;
 use larql_vindex::{load_vindex_tokenizer, SilentLoadCallbacks, VectorIndex};
 
 type BoxErr = Box<dyn std::error::Error>;
+
+/// Where the nested `larql-experts` workspace puts its release `.wasm`
+/// modules, relative to the repository root. The path is derived from
+/// larql-inference's constants, so it cannot drift from the loader.
+fn experts_build_subdir() -> PathBuf {
+    expert_wasm_dir_in(Path::new(EXPERTS_WORKSPACE_REL))
+}
 
 /// Which decode strategy to use for this `--experts` invocation.
 #[derive(Debug, PartialEq)]
@@ -197,17 +204,20 @@ fn resolve_experts_dir_inner(
         }
     }
     if let Some(exe) = exe_path {
+        let subdir = experts_build_subdir();
         for ancestor in exe.ancestors() {
-            let candidate = ancestor.join("crates/larql-experts/target/wasm32-wasip1/release");
+            let candidate = ancestor.join(&subdir);
             if candidate.is_dir() {
                 return Ok(candidate);
             }
         }
     }
-    Err(
-        "could not locate WASM experts directory; pass --experts-dir or set LARQL_EXPERTS_DIR"
-            .into(),
+    Err(format!(
+        "could not locate WASM experts directory; pass --experts-dir or set LARQL_EXPERTS_DIR \
+         (build them with `{}`)",
+        expert_build_command()
     )
+    .into())
 }
 
 /// Detect the chat template from a vindex.
@@ -472,9 +482,7 @@ mod tests {
         // env dir doesn't exist; workspace walk must then succeed.
         // Build a fake "exe" inside a workspace-shaped tempdir tree.
         let root = tempfile::tempdir().expect("tempdir");
-        let wasm_dir = root
-            .path()
-            .join("crates/larql-experts/target/wasm32-wasip1/release");
+        let wasm_dir = root.path().join(experts_build_subdir());
         std::fs::create_dir_all(&wasm_dir).unwrap();
         // exe is conceptually somewhere inside root, e.g. target/debug/larql.
         let exe = root.path().join("target/debug/larql");

@@ -25,15 +25,29 @@ the two are not interchangeable.
 
 ## Build and validate
 
-Install the Rust `wasm32-wasip1` target, then run from the repository root:
+Install the Rust `wasm32-unknown-unknown` target
+(`rustup target add wasm32-unknown-unknown`), then run from the repository root:
 
 ```bash
-cargo build --manifest-path crates/larql-experts/Cargo.toml --target wasm32-wasip1 --release
+cargo build --manifest-path crates/larql-experts/Cargo.toml --target wasm32-unknown-unknown --release
 cargo test --manifest-path crates/larql-experts/Cargo.toml --workspace
 ```
 
-The first command builds guest artifacts in the nested workspace's target
-directory. The second runs host-target unit tests where supported; host dispatch
+The first command builds guest artifacts in
+`crates/larql-experts/target/wasm32-unknown-unknown/release`. Pass `--target`
+explicitly: the nested workspace deliberately has no `.cargo/config.toml` with
+`build.target`, because that would make the second command cross-compile and
+break the host-target unit tests.
+
+The artifacts import nothing: no WASI (`wasi_snapshot_preview1`) and no host
+functions. The host links them with a plain wasmtime `Linker` and refuses any
+module that declares an import at load time (`UnresolvedImports`, naming each
+import and the rebuild command), so a module built for a `-wasi*` target is
+rejected before instantiation. The experts use no clock, environment, filesystem, randomness or printing, only
+computation. A panic is a bare `unreachable` trap with no message, since there
+is no stderr to write to.
+
+The second command runs host-target unit tests where supported; host dispatch
 and WASM ABI behavior require their own integration witnesses. The compiled
 module cache, memory/fuel limits and reclamation rules belong to the host loader,
 not to claims about every guest's numerical correctness.

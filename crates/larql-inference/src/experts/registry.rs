@@ -6,7 +6,7 @@ use serde_json::Value;
 use wasmtime::{Engine, Instance, Module, Store};
 
 use super::caller::{self, ExpertMetadata, ExpertResult};
-use super::loader::{instantiate, load_module, ExpertStore};
+use super::loader::{instantiate, load_module, UnresolvedImports};
 
 /// Runtime information about an expert's WASM module — used to prove (in
 /// demos, tests, tooling) that calls actually traverse the sandbox.
@@ -34,7 +34,7 @@ pub struct ExpertHandle {
     wasm_bytes: u64,
     engine: Arc<Engine>,
     module: Module,
-    live: Option<(Store<ExpertStore>, Instance)>,
+    live: Option<(Store<()>, Instance)>,
 }
 
 impl ExpertHandle {
@@ -95,6 +95,11 @@ pub struct ExpertRegistry {
 
 impl ExpertRegistry {
     /// Load all `.wasm` files from `dir`, sorted by tier (from metadata).
+    ///
+    /// A module that fails to load is skipped with a warning on stderr, except
+    /// when it declares imports (for example a stale `wasm32-wasip1` build):
+    /// that is a build-target error, so the whole load fails naming every
+    /// import instead of returning a silently smaller registry.
     pub fn load_dir(dir: &Path) -> anyhow::Result<Self> {
         let engine = Arc::new(Engine::default());
         let mut handles: Vec<ExpertHandle> = Vec::new();
@@ -109,6 +114,7 @@ impl ExpertRegistry {
         for path in &paths {
             match load_one(&engine, path) {
                 Ok(handle) => handles.push(handle),
+                Err(e) if e.downcast_ref::<UnresolvedImports>().is_some() => return Err(e),
                 Err(e) => eprintln!("[experts] skipping {:?}: {}", path, e),
             }
         }
@@ -245,4 +251,65 @@ fn load_one(engine: &Arc<Engine>, path: &Path) -> anyhow::Result<ExpertHandle> {
         module,
         live: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::loader::test_support::{wasi_importing_wasm, WASI_FUNC, WASI_MODULE};
+    use super::*;
+
+    fn fresh_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "larql_registry_{name}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn load_dir_fails_loudly_on_wasi_importing_module() {
+        let dir = fresh_dir("wasi_import");
+        std::fs::write(dir.join("stale.wasm"), wasi_importing_wasm()).expect("write wasm");
+
+        let err = match ExpertRegistry::load_dir(&dir) {
+            Ok(_) => panic!("load_dir must not return a registry for a WASI-importing module"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains(WASI_MODULE), "{msg}");
+        assert!(msg.contains(WASI_FUNC), "{msg}");
+        assert!(err.downcast_ref::<UnresolvedImports>().is_some());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_dir_still_skips_unrelated_bad_modules() {
+        let dir = fresh_dir("garbage");
+        std::fs::write(dir.join("garbage.wasm"), b"not wasm").expect("write file");
+
+        let reg = ExpertRegistry::load_dir(&dir).expect("non-import failures stay skipped");
+        assert!(reg.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_file_rejects_wasi_importing_module() {
+        let dir = fresh_dir("load_file");
+        let path = dir.join("stale.wasm");
+        std::fs::write(&path, wasi_importing_wasm()).expect("write wasm");
+
+        let mut reg = ExpertRegistry::default();
+        let err = reg.load_file(&path).expect_err("must refuse");
+        assert!(err.downcast_ref::<UnresolvedImports>().is_some());
+        assert!(reg.is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

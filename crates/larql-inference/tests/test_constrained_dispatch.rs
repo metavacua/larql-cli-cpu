@@ -15,7 +15,10 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use larql_inference::experts::{parse_op_call, ExpertRegistry};
+use larql_inference::experts::{
+    built_experts_required, expert_build_command, expert_wasm_dir_in, parse_op_call,
+    ExpertRegistry, REQUIRE_EXPERTS_ENV,
+};
 use larql_inference::{encode_prompt, prompt::ChatTemplate, InferenceModel, WeightFfn};
 use larql_kv::generation::generate_cached_constrained;
 use serde_json::{json, Value};
@@ -27,7 +30,7 @@ fn model_id() -> Option<String> {
 }
 
 fn wasm_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../larql-experts/target/wasm32-wasip1/release")
+    expert_wasm_dir_in(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../larql-experts"))
 }
 
 // ── Grammar mask ─────────────────────────────────────────────────────────────
@@ -208,8 +211,15 @@ No extra text."#;
 #[test]
 #[ignore = "loads a real model; set LARQL_MODEL and run with --ignored"]
 fn constrained_dispatch_pipeline() {
-    if !wasm_dir().exists() {
-        eprintln!("skip: wasm dir missing");
+    let dir = wasm_dir();
+    if !dir.exists() {
+        assert!(
+            !built_experts_required(),
+            "{REQUIRE_EXPERTS_ENV} is set but the built experts are missing at {} — run `{}`",
+            dir.display(),
+            expert_build_command()
+        );
+        eprintln!("skip: wasm dir missing — run `{}`", expert_build_command());
         return;
     }
 
@@ -226,7 +236,7 @@ fn constrained_dispatch_pipeline() {
     };
     eprintln!("model: {mid}  ({} layers)", model.num_layers());
 
-    let mut reg = ExpertRegistry::load_dir(&wasm_dir()).expect("load_dir");
+    let mut reg = ExpertRegistry::load_dir(&dir).expect("load_dir");
     let ffn = WeightFfn {
         weights: model.weights(),
     };
