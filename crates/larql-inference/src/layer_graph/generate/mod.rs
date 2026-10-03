@@ -38,6 +38,9 @@ pub use sampling::{Sampler, SamplingConfig};
 pub use types::{GenerateError, GenerateResult, StageTimings};
 
 #[cfg(test)]
+mod streaming_callback_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::layer_graph::CachedLayerGraph;
@@ -300,11 +303,9 @@ mod tests {
 
     #[test]
     fn generate_streaming_runs_against_synthetic_fixture() {
-        // The CPU fallback path for `generate_streaming` may not invoke
-        // the streaming callback (the streaming behaviour is a GPU-path
-        // affordance). We just want the function to execute end-to-end
-        // against the synthetic fixture without panicking; coverage is
-        // the goal, not behavioural parity with the GPU path.
+        // Drives the CPU fallback end-to-end against the synthetic fixture.
+        // The streaming contract on this path is asserted in
+        // `streaming_callback_tests::contract`.
         let (_tmp, tokenizer, mut weights, index) = synthetic_q4k_setup();
         let token_ids = vec![0u32, 1];
         let backend = larql_compute::CpuBackend;
@@ -325,7 +326,5 @@ mod tests {
             |id, text, prob| streamed.push((id, text.to_string(), prob)),
             None,
         );
-        // Callback may or may not fire on the CPU fallback path. Either
-        // outcome is acceptable for coverage purposes.
     }
 }

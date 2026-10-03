@@ -1,0 +1,78 @@
+# Static gate for issue #15: every token-emitting path reachable from the CPU
+# Q4K fallback of `generate_streaming` must receive the `on_token` callback.
+#
+# Facts are extracted from the source with tree-sitter-rust, the property is
+# derived by Soufflé Datalog, and an independent ast-grep pass cross-checks the
+# extraction (docs/proofs/streaming-callback/). No Rust is compiled here, so
+# this runs in about a minute and fails with the offending file:line sites.
+#
+# run_gate.sh exits 1 on a violation and 2 when the tooling or the cross-check
+# fails; both fail this job.
+
+name: streaming-callback-gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/larql-inference/src/layer_graph/generate/**'
+      - 'crates/larql-compute/src/cpu/mod.rs'
+      - 'crates/larql-compute/src/lib.rs'
+      - 'crates/larql-inference/src/vindex/kquant_forward/generation.rs'
+      - 'docs/proofs/streaming-callback/**'
+      - '.github/workflows/streaming-callback-gate.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/larql-inference/src/layer_graph/generate/**'
+      - 'crates/larql-compute/src/cpu/mod.rs'
+      - 'crates/larql-compute/src/lib.rs'
+      - 'crates/larql-inference/src/vindex/kquant_forward/generation.rs'
+      - 'docs/proofs/streaming-callback/**'
+      - '.github/workflows/streaming-callback-gate.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  reachability:
+    name: on_token reaches every token-emitting path
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install extraction tooling (pinned)
+        run: python -m pip install --quiet 'tree-sitter==0.26.0' 'tree-sitter-rust==0.24.2' 'ast-grep-cli==0.42.1'
+      # Soufflé is not in Ubuntu's archive, so it comes from the nixos-26.05
+      # binary cache (pinned channel), nothing is compiled on the runner.
+      - uses: cachix/install-nix-action@v31
+      - name: Test the gate itself (a gate that cannot fail, or passes vacuously, is worse than none)
+        shell: bash
+        run: |
+          nix shell github:NixOS/nixpkgs/nixos-26.05#souffle -c \
+            docs/proofs/streaming-callback/run_tests.sh
+      - name: Run the gate
+        # `shell: bash` (not the default `bash -e`) turns on pipefail, so the
+        # gate's exit status survives the pipe into tee.
+        shell: bash
+        run: |
+          nix shell github:NixOS/nixpkgs/nixos-26.05#souffle -c souffle --version
+          nix shell github:NixOS/nixpkgs/nixos-26.05#souffle -c \
+            docs/proofs/streaming-callback/run_gate.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/gate" | tee "$RUNNER_TEMP/gate.txt"
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## streaming-callback gate"
+            echo '```'
+            grep -v '^OK  ' "$RUNNER_TEMP/gate.txt" || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
