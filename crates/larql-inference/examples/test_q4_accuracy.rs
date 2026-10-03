@@ -6,8 +6,6 @@
 //! Usage:
 //!   cargo run --release -p larql-inference --example test_q4_accuracy
 
-extern crate blas_src;
-
 use larql_inference::{predict, InferenceModel};
 use larql_models::quant::ggml::{dequantize_q4_0, quantize_q4_0};
 

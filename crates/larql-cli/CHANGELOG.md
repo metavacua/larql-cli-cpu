@@ -9,6 +9,38 @@ pre-1.0 phase. Forward-looking work lives in [`ROADMAP.md`](ROADMAP.md).
 Entries migrated from ROADMAP.md on 2026-05-10; pre-2026-05-10 entries
 preserve the date and voice they were originally written in.
 
+## [2026-10-03] — BLAS: `openblas-src` replaced by the in-repo `larql-blas-link`
+
+On Linux and FreeBSD the system OpenBLAS is now linked by `larql-blas-link`, a
+dependency-free crate in this workspace, instead of `openblas-src`. The reason
+is the build graph: `openblas-src` has an unconditional `openblas-build`
+build-dependency, which pulls in `ureq` (an HTTP client) even with the
+`system` feature and although nothing is downloaded. `openblas-src`,
+`openblas-build` and the `ureq` edge that came in through them are gone from
+the build graph. This entry does not remove every network-capable crate:
+`hf-hub` (with its `ureq` feature, in `larql-vindex`) and `reqwest` (in
+`larql-cli`, `larql-lql`, `larql-inference`, `larql-vindex`, `larql-factory`
+and `larql-router`) remain, so `ureq`, `rustls` and `native-tls` are still in
+`Cargo.lock` by way of `hf-hub`. They are the intentional network surface
+until the vindex-net fission. The BLAS routines used are unchanged
+(ndarray's `blas` feature, `cblas_sgemm`/`sgemv`/`sdot` in the same OpenBLAS),
+so results and performance are not affected. macOS still links Accelerate
+through `blas-src`; Windows still links no BLAS.
+
+**Build contract changes:**
+
+- `OPENBLAS_LIB_DIR=<dir>` adds `<dir>` to the native link search path. Use it
+  when `libopenblas` is not in a default linker directory.
+- `OPENBLAS_LIB_DIR_<target>` (target triple, lowercase, `-` as `_`, for
+  example `OPENBLAS_LIB_DIR_riscv64gc_unknown_linux_gnu`) takes precedence for
+  that target, so a cross build does not hand a foreign-architecture directory
+  to host-built tools.
+- pkg-config probing is gone. A non-default OpenBLAS prefix that used to be
+  found through `pkg-config` or `openblas-src`'s own variables must now be named
+  with one of the variables above.
+- A missing `libopenblas` is now a link error. There is no fallback to a slower
+  path.
+
 ## [2026-09-30] — CPU-only: the GPU surface leaves the CLI
 
 This repository was extracted from metavacua/larql-to-sparql at `f02693c90`

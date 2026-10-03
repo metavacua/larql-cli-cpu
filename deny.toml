@@ -103,6 +103,16 @@ multiple-versions = "warn"      # informational: the graph legitimately carries
                                 # several windows-sys / syn generations
 highlight = "all"
 
+# openblas-src's unconditional `openblas-build` build-dependency pulls in an
+# HTTP client (ureq) even with the `system` feature, though nothing is
+# downloaded. Linux/FreeBSD link the system OpenBLAS through the in-repo,
+# dependency-free `larql-blas-link` crate instead; keep the old chain out.
+# `ureq` itself is NOT banned: larql-vindex's hf-hub dependency still uses it.
+deny = [
+    { crate = "openblas-src" },
+    { crate = "openblas-build" },
+]
+
 # `wildcards` is "warn", not "deny", and that is a deliberate, temporary
 # setting. The workspace's own crates depend on each other by bare `path`
 # with no `version` key, which cargo-deny counts as a wildcard. Its

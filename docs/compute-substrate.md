@@ -41,8 +41,9 @@ loading does not make all backends able to execute it. The
 
 ## Platforms and measurements
 
-The CPU manifest selects Accelerate on macOS, system OpenBLAS on Linux/FreeBSD,
-and a non-BLAS ndarray path on Windows. Metal implementation modules are
+The CPU manifest selects Accelerate on macOS, system OpenBLAS on Linux/FreeBSD
+(linked by the in-repo `larql-blas-link` crate), and a non-BLAS ndarray path on
+Windows. Metal implementation modules are
 macOS-gated; consumers expose their own opt-in features. The top-level CLI
 has a default GPU feature, while other crates can have empty defaults. Read
 the actual manifest rather than treating one crate's default as workspace-wide.

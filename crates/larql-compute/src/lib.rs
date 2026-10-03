@@ -70,13 +70,14 @@
 //! `ternary_matvec` parallel-path template instead — see the
 //! unknown-format contract in [`quant_route`].
 
-#[cfg(any(
-    target_os = "linux",
-    target_os = "freebsd",
-    target_os = "macos",
-    target_os = "windows"
-))]
+// The only place the BLAS link is forced: every other crate (and every test,
+// bench and example) reaches it through this crate's rlib. Windows links no
+// BLAS (see Cargo.toml).
+#[cfg(target_os = "macos")]
 extern crate blas_src;
+
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+extern crate larql_blas_link;
 
 pub mod async_compute_backend;
 pub mod attention;
