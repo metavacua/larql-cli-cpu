@@ -304,8 +304,23 @@ class Verification(unittest.TestCase):
         hack = self.by_name()["cargo-hack (each feature)"]
         self.assertNotIn("if", hack)
         for part in ("cargo hack check", "--each-feature", "--locked",
-                     "--target ${{ inputs.target }}", "-p ${{ inputs.crate }}", "$SELECT", "$FEATURES"):
+                     "--target ${{ inputs.target }}", "-p ${{ inputs.crate }}", "$SELECT"):
             self.assertIn(part, hack["run"])
+
+    def test_cargo_hack_each_feature_is_never_given_no_default_features(self):
+        # `cargo hack --each-feature` already runs once with --no-default-features and once with
+        # the defaults, and refuses the flag itself: "--no-default-features may not be used
+        # together with --each-feature". $FEATURES is that flag on a freestanding target, so
+        # passing it failed all ten freestanding verify jobs at once, whatever the crate.
+        hack = self.by_name()["cargo-hack (each feature)"]["run"]
+        self.assertNotIn("$FEATURES", hack)
+        self.assertNotIn("--no-default-features", hack)
+        for wf, body in load().items():
+            for step in steps(body):
+                run = step.get("run", "")
+                if "--each-feature" in run:
+                    self.assertNotIn("--no-default-features", run, f"{wf}: {step.get('name')}")
+                    self.assertNotIn("$FEATURES", run, f"{wf}: {step.get('name')}")
 
     def test_cargo_hack_never_rewrites_the_manifest_under_locked(self):
         # --no-dev-deps edits the real Cargo.toml while it runs, so the lock file would need
