@@ -70,10 +70,14 @@ def targets():
 class Order(unittest.TestCase):
     def test_chain_is_clippy_then_build_then_lql(self):
         jobs = load()["crate-gate-chain"]["jobs"]
-        self.assertEqual(set(jobs), {"build", "lql"})
+        # verify is beside build, never in front of lql: a red cargo-hack or unit test must not
+        # take the strict lql matrix with it (it did once: 13 lql jobs skipped).
+        self.assertEqual(set(jobs), {"build", "verify", "lql"})
         self.assertEqual(needs(jobs["build"]), set())
+        self.assertEqual(needs(jobs["verify"]), set())
         self.assertEqual(needs(jobs["lql"]), {"build"})
         self.assertEqual(jobs["build"]["timeout-minutes"], 90)
+        self.assertEqual(jobs["verify"]["timeout-minutes"], 90)
         # one job, two ordered steps: a failing clippy step ends the target before the build step
         names = [s.get("name") for s in jobs["build"]["steps"]]
         self.assertEqual([n for n in names if n in ("clippy", "build")], ["clippy", "build"])
@@ -148,7 +152,11 @@ class Targets(unittest.TestCase):
         for lint in ("std_instead_of_core", "std_instead_of_alloc", "alloc_instead_of_core"):
             self.assertEqual(text.count(lint), 1, lint)
         self.assertEqual(text.count("--no-default-features"), 1)
-        env = chain["jobs"]["build"]["env"]
+        # workflow-level, so build and verify read the same derived values
+        env = chain["env"]
+        for job in chain["jobs"].values():
+            for name in ("SELECT", "FEATURES", "LINTS"):
+                self.assertNotIn(name, job.get("env", {}), "derived once, at workflow level")
         self.assertIn("inputs.freestanding && '--no-default-features' || ''", env["FEATURES"])
         self.assertIn("inputs.freestanding &&", env["LINTS"])
         steps_by_name = {s["name"]: s["run"] for s in chain["jobs"]["build"]["steps"] if "name" in s}
@@ -193,7 +201,7 @@ class Selection(unittest.TestCase):
         self.assertEqual(out, "bin")
 
     def test_select_follows_kind_and_freestanding(self):
-        expr = load()["crate-gate-chain"]["jobs"]["build"]["env"]["SELECT"]
+        expr = load()["crate-gate-chain"]["env"]["SELECT"]
         inner = re.fullmatch(r"\$\{\{\s*(.*?)\s*\}\}", expr).group(1)
         # GitHub's `a && b || c` and Python's `a and b or c` agree on strings that are non-empty.
         py = (inner.replace("&&", " and ").replace("||", " or ").replace("!", " not ")
@@ -281,10 +289,10 @@ class Inventory(unittest.TestCase):
 
 
 class Verification(unittest.TestCase):
-    """What the chain verifies per target, in order: clippy, build, every feature, unit tests."""
+    """The verify job, beside build and in front of nothing: every feature, then unit tests."""
 
     def steps(self):
-        return load()["crate-gate-chain"]["jobs"]["build"]["steps"]
+        return load()["crate-gate-chain"]["jobs"]["verify"]["steps"]
 
     def by_name(self):
         return {s["name"]: s for s in self.steps() if "name" in s}
@@ -295,14 +303,41 @@ class Verification(unittest.TestCase):
         self.assertNotIn("if", installs[0], "freestanding targets are checked too")
         hack = self.by_name()["cargo-hack (each feature)"]
         self.assertNotIn("if", hack)
-        for part in ("cargo hack check", "--each-feature", "--no-dev-deps", "--locked",
+        for part in ("cargo hack check", "--each-feature", "--locked",
                      "--target ${{ inputs.target }}", "-p ${{ inputs.crate }}", "$SELECT", "$FEATURES"):
             self.assertIn(part, hack["run"])
 
-    def test_the_order_is_clippy_then_build_then_every_feature_then_unit_tests(self):
+    def test_cargo_hack_never_rewrites_the_manifest_under_locked(self):
+        # --no-dev-deps edits the real Cargo.toml while it runs, so the lock file would need
+        # updating and --locked refuses: that failed the whole build job once.
+        for wf, body in load().items():
+            for step in steps(body):
+                run = step.get("run", "")
+                if "--locked" in run:
+                    self.assertNotIn("--no-dev-deps", run, f"{wf}: {step.get('name')}")
+
+    def test_the_build_job_carries_neither_cargo_hack_nor_the_unit_tests(self):
+        job = load()["crate-gate-chain"]["jobs"]["build"]["steps"]
+        names = [s.get("name") for s in job]
+        self.assertNotIn("test", names)
+        self.assertNotIn("cargo-hack (each feature)", names)
+        self.assertFalse([s for s in job if "cargo-hack" in str(s.get("uses", ""))])
+
+    def test_the_order_is_every_feature_then_unit_tests(self):
         names = [s.get("name") for s in self.steps()]
-        order = ["clippy", "build", "cargo-hack (each feature)", "test"]
+        order = ["cargo-hack (each feature)", "test"]
         self.assertEqual([n for n in names if n in order], order)
+
+    def test_the_verify_job_gets_the_same_toolchain_setup_as_build(self):
+        steps_ = self.steps()
+        runs = " ".join(s.get("run", "") for s in steps_)
+        self.assertIn("rustup target add ${{ inputs.target }}", runs)
+        self.assertIn("protobuf-compiler libopenblas-dev pkg-config", runs)
+        setup = [i for i, s in enumerate(steps_) if "inputs.setup" in s.get("if", "")]
+        self.assertEqual(len(setup), 1)
+        self.assertEqual(steps_[setup[0]]["env"]["SETUP"], "${{ inputs.setup }}")
+        names = [s.get("name") for s in steps_]
+        self.assertLess(setup[0], names.index("cargo-hack (each feature)"))
 
     def test_unit_tests_run_only_where_the_harness_exists_and_the_binary_runs_natively(self):
         step = self.by_name()["test"]
