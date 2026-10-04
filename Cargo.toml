@@ -22,6 +22,8 @@ members = [
     "crates/larql-boundary",
     # test-only cdylib: the C5 continuation provider as a plugin (C6 gate)
     "crates/larql-continuation-fixture",
+    # library half of larql: a copy of the library code, depending on no other larql crate
+    "crates/larql-lib",
 ]
 default-members = [
     "crates/larql-models",
@@ -38,6 +40,7 @@ default-members = [
     "crates/larql-router",
     "crates/larql-router-protocol",
     "crates/larql-boundary",
+    "crates/larql-lib",
 ]
 
 # Workspace-wide lint policy, inherited by every member via

@@ -108,6 +108,20 @@ jobs:
         with:
           manifest-path: crates/${{ needs.resolve.outputs.crate }}/Cargo.toml
           command: check bans
+      # A crate with its own deny.toml is held to it: no duplicate versions, no advisory, nothing
+      # unmaintained or unsound, no exception. Crates without one are untouched by these steps.
+      - name: cargo-deny (crate config; a gate)
+        if: ${{ hashFiles(format('crates/{0}/deny.toml', needs.resolve.outputs.crate)) != '' }}
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: crates/${{ needs.resolve.outputs.crate }}/Cargo.toml
+          command: check advisories bans
+          arguments: --all-features --config crates/${{ needs.resolve.outputs.crate }}/deny.toml
+      - if: ${{ hashFiles(format('crates/{0}/deny.toml', needs.resolve.outputs.crate)) != '' }}
+        uses: taiki-e/install-action@cargo-machete
+      - name: cargo-machete (unused dependencies; a gate)
+        if: ${{ hashFiles(format('crates/{0}/deny.toml', needs.resolve.outputs.crate)) != '' }}
+        run: cargo machete "crates/$CRATE"
       # Verbatim copies show as 100%; a divergent copy shows its similarity.
       - name: copy detection against the base (raw; no pass/fail)
         run: git diff -C --find-copies-harder --summary "origin/$BASE...HEAD"
