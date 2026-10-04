@@ -123,7 +123,12 @@ jobs:
         if: steps.diff.outputs.has_changes == 'true'
         run: |
           set +e
-          cargo mutants ${{ matrix.package_args }} --in-diff /tmp/pr.diff --timeout 120 --no-shuffle --copy-vcs=true
+          # No fixed --timeout: it applied to the unmutated baseline too, and
+          # the baseline suite (larql-cli + the crates the diff touches) runs
+          # past 120 s, so every run timed out before any mutant (exit 4).
+          # Without it cargo-mutants derives each mutant's test timeout from
+          # the measured baseline (x5); the job's timeout-minutes bounds the run.
+          cargo mutants ${{ matrix.package_args }} --in-diff /tmp/pr.diff --no-shuffle --copy-vcs=true
           status=$?
           echo "cargo-mutants exit status: $status"
           bash scripts/check_mutants_exit_status.sh "$status"
