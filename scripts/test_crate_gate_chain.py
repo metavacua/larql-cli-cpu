@@ -305,8 +305,23 @@ class Verification(unittest.TestCase):
         hack = self.by_name()["cargo-hack (each feature)"]
         self.assertNotIn("if", hack)
         for part in ("cargo hack check", "--each-feature", "--locked",
-                     "--target ${{ inputs.target }}", "-p ${{ inputs.crate }}", "$SELECT", "$FEATURES"):
+                     "--target ${{ inputs.target }}", "-p ${{ inputs.crate }}", "$SELECT"):
             self.assertIn(part, hack["run"])
+
+    def test_cargo_hack_each_feature_is_never_given_no_default_features(self):
+        # `cargo hack --each-feature` already runs once with --no-default-features and once with
+        # the defaults, and refuses the flag itself: "--no-default-features may not be used
+        # together with --each-feature". $FEATURES is that flag on a freestanding target, so
+        # passing it failed all ten freestanding verify jobs at once, whatever the crate.
+        hack = self.by_name()["cargo-hack (each feature)"]["run"]
+        self.assertNotIn("$FEATURES", hack)
+        self.assertNotIn("--no-default-features", hack)
+        for wf, body in load().items():
+            for step in steps(body):
+                run = step.get("run", "")
+                if "--each-feature" in run:
+                    self.assertNotIn("--no-default-features", run, f"{wf}: {step.get('name')}")
+                    self.assertNotIn("$FEATURES", run, f"{wf}: {step.get('name')}")
 
     def test_cargo_hack_never_rewrites_the_manifest_under_locked(self):
         # --no-dev-deps edits the real Cargo.toml while it runs, so the lock file would need
@@ -407,6 +422,30 @@ class Emulation(unittest.TestCase):
                        "libopenblas-dev:riscv64", "OPENBLAS_LIB_DIR_riscv64gc_unknown_linux_gnu",
                        "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER", "QEMU_LD_PREFIX"):
             self.assertIn(needle, text)
+
+    def test_the_matrix_build_installs_the_target_before_it_cross_builds(self):
+        # Run 37175896365: `cargo build --target riscv64gc-unknown-linux-gnu` failed with
+        # `can't find crate for std`, because only the host toolchain was installed. The target
+        # is added with rustup, under the toolchain rust-toolchain.toml pins, before the build.
+        steps_ = load()["lql-strategy-matrix"]["jobs"]["build"]["steps"]
+        names = [s.get("name") for s in steps_]
+        name = "Rust target for the cross-build"
+        self.assertIn(name, names)
+        step = steps_[names.index(name)]
+        self.assertEqual(step["if"], "inputs.target != ''")
+        self.assertEqual(step["env"]["TARGET"], "${{ inputs.target }}")
+        self.assertEqual(step["run"].strip(), 'rustup target add "$TARGET"')
+        self.assertLess(names.index(name), names.index("Build larql-cli (release)"))
+
+    def test_no_job_cross_builds_without_installing_the_target_first(self):
+        for jname, job in load()["lql-strategy-matrix"]["jobs"].items():
+            steps_ = job.get("steps", [])
+            for i, step in enumerate(steps_):
+                run = step.get("run", "")
+                if "--target" in run:
+                    with self.subTest(job=jname, step=step.get("name")):
+                        earlier = " ".join(s.get("run", "") for s in steps_[:i])
+                        self.assertIn("rustup target add", earlier)
 
     def test_the_wrapper_execs_the_emulator_on_an_absolute_path(self):
         text = Path("scripts/ci/wrap_emulator.sh").read_text()

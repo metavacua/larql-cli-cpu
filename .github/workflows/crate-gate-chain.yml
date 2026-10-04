@@ -88,13 +88,15 @@ jobs:
           SETUP: ${{ inputs.setup }}
         run: bash "$SETUP"
       # Every feature configuration the crate declares, on every target, freestanding included:
-      # compile only. --each-feature also runs with no default features and with the defaults.
+      # compile only. --each-feature already runs the all-features, the no-default-features, each
+      # single feature and the defaults, so $FEATURES is not passed: cargo-hack refuses that flag
+      # beside --each-feature.
       # No --no-dev-deps: cargo-hack rewrites the real Cargo.toml for it and --locked then refuses.
       - uses: taiki-e/install-action@cargo-hack
       - name: cargo-hack (each feature)
         run: >-
           cargo hack check --each-feature --locked --target ${{ inputs.target }}
-          -p ${{ inputs.crate }} $SELECT $FEATURES
+          -p ${{ inputs.crate }} $SELECT
       # The fast path of `make test` (lib and bins, no integration tests). The default harness
       # needs std, so not on the freestanding targets; riscv64 runs under QEMU through the lql
       # matrix, not here.
