@@ -837,16 +837,6 @@
           "features": []
         },
         {
-          "name": "larql-core",
-          "alias": "larql-core",
-          "kind": "dependencies",
-          "path": "crates/larql-core",
-          "target": null,
-          "optional": false,
-          "default_features": true,
-          "features": []
-        },
-        {
           "name": "larql-execution",
           "alias": "larql-execution",
           "kind": "dependencies",
@@ -993,16 +983,6 @@
           "features": []
         },
         {
-          "name": "larql-core",
-          "alias": "larql-core",
-          "kind": "dependencies",
-          "path": "crates/larql-core",
-          "target": null,
-          "optional": false,
-          "default_features": true,
-          "features": []
-        },
-        {
           "name": "larql-inference",
           "alias": "larql-inference",
           "kind": "dependencies",
@@ -1112,7 +1092,6 @@
           "dep:quinn",
           "dep:rustls",
           "dep:rcgen",
-          "dep:rustls-pemfile",
           "dep:hyper-util",
           "dep:tower",
           "dep:sha2"
@@ -1124,9 +1103,7 @@
           "dep:h3-axum",
           "dep:axum",
           "dep:http",
-          "dep:http-body-util",
-          "dep:bytes",
-          "dep:futures"
+          "dep:bytes"
         ]
       },
       "local_dependencies": [],

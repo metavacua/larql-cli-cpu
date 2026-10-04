@@ -180,14 +180,17 @@ impl Session {
         if config.has_local_ffn_weights() {
             return Ok(());
         }
-        let why = if config.has_model_weights {
-            "this vindex is the attention tier (client slice for `run --ffn URL`) and has no FFN weights"
+        let what = if config.has_model_weights {
+            // The attention tier: weights are present, the FFN is not.
+            format!(
+                "{verb} requires FFN weights: this vindex is the attention tier \
+                 (client slice for `run --ffn URL`) and has none"
+            )
         } else {
-            "this vindex was built without model weights"
+            format!("{verb} requires model weights: this vindex was built without them")
         };
         Err(LqlError::Execution(format!(
-            "{verb} requires FFN weights: {why}.\n\
-             Rebuild: EXTRACT MODEL \"{}\" INTO \"{}\" WITH INFERENCE",
+            "{what}.\nRebuild: EXTRACT MODEL \"{}\" INTO \"{}\" WITH INFERENCE",
             config.model,
             path.display(),
         )))

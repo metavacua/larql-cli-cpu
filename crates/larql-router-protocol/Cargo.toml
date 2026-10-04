@@ -78,3 +78,8 @@ protobuf-src = "2"
 
 [lints]
 workspace = true
+
+# The tonic-generated modules (`include!`d from OUT_DIR) name `::prost::Message`
+# and friends, which no hand-written source file does.
+[package.metadata.cargo-machete]
+ignored = ["prost"]
