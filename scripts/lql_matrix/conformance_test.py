@@ -190,21 +190,181 @@ def test_load_folds_produce_err_into_stderr_head(tmp_path):
     assert "no override warning" in legs["lg1"].produce["stderr_head"]
 
 
-def test_transformation_report_surfaces_gaps():
-    legs = {
-        "qwen.q4k": make_leg("qwen.q4k",
-            produce={"op": "extract", "flags": "--quant q4k"},
-            descriptor={"family": "qwen2", "observed_quant": "q4k"}),
-        "bitnet.gguf": make_leg("bitnet.gguf",
-            produce={"op": "gguf-to-vindex", "flags": ""},
-            descriptor={"family": "bitnet", "observed_quant": "none"}),
-    }
-    md = "\n".join(C.transformation_report(legs))
-    assert "Transformation" in md
-    assert "qwen2" in md and "bitnet" in md
-    # gaps surfaced verbatim
-    assert "Ollama" in md and "GGUF" in md
-    assert "no compiled" in md.lower() or "gap" in md.lower()
+def test_render_has_no_static_consumer_prose():
+    legs = {"qwen.q4k": make_leg("qwen.q4k",
+                                 produce={"op": "extract", "flags": "--quant q4k"},
+                                 descriptor={"family": "qwen2", "observed_quant": "q4k"})}
+    md = C.render(legs, [])
+    assert not hasattr(C, "transformation_report")
+    for banned in ("Consumer reachability", "Ollama", "Transformation & consumability"):
+        assert banned not in md
+
+
+PANIC = ("panic/crash (exit 101): thread 'larql-main' ({tid}) panicked at "
+         "crates/larql-compute/src/sparse_compute.rs:30:9")
+
+
+def _panic_violations(legs=("legA", "legB"), ncells=17, tid_base=3000):
+    out = []
+    for li, leg in enumerate(legs):
+        for ci in range(ncells):
+            out.append(C.Violation("no-crash", leg, f"cell{ci}",
+                                   PANIC.format(tid=tid_base + li * 100 + ci)))
+    return out
+
+
+def test_root_causes_collapse_panic_family_into_one_row():
+    vs = _panic_violations()
+    assert len(vs) == 34
+    rcs = C.root_causes(vs)
+    assert len(rcs) == 1
+    rc = rcs[0]
+    assert rc["invariant"] == "no-crash"
+    assert rc["violations"] == 34
+    assert rc["legs"] == 2
+    assert rc["cells"] == 17
+    assert rc["leg_names"] == ["legA", "legB"]
+    assert "sparse_compute.rs:30:9" in rc["example"]
+    assert "exit 101" in rc["detail"]  # exit codes are kept in the key
+
+
+def test_root_causes_keep_distinct_invariants_and_details_distinct():
+    vs = [C.Violation("no-crash", "a", "c1", "panic/crash (exit 101): boom"),
+          C.Violation("no-crash", "a", "c2", "panic/crash (exit 137): boom"),
+          C.Violation("produce", "a", "produce", "panic/crash (exit 101): boom"),
+          C.Violation("no-crash", "b", "c1", "panic/crash (exit 101): boom")]
+    rcs = C.root_causes(vs)
+    assert len(rcs) == 3
+    top = rcs[0]  # sorted by count desc
+    assert (top["invariant"], top["violations"], top["legs"]) == ("no-crash", 2, 2)
+    assert {r["invariant"] for r in rcs} == {"no-crash", "produce"}
+
+
+def test_normalise_detail_strips_thread_ids_only():
+    n = C.normalise_detail
+    assert n("thread 'larql-main' (3135) panicked at x.rs:1:2") == n(
+        "thread 'larql-main' (9) panicked at x.rs:1:2")
+    assert "3135" not in n("thread 'larql-main' (3135) panicked")
+    assert "larql-main" in n("thread 'larql-main' (3135) panicked")
+    # line numbers, exit codes survive
+    assert "x.rs:1:2" in n("thread 'm' (7) panicked at x.rs:1:2")
+    assert "(exit 101)" in n("panic/crash (exit 101): y")
+    # a bare, id-less thread banner groups with the id-bearing one
+    assert n("thread 'm' panicked at z") == n("thread 'm' (4) panicked at z")
+
+
+def _repr_detail(tid, leg, tmp, head_extra=""):
+    # what inv_no_crash/inv_produce build: repr() of stderr_head holding BOTH quote
+    # kinds, so repr delimits with ' and escapes the inner ' as \\'
+    head = (f"thread 'larql-main' ({tid}) panicked at crates/x/src/y.rs:5:7:\n"
+            f"cannot open \"out/{leg}.vindex\" under {tmp}{head_extra}")
+    return f"produce crashed (exit 101): {head!r}"
+
+
+def test_normalise_thread_id_inside_repr_with_escaped_quotes():
+    d1 = _repr_detail(3135, "legA", "/tmp/tmp.AbC123")
+    d2 = _repr_detail(9, "legA", "/tmp/tmp.AbC123")
+    assert "\\'" in d1                       # the escaped-quote shape is really exercised
+    assert C.normalise_detail(d1) == C.normalise_detail(d2)
+    assert "3135" not in C.normalise_detail(d1)
+
+
+def test_normalise_strips_leg_vindex_path_tmproot_and_leg_name():
+    a = _repr_detail(11, "legA", "/tmp/tmp.AbC123")
+    b = _repr_detail(22, "legB", "/tmp/tmp.Zz9Y8x")
+    assert C.normalise_detail(a, leg="legA") == C.normalise_detail(b, leg="legB")
+    n = C.normalise_detail(a, leg="legA")
+    assert "legA" not in n and "AbC123" not in n
+    assert "y.rs:5:7" in n                      # source location survives
+    # leg-name stripping must not eat substrings of unrelated words
+    assert C.normalise_detail("panicked in alpha", leg="a") == "panicked in alpha"
+    # a leg that is a dotted prefix of another leg is not clobbered inside the longer one
+    assert "smol135.v3.hollow" in C.normalise_detail("x smol135.v3.hollow", leg="smol135.v3")
+
+
+def test_root_causes_one_failure_across_legs_and_thread_ids_is_one_row():
+    vs = [C.Violation("no-crash", leg, "cellX",
+                      _repr_detail(100 + i, leg, f"/tmp/tmp.R{i}rand"))
+          for i, leg in enumerate(["legA", "legB", "legC"])]
+    rcs = C.root_causes(vs)
+    assert len(rcs) == 1
+    assert rcs[0]["violations"] == 3 and rcs[0]["legs"] == 3
+
+
+def test_root_causes_stub_crashes_split_by_cell():
+    vs = [C.Violation("no-crash", "legA", "show.layers", "panic/crash (exit 139)"),
+          C.Violation("no-crash", "legB", "show.layers", "panic/crash (exit 139)"),
+          C.Violation("no-crash", "legA", "infer.top5", "panic/crash (exit 139)")]
+    rcs = C.root_causes(vs)
+    assert len(rcs) == 2
+    top = rcs[0]
+    assert (top["violations"], top["legs"], top["cells"]) == (2, 2, 1)
+    assert "show.layers" in top["detail"]
+    assert "infer.top5" in rcs[1]["detail"]
+
+
+def test_root_causes_stub_with_location_or_message_still_collapses():
+    vs = [C.Violation("no-crash", "l1", "c1", "panic/crash (exit 101): boom"),
+          C.Violation("no-crash", "l1", "c2", "panic/crash (exit 101): boom")]
+    assert len(C.root_causes(vs)) == 1
+
+
+def test_root_causes_produce_crash_stub_collapses_across_legs():
+    vs = [C.Violation("no-crash", leg, "produce", "produce crashed (exit 137)")
+          for leg in ("legA", "legB")]
+    rcs = C.root_causes(vs)
+    assert len(rcs) == 1 and rcs[0]["legs"] == 2
+
+
+def test_root_cause_example_is_clipped():
+    vs = [C.Violation("no-crash", "a", "c", "x" * 1000)]
+    assert len(C.root_causes(vs)[0]["example"]) <= 240
+
+
+def test_root_cause_leg_names_capped():
+    vs = [C.Violation("completeness", f"leg{i}", "", "hollow") for i in range(9)]
+    rc = C.root_causes(vs)[0]
+    assert rc["legs"] == 9
+    assert len(rc["leg_names"]) == C.ROOT_CAUSE_LEG_NAMES
+    assert rc["cells"] == 0  # leg-level violations carry no cell
+
+
+def test_render_contains_root_causes_section_and_full_violations():
+    vs = _panic_violations()
+    md = C.render({"legA": make_leg("legA"), "legB": make_leg("legB")}, vs)
+    assert "## Root causes" in md
+    assert "Violations: 34" in md
+    assert md.count("sparse_compute.rs:30:9") >= 35  # 34 rows + 1 root-cause row
+    rc_section = md.split("## Root causes", 1)[1]
+    assert "| 34 | 2 | 17 |" in rc_section
+
+
+def test_render_no_violations_has_no_root_cause_rows():
+    md = C.render({"lg": make_leg()}, [])
+    assert "No invariant violations." in md
+    assert "No root causes." in md
+
+
+def test_json_has_violations_and_root_causes(tmp_path, monkeypatch):
+    vs = _panic_violations()
+    monkeypatch.setattr(C, "INVARIANTS", [lambda legs: vs])
+    monkeypatch.setattr(C, "load", lambda g: {"legA": make_leg("legA")})
+    C.run("x", str(tmp_path / "c.md"), str(tmp_path / "c.json"), strict=False)
+    data = json.loads((tmp_path / "c.json").read_text())
+    assert list(data) == ["violations", "root_causes"]
+    assert data["violations"] == [v.__dict__ for v in vs]  # unchanged shape
+    assert len(data["root_causes"]) == 1
+    assert data["root_causes"][0]["violations"] == 34
+
+
+def test_strict_exit_unchanged_by_grouping(tmp_path, monkeypatch):
+    vs = _panic_violations()
+    monkeypatch.setattr(C, "INVARIANTS", [lambda legs: vs])
+    monkeypatch.setattr(C, "load", lambda g: {"legA": make_leg("legA")})
+    assert C.run("x", str(tmp_path / "c.md"), str(tmp_path / "c.json"), strict=True) == 1
+    assert C.run("x", str(tmp_path / "c.md"), str(tmp_path / "c.json"), strict=False) == 0
+    monkeypatch.setattr(C, "INVARIANTS", [lambda legs: []])
+    assert C.run("x", str(tmp_path / "c.md"), str(tmp_path / "c.json"), strict=True) == 0
 
 
 def test_run_strict_fails_on_violation(tmp_path, monkeypatch):

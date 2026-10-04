@@ -269,35 +269,71 @@ INVARIANTS = [inv_completeness, inv_produce, inv_no_crash, inv_descriptor_match,
               inv_diagnostic]
 
 
-_SRC_FMT = {"extract": "safetensors", "gguf-to-vindex": "gguf",
-            "quantize-q4k": "safetensors", "quantize-fp4": "safetensors"}
+# Per-process / per-leg noise stripped from a violation's detail to form its
+# root-cause key. Exit codes, file and line numbers are kept - they are what
+# distinguishes one root cause from another.
+#  - thread id: `thread 'larql-main' (3135) panicked` and the older id-less banner
+#    are the same fault. Inside repr(stderr_head) holding both quote kinds the
+#    quotes are escaped (`thread \'larql-main\' (3135)`), so tolerate backslashes.
+#  - the leg's own vindex path (out/<leg>.vindex), mktemp-style /tmp/<random> roots,
+#    and the leg name itself, all of which differ per leg for one and the same fault.
+_THREAD_ID = re.compile(r"(thread \\*'[^'\\]*\\*') \(\d+\)")
+_VINDEX_PATH = re.compile(r"out/[^\s'\"\\/]+\.vindex")
+_TMP_PATH = re.compile(r"/tmp/[^\s'\"\\/:]+")
+# A detail that is only the exit-code stub carries no message or location, so it
+# cannot identify a cause; the cell id has to.
+_EXIT_STUB = re.compile(r"(?:panic/crash|produce crashed) \(exit \d+\)")
+
+ROOT_CAUSE_LEG_NAMES = 3
+_EXAMPLE_CLIP = 240
 
 
-def transformation_report(legs):
-    L = ["## Transformation & consumability coverage", "",
-         "| leg | source fmt | produced arch | produced quant |",
-         "|---|---|---|---|"]
-    for name in sorted(legs):
-        lg = legs[name]
-        src = _SRC_FMT.get(lg.produce.get("op"), "?")
-        L.append(f"| `{name}` | {src} | {lg.descriptor.get('family','?')} | "
-                 f"{lg.descriptor.get('observed_quant','?')} |")
-    L += ["",
-          "**Consumer reachability & gaps (static):**",
-          "- larql-cli / larql-server (`/v1/chat`): reach any produced vindex directly.",
-          "- **Ollama:** needs GGUF; larql `compile` emits safetensors and there is **no "
-          "compiled→GGUF export** — Ollama is a **gap** (cf #181/N11).",
-          "- **Cross-arch transform** (e.g. qwen↔bitnet): produced arch equals source arch in "
-          "every leg — larql changes quant/format, **not architecture** — a **gap** for the "
-          "'transform one arch into another' use case.", ""]
-    return L
+def normalise_detail(detail, leg=""):
+    d = _THREAD_ID.sub(r"\1", detail)
+    d = _VINDEX_PATH.sub("out/<leg>.vindex", d)
+    d = _TMP_PATH.sub("/tmp/<tmp>", d)
+    if leg:
+        d = re.sub(r"(?<![\w.\-])" + re.escape(leg) + r"(?![\w\-]|\.\w)", "<leg>", d)
+    return d
+
+
+def _cause_key(v):
+    d = normalise_detail(v.detail, v.leg)
+    if v.cell and _EXIT_STUB.fullmatch(d):
+        d = f"{d} [cell {v.cell}]"
+    return v.invariant, d
+
+
+def root_causes(violations):
+    """Group violations by (invariant, normalised detail). Leg is not part of the
+    key; the cell is only for bare exit-code stubs. Reporting only: the violations
+    list itself is untouched. `cells` counts distinct non-empty cell ids
+    (leg-level violations have none)."""
+    groups = {}
+    for v in violations:
+        groups.setdefault(_cause_key(v), []).append(v)
+    out = []
+    for (inv, detail), vs in groups.items():
+        legs = list(dict.fromkeys(v.leg for v in vs))
+        out.append({
+            "invariant": inv,
+            "detail": detail,
+            "violations": len(vs),
+            "legs": len(legs),
+            "cells": len({v.cell for v in vs if v.cell}),
+            "example": vs[0].detail[:_EXAMPLE_CLIP],
+            "leg_names": legs[:ROOT_CAUSE_LEG_NAMES],
+        })
+    out.sort(key=lambda r: (-r["violations"], r["invariant"], r["detail"]))
+    return out
 
 
 def run(results_glob, out_md, out_json, strict):
     legs = load(results_glob)
     violations = [v for inv in INVARIANTS for v in inv(legs)]
     Path(out_json).write_text(json.dumps(
-        {"violations": [v.__dict__ for v in violations]}, indent=2), encoding="utf-8")
+        {"violations": [v.__dict__ for v in violations],
+         "root_causes": root_causes(violations)}, indent=2), encoding="utf-8")
     Path(out_md).write_text(render(legs, violations), encoding="utf-8")
     print(f"conformance: {len(violations)} violation(s) across {len(legs)} legs "
           f"(strict={strict})")
@@ -313,7 +349,18 @@ def render(legs, violations):
             L.append(f"| {v.invariant} | `{v.leg}` | {v.cell or '-'} | {v.detail} |")
     else:
         L.append("No invariant violations.")
-    L += [""] + transformation_report(legs)
+    L += ["", "## Root causes", ""]
+    rcs = root_causes(violations)
+    if rcs:
+        L += ["| invariant | violations | legs | cells | example | first legs |",
+              "|---|---|---|---|---|---|"]
+        for r in rcs:
+            ex = r["example"].replace("|", "\\|")
+            names = ", ".join(f"`{n}`" for n in r["leg_names"])
+            L.append(f"| {r['invariant']} | {r['violations']} | {r['legs']} | "
+                     f"{r['cells']} | {ex} | {names} |")
+    else:
+        L.append("No root causes.")
     return "\n".join(L) + "\n"
 
 

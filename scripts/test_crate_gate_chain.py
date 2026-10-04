@@ -20,6 +20,7 @@ carries a per-instance tag, or the second instance would read or cancel the firs
 Run: uv run scripts/test_crate_gate_chain.py
 """
 
+import re
 import unittest
 from pathlib import Path
 
@@ -201,6 +202,68 @@ class Emulation(unittest.TestCase):
         text = Path("scripts/ci/wrap_emulator.sh").read_text()
         self.assertIn("larql.real", text)
         self.assertIn('$(pwd)', text)  # cells run in other directories
+
+
+class CrossTarget(unittest.TestCase):
+    """The structural comparison across targets: read-only, so it needs no write permission."""
+
+    def job(self):
+        return load()["crate-gate"]["jobs"]["cross-target"]
+
+    def test_runs_after_resolve_and_chain_even_when_a_chain_failed(self):
+        job = self.job()
+        self.assertEqual(needs(job), {"resolve", "chain"})
+        self.assertIn("!cancelled()", job["if"])
+        self.assertIn("needs.resolve.outputs.crate != ''", job["if"])
+        self.assertEqual(job["runs-on"], "ubuntu-latest")
+        self.assertLessEqual(job["timeout-minutes"], 10)
+
+    def test_downloads_every_results_artifact_and_runs_the_comparison_strictly(self):
+        job_steps = self.job()["steps"]
+        dl = [s for s in job_steps if str(s.get("uses", "")).startswith("actions/download-artifact@v4")]
+        self.assertEqual(len(dl), 1)
+        self.assertEqual(dl[0]["with"]["pattern"], "results-*")
+        self.assertEqual(dl[0]["with"]["path"], "artifacts")
+        run = "\n".join(str(s.get("run", "")) for s in job_steps)
+        self.assertIn("scripts/lql_matrix/cross_target.py", run)
+        self.assertIn("--strict", run)
+        self.assertIn("artifacts/results-*/results-*.jsonl", run)
+        self.assertIn("GITHUB_STEP_SUMMARY", run)
+
+    def test_the_qemu_target_is_the_only_explicit_slow_tag(self):
+        wf = load()["crate-gate"]
+        run = "\n".join(str(s.get("run", "")) for s in self.job()["steps"])
+        self.assertEqual(re.findall(r"--slow-tag\s+(\S+)", run), ["riscv64gc-unknown-linux-gnu"])
+        # the slow tag is exactly the target the matrix runs under an emulator, nothing implicit
+        emulated = [t["target"] for t in wf["jobs"]["chain"]["strategy"]["matrix"]["t"]
+                    if t.get("emulator")]
+        self.assertEqual(emulated, ["riscv64gc-unknown-linux-gnu"])
+        text = Path(".github/workflows/crate-gate.yml").read_text()
+        self.assertIn("QEMU", text[text.index("cross-target:") - 2500:text.index("cross-target:")])
+
+    def test_every_target_that_runs_lql_is_expected(self):
+        # An instance is otherwise inferred from the artifacts that exist, so a target whose whole
+        # lql run uploaded nothing would be invisible. The expected tags are exactly the lql targets.
+        wf = load()["crate-gate"]
+        run = "\n".join(str(s.get("run", "")) for s in self.job()["steps"])
+        lql_targets = [t["target"] for t in wf["jobs"]["chain"]["strategy"]["matrix"]["t"] if t["lql"]]
+        self.assertEqual(sorted(re.findall(r"--expect-tag\s+(\S+)", run)), sorted(lql_targets))
+
+    def test_the_summary_is_appended_even_when_the_comparison_fails(self):
+        run = "\n".join(str(s.get("run", "")) for s in self.job()["steps"])
+        self.assertLess(run.index("cross_target.py"), run.index("GITHUB_STEP_SUMMARY"))
+        self.assertIn("exit $status", run)  # the script's own status is what the job reports
+
+    def test_no_write_permission_anywhere(self):
+        wf = load()["crate-gate"]
+        self.assertEqual(wf["permissions"], {"contents": "read"})
+        self.assertNotIn("permissions", self.job())
+        for name, job in wf["jobs"].items():
+            with self.subTest(job=name):
+                self.assertNotIn("permissions", job)
+        for step in self.job()["steps"]:
+            self.assertNotIn("github.token", str(step))
+            self.assertNotIn("GITHUB_TOKEN", str(step.get("env", "")))
 
 
 class LqlInstancesDoNotCollide(unittest.TestCase):

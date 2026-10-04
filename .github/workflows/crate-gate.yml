@@ -8,6 +8,7 @@
 #
 #   fmt                      once per crate; a failure ends the run
 #   per target, in parallel  clippy -> cargo build -> lql-strategy-matrix (strict)
+#   cross-target             structural agreement of the lql instances (read-only; no write token)
 #
 # clippy is per target because its lints depend on the cfg set the target selects; fmt is not.
 # A failure at any stage ends that target only. The freestanding Tier 2 without-host-tools
@@ -117,3 +118,48 @@ jobs:
       setup: ${{ matrix.t.setup }}
       emulator: ${{ matrix.t.emulator }}
     secrets: inherit
+
+  # Structural agreement between targets: the same crate, run through the same SmolLM2-135M
+  # legs on x86_64, aarch64 and riscv64 (QEMU), must agree on mechanically decidable facts
+  # (scripts/lql_matrix/cross_target.py). It judges no model answer: a disagreement means
+  # something target-specific broke.
+  #   COMPARED: legs present; produce outcome; descriptor family/quant/generation/produced/
+  #     has_model_weights; STATS feature_count; per cell presence, bucket, exit_code and the
+  #     in-band err_signal (only for cells outside FP_DEPENDENT_CATS, whose Error verdict can
+  #     legitimately flip on float rounding).
+  #   NOT COMPARED: stdout/stderr and err_line text, floats, durations, and any cell or
+  #     produce that timed out or was hard-killed (exit 124/137), which depends on speed.
+  #   --slow-tag riscv64gc-unknown-linux-gnu is the QEMU-emulated target and the ONLY one
+  #     excused: there a timeout/124/137 or a missing leg or cell is inconclusive. On a native
+  #     target (x86_64, aarch64) a timeout where a peer finished the same cell, or a missing
+  #     leg, is a conclusive disagreement. It is explicit here; the script infers nothing.
+  # This needs NO write permission, so none is granted (workflow-level contents: read only):
+  #   - artifacts inside one run travel on the Actions runtime token, which upload/download-
+  #     artifact use directly; that is not a GITHUB_TOKEN scope, so contents: read suffices;
+  #   - the step summary is a local file ($GITHUB_STEP_SUMMARY) the runner publishes itself;
+  #   - the verdict is the exit code. No PR comment, check run or commit status is written.
+  # Runs even when a chain failed (!cancelled()), so a red freestanding target hides nothing;
+  # it compares whichever lql instances uploaded artifacts.
+  cross-target:
+    name: cross-target
+    needs: [resolve, chain]
+    if: ${{ !cancelled() && needs.resolve.outputs.crate != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: 'results-*'
+          path: artifacts
+      - name: Compare targets
+        run: |
+          status=0
+          python3 scripts/lql_matrix/cross_target.py "artifacts/results-*/results-*.jsonl" \
+            --slow-tag riscv64gc-unknown-linux-gnu \
+            --expect-tag x86_64-unknown-linux-gnu \
+            --expect-tag aarch64-unknown-linux-gnu \
+            --expect-tag riscv64gc-unknown-linux-gnu \
+            --strict --out-md cross-target.md --out-json cross-target.json || status=$?
+          cat cross-target.md >> "$GITHUB_STEP_SUMMARY" || true
+          exit $status
