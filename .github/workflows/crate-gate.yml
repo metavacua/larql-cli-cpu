@@ -12,9 +12,10 @@
 # clippy is per target because its lints depend on the cfg set the target selects; fmt is not.
 # A failure at any stage ends that target only. The freestanding Tier 2 without-host-tools
 # targets use --no-default-features and the core/alloc/std lints; the gnu targets use default
-# features. lql runs where the CLI can run (native x86_64 and aarch64 Linux); it is not wired
-# for Windows or riscv64gc under QEMU yet, and the freestanding targets have no OS. For now
-# only SmolLM2-135M (base and instruct) must pass; the heavier models are off.
+# features. lql runs where the CLI can run: natively on x86_64 and aarch64 Linux, and under
+# QEMU user-mode on riscv64gc-unknown-linux-gnu; the freestanding targets have no OS. The
+# C-extension riscv variants (imac, imc) and windows-gnu are trimmed for now. For now only
+# SmolLM2-135M (base and instruct) must pass; the heavier models are off.
 # Order and sharing rules: scripts/test_crate_gate_chain.py.
 name: crate-gate
 
@@ -90,22 +91,18 @@ jobs:
       fail-fast: false # a red target hides none of the others
       matrix:
         t:
-          - { target: wasm32v1-none, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false }
-          - { target: riscv32i-unknown-none-elf, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false }
-          - { target: riscv32im-unknown-none-elf, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false }
-          - { target: riscv32imac-unknown-none-elf, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false }
-          - { target: riscv32imafc-unknown-none-elf, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false }
-          - { target: riscv32imc-unknown-none-elf, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false }
-          - { target: riscv64gc-unknown-none-elf, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false }
-          - { target: riscv64imac-unknown-none-elf, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false }
-          - { target: aarch64-unknown-none, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false }
-          - { target: x86_64-unknown-none, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false }
-          - { target: aarch64-unknown-uefi, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false }
-          - { target: x86_64-unknown-uefi, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false }
-          - { target: x86_64-unknown-linux-gnu, runs_on: ubuntu-latest, features: "", clippy_args: "", lql: true }
-          - { target: aarch64-unknown-linux-gnu, runs_on: ubuntu-24.04-arm, features: "", clippy_args: "", lql: true }
-          - { target: x86_64-pc-windows-gnu, runs_on: ubuntu-latest, features: "", clippy_args: "", lql: false }
-          - { target: riscv64gc-unknown-linux-gnu, runs_on: ubuntu-latest, features: "", clippy_args: "", lql: false }
+          - { target: wasm32v1-none, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false, setup: "", emulator: "" }
+          - { target: riscv32i-unknown-none-elf, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false, setup: "", emulator: "" }
+          - { target: riscv32im-unknown-none-elf, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false, setup: "", emulator: "" }
+          - { target: riscv32imafc-unknown-none-elf, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false, setup: "", emulator: "" }
+          - { target: riscv64gc-unknown-none-elf, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false, setup: "", emulator: "" }
+          - { target: aarch64-unknown-none, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false, setup: "", emulator: "" }
+          - { target: x86_64-unknown-none, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false, setup: "", emulator: "" }
+          - { target: aarch64-unknown-uefi, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false, setup: "", emulator: "" }
+          - { target: x86_64-unknown-uefi, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false, setup: "", emulator: "" }
+          - { target: x86_64-unknown-linux-gnu, runs_on: ubuntu-latest, features: "", clippy_args: "", lql: true, setup: "", emulator: "" }
+          - { target: aarch64-unknown-linux-gnu, runs_on: ubuntu-24.04-arm, features: "", clippy_args: "", lql: true, setup: "", emulator: "" }
+          - { target: riscv64gc-unknown-linux-gnu, runs_on: ubuntu-latest, features: "", clippy_args: "", lql: true, setup: scripts/ci/riscv64gc_qemu.sh, emulator: "qemu-riscv64-static -cpu rv64 -L /usr/riscv64-linux-gnu" }
     uses: ./.github/workflows/crate-gate-chain.yml
     with:
       crate: ${{ needs.resolve.outputs.crate }}
@@ -115,4 +112,6 @@ jobs:
       features: ${{ matrix.t.features }}
       clippy_args: ${{ matrix.t.clippy_args }}
       lql: ${{ matrix.t.lql }}
+      setup: ${{ matrix.t.setup }}
+      emulator: ${{ matrix.t.emulator }}
     secrets: inherit

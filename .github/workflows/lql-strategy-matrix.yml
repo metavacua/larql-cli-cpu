@@ -37,6 +37,18 @@ on:
         description: "Run the quality job (fmt + clippy + test of the LQL stack). The crate gate turns it off: it does fmt and clippy itself"
         type: boolean
         default: true
+      target:
+        description: "Cargo target to cross-build the CLI for; empty builds natively. Set together with setup and emulator"
+        type: string
+        default: ""
+      setup:
+        description: "Script that installs the cross toolchain and the emulator (it exports linker and BLAS settings to GITHUB_ENV)"
+        type: string
+        default: ""
+      emulator:
+        description: "Command prefix the CLI runs under, e.g. qemu-riscv64-static -L <sysroot>; empty runs it natively"
+        type: string
+        default: ""
       tag:
         description: "Names this instance: artifacts and the concurrency group carry it, so two instances in one workflow run never read or cancel each other"
         type: string
@@ -99,17 +111,25 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-lqlmatrix-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-${{ runner.arch }}-cargo-lqlmatrix-
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ inputs.target || 'native' }}-cargo-lqlmatrix-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-${{ inputs.target || 'native' }}-cargo-lqlmatrix-
       - name: Install BLAS (build)
         run: sudo apt-get update && sudo apt-get install -y libopenblas-dev
+      # After the plain apt-get update above: a cross setup adds a foreign architecture.
+      - name: Cross toolchain and emulator
+        if: inputs.setup != ''
+        env:
+          SETUP: ${{ inputs.setup }}
+        run: bash "$SETUP"
       - name: Build larql-cli (release)
-        run: cargo build --release -p larql-cli
+        env:
+          TARGET: ${{ inputs.target }}
+        run: cargo build --release -p larql-cli ${TARGET:+--target "$TARGET"}
       - name: Upload larql binary
         uses: actions/upload-artifact@v4
         with:
           name: larql-bin-${{ env.TAG }}
-          path: target/release/larql
+          path: ${{ inputs.target && format('target/{0}/release/larql', inputs.target) || 'target/release/larql' }}
           retention-days: 1
           if-no-files-found: error
 
@@ -136,8 +156,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-lqlmatrix-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-${{ runner.arch }}-cargo-lqlmatrix-
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ inputs.target || 'native' }}-cargo-lqlmatrix-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-${{ inputs.target || 'native' }}-cargo-lqlmatrix-
       - name: fmt (loud)
         id: fmt
         continue-on-error: true
@@ -197,6 +217,14 @@ jobs:
         run: |
           chmod +x bin/larql scripts/lql_matrix/run_matrix.sh
           sudo apt-get update && sudo apt-get install -y libopenblas-dev time
+      - name: Run the CLI under the emulator
+        if: inputs.emulator != ''
+        env:
+          SETUP: ${{ inputs.setup }}
+          EMULATOR: ${{ inputs.emulator }}
+        run: |
+          [ -z "$SETUP" ] || bash "$SETUP"
+          bash scripts/ci/wrap_emulator.sh $EMULATOR
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -370,6 +398,14 @@ jobs:
         run: |
           chmod +x bin/larql scripts/lql_matrix/run_matrix.sh
           sudo apt-get update && sudo apt-get install -y libopenblas-dev time
+      - name: Run the CLI under the emulator
+        if: inputs.emulator != ''
+        env:
+          SETUP: ${{ inputs.setup }}
+          EMULATOR: ${{ inputs.emulator }}
+        run: |
+          [ -z "$SETUP" ] || bash "$SETUP"
+          bash scripts/ci/wrap_emulator.sh $EMULATOR
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -655,6 +691,14 @@ jobs:
         run: |
           chmod +x bin/larql
           sudo apt-get update && sudo apt-get install -y libopenblas-dev
+      - name: Run the CLI under the emulator
+        if: inputs.emulator != ''
+        env:
+          SETUP: ${{ inputs.setup }}
+          EMULATOR: ${{ inputs.emulator }}
+        run: |
+          [ -z "$SETUP" ] || bash "$SETUP"
+          bash scripts/ci/wrap_emulator.sh $EMULATOR
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'

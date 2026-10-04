@@ -13,6 +13,8 @@ on:
       features: {type: string, default: ""}
       clippy_args: {type: string, default: "", description: "Extra lints after the -D warnings"}
       lql: {type: boolean, default: false}
+      setup: {type: string, default: "", description: "Script installing the cross toolchain and the emulator for the target"}
+      emulator: {type: string, default: "", description: "Command prefix the CLI runs under for lql (empty: natively)"}
 
 permissions:
   contents: read
@@ -30,6 +32,11 @@ jobs:
       - run: rustup target add ${{ inputs.target }}
       # Build scripts run on the runner whatever the target is.
       - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libopenblas-dev pkg-config
+      - name: Cross toolchain
+        if: inputs.setup != ''
+        env:
+          SETUP: ${{ inputs.setup }}
+        run: bash "$SETUP"
       - run: >-
           cargo clippy --locked --target ${{ inputs.target }} -p ${{ inputs.crate }}
           --${{ inputs.kind == 'bin' && 'bins' || 'lib' }} ${{ inputs.features }} --no-deps
@@ -44,6 +51,11 @@ jobs:
       - uses: actions/checkout@v7
       - run: rustup target add ${{ inputs.target }}
       - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libopenblas-dev pkg-config
+      - name: Cross toolchain
+        if: inputs.setup != ''
+        env:
+          SETUP: ${{ inputs.setup }}
+        run: bash "$SETUP"
       - run: >-
           cargo build --locked --target ${{ inputs.target }} -p ${{ inputs.crate }}
           --${{ inputs.kind == 'bin' && 'bins' || 'lib' }} ${{ inputs.features }}
@@ -61,5 +73,9 @@ jobs:
       include_mistral7b: false
       quality: false
       runs_on: ${{ inputs.runs_on }}
+      # Cross-build only when the CLI runs under an emulator; native instances build natively.
+      target: ${{ inputs.emulator != '' && inputs.target || '' }}
+      setup: ${{ inputs.setup }}
+      emulator: ${{ inputs.emulator }}
       tag: ${{ inputs.target }}
     secrets: inherit

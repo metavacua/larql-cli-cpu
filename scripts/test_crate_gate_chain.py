@@ -25,20 +25,28 @@ from pathlib import Path
 
 from test_workflow_triggers import GATES, WORKFLOWS, load
 
+# Tier 2 without-host-tools freestanding targets. The C-extension riscv variants (imac, imc,
+# 64imac) are trimmed: every riscv target that has F also has C (riscv32imafc, riscv32imfc,
+# riscv64gc), so imafc stays as the one F-bearing 32-bit target; riscv32i and riscv32im are
+# the only ones without C.
 FREESTANDING = {
     "wasm32v1-none", "riscv32i-unknown-none-elf", "riscv32im-unknown-none-elf",
-    "riscv32imac-unknown-none-elf", "riscv32imafc-unknown-none-elf",
-    "riscv32imc-unknown-none-elf", "riscv64gc-unknown-none-elf",
-    "riscv64imac-unknown-none-elf", "aarch64-unknown-none", "x86_64-unknown-none",
+    "riscv32imafc-unknown-none-elf", "riscv64gc-unknown-none-elf",
+    "aarch64-unknown-none", "x86_64-unknown-none",
     "aarch64-unknown-uefi", "x86_64-unknown-uefi",
 }
-# The gnu targets, and the runner the lql matrix can use for them today (None: not wired).
+TRIMMED = {
+    "riscv32imac-unknown-none-elf", "riscv32imc-unknown-none-elf",
+    "riscv64imac-unknown-none-elf", "x86_64-pc-windows-gnu",
+}
+# The gnu targets, and where the lql matrix runs the CLI: natively, or under QEMU user-mode.
 GNU = {
     "x86_64-unknown-linux-gnu": "ubuntu-latest",
     "aarch64-unknown-linux-gnu": "ubuntu-24.04-arm",
-    "x86_64-pc-windows-gnu": None,
-    "riscv64gc-unknown-linux-gnu": None,
+    "riscv64gc-unknown-linux-gnu": "ubuntu-latest",
 }
+EMULATED = {"riscv64gc-unknown-linux-gnu"}
+RISCV_SETUP = "scripts/ci/riscv64gc_qemu.sh"
 
 
 def needs(job):
@@ -94,6 +102,9 @@ class Targets(unittest.TestCase):
     def test_every_selected_target_is_gated(self):
         self.assertEqual({t["target"] for t in targets()}, FREESTANDING | set(GNU))
 
+    def test_trimmed_targets_are_not_gated(self):
+        self.assertEqual({t["target"] for t in targets()} & TRIMMED, set())
+
     def test_freestanding_targets_have_no_lql_and_the_no_std_lints(self):
         for t in targets():
             if t["target"] not in FREESTANDING:
@@ -109,9 +120,73 @@ class Targets(unittest.TestCase):
             with self.subTest(target=target):
                 t = got[target]
                 self.assertEqual(t["features"], "")
-                self.assertEqual(t["lql"], runner is not None)
-                if runner:
-                    self.assertEqual(t["runs_on"], runner)
+                self.assertIs(t["lql"], True)
+                self.assertEqual(t["runs_on"], runner)
+                if target in EMULATED:
+                    self.assertEqual(t["setup"], RISCV_SETUP)
+                    self.assertIn("qemu-riscv64", t["emulator"])
+                else:
+                    self.assertEqual((t["setup"], t["emulator"]), ("", ""))
+
+
+class Emulation(unittest.TestCase):
+    """riscv64gc-unknown-linux-gnu runs the lql matrix under QEMU user-mode."""
+
+    def test_the_chain_passes_the_cross_build_and_emulator_to_lql(self):
+        chain = load()["crate-gate-chain"]
+        for name in ("setup", "emulator"):
+            self.assertIn(name, chain[True]["workflow_call"]["inputs"])
+        lql = chain["jobs"]["lql"]["with"]
+        self.assertIn("inputs.emulator", lql["target"])  # cross-build only when emulated
+        self.assertEqual(lql["setup"], "${{ inputs.setup }}")
+        self.assertEqual(lql["emulator"], "${{ inputs.emulator }}")
+
+    def test_clippy_and_build_get_the_cross_toolchain_when_there_is_a_setup(self):
+        jobs = load()["crate-gate-chain"]["jobs"]
+        for name in ("clippy", "build"):
+            with self.subTest(job=name):
+                setup = [s for s in jobs[name]["steps"] if "inputs.setup" in s.get("if", "")]
+                self.assertEqual(len(setup), 1)
+                self.assertEqual(setup[0]["env"]["SETUP"], "${{ inputs.setup }}")
+
+    def test_the_matrix_workflow_cross_builds_and_wraps_the_binary(self):
+        wf = load()["lql-strategy-matrix"]
+        for name in ("target", "setup", "emulator"):
+            self.assertIn(name, wf[True]["workflow_call"]["inputs"])
+        build = wf["jobs"]["build"]["steps"]
+        self.assertTrue(any("inputs.setup" in s.get("if", "") for s in build))
+        # The target reaches the shell through the environment, never interpolated into the script.
+        cross = [s for s in build if "--target" in str(s.get("run", ""))]
+        self.assertEqual(len(cross), 1)
+        self.assertEqual(cross[0]["env"]["TARGET"], "${{ inputs.target }}")
+        self.assertNotIn("inputs.", cross[0]["run"])
+        up = [s for s in build if "upload-artifact" in s.get("uses", "")][0]
+        self.assertIn("inputs.target", up["with"]["path"])
+
+    def test_every_job_that_runs_the_cli_runs_it_under_the_emulator(self):
+        # The jobs that download the binary and execute it: matrix legs, model lifecycle, mistral.
+        for name, job in load()["lql-strategy-matrix"]["jobs"].items():
+            steps_ = job.get("steps", [])
+            if not any(str(s.get("uses", "")).startswith("actions/download-artifact") and
+                       str(s["with"].get("name", "")).startswith("larql-bin") for s in steps_):
+                continue
+            with self.subTest(job=name):
+                wrap = [s for s in steps_ if "wrap_emulator.sh" in str(s.get("run", ""))]
+                self.assertEqual(len(wrap), 1)
+                self.assertEqual(wrap[0]["if"], "inputs.emulator != ''")
+                self.assertEqual(wrap[0]["env"]["EMULATOR"], "${{ inputs.emulator }}")
+
+    def test_the_setup_script_installs_the_recipe_target_matrix_proved(self):
+        text = Path("scripts/ci/riscv64gc_qemu.sh").read_text()
+        for needle in ("gcc-riscv64-linux-gnu", "libc6-dev-riscv64-cross", "qemu-user-static",
+                       "libopenblas-dev:riscv64", "OPENBLAS_LIB_DIR_riscv64gc_unknown_linux_gnu",
+                       "CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER", "QEMU_LD_PREFIX"):
+            self.assertIn(needle, text)
+
+    def test_the_wrapper_execs_the_emulator_on_an_absolute_path(self):
+        text = Path("scripts/ci/wrap_emulator.sh").read_text()
+        self.assertIn("larql.real", text)
+        self.assertIn('$(pwd)', text)  # cells run in other directories
 
 
 class LqlInstancesDoNotCollide(unittest.TestCase):
