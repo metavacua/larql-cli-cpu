@@ -167,6 +167,35 @@ impl Session {
         }
     }
 
+    /// Refuse a verb that runs a forward pass when the vindex has no FFN
+    /// weights to run it with. Names the attention tier explicitly: its
+    /// `has_model_weights` is true, so the generic "built without weights"
+    /// advice would be wrong, and the walk FFN would panic on the missing
+    /// tensor instead of reporting it.
+    pub(crate) fn require_local_ffn(
+        verb: &str,
+        path: &Path,
+        config: &larql_vindex::VindexConfig,
+    ) -> Result<(), LqlError> {
+        if config.has_local_ffn_weights() {
+            return Ok(());
+        }
+        let what = if config.has_model_weights {
+            // The attention tier: weights are present, the FFN is not.
+            format!(
+                "{verb} requires FFN weights: this vindex is the attention tier \
+                 (client slice for `run --ffn URL`) and has none"
+            )
+        } else {
+            format!("{verb} requires model weights: this vindex was built without them")
+        };
+        Err(LqlError::Execution(format!(
+            "{what}.\nRebuild: EXTRACT MODEL \"{}\" INTO \"{}\" WITH INFERENCE",
+            config.model,
+            path.display(),
+        )))
+    }
+
     /// Get readonly access to path + config + base index.
     pub(crate) fn require_vindex(
         &self,

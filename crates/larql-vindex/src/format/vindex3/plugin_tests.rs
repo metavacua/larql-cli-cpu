@@ -114,3 +114,48 @@ fn a_stamp_from_the_geometry_without_head_dim_is_refused() {
     assert_ne!(before, host, "the host must stamp revision 5");
     assert!(!abi_compatible(&before));
 }
+
+#[test]
+fn a_refusal_names_the_unknown_commit_even_when_the_stamps_match() {
+    let unknown = "larql-plugin/5 larql-vindex/0.2.0 (rustc 1.98.0) x86_64 commit unknown";
+    let reason = refusal_against(unknown, unknown).expect("unknown commits are refused");
+    assert!(reason.contains("the stamps match"), "{reason}");
+    assert!(
+        reason.contains("the plugin and this binary were built without a git commit"),
+        "{reason}"
+    );
+    assert!(reason.contains("built without a git commit"), "{reason}");
+}
+
+#[test]
+fn a_refusal_of_different_stamps_shows_both_and_which_side_is_unknown() {
+    let host = "larql-plugin/5 larql-vindex/0.2.0 (rustc 1.98.0) x86_64 commit abc";
+    let plugin = "larql-plugin/5 larql-vindex/0.2.0 (rustc 1.98.0) x86_64 commit unknown";
+    let reason = refusal_against(host, plugin).expect("different stamps are refused");
+    assert!(
+        reason.contains(&format!("built for `{plugin}`, this binary is `{host}`")),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("the plugin was built without a git commit"),
+        "{reason}"
+    );
+    assert!(
+        !reason.contains("this binary was built without"),
+        "{reason}"
+    );
+
+    let other = "larql-plugin/5 larql-vindex/0.2.0 (rustc 1.97.0) x86_64 commit abc";
+    let reason = refusal_against(host, other).expect("a different compiler is refused");
+    assert!(reason.contains("rebuild the plugin"), "{reason}");
+    assert!(!reason.contains("git commit"), "{reason}");
+}
+
+#[test]
+fn matching_stamps_from_a_known_commit_are_not_refused() {
+    // The control: without it, a refusal_against that refuses everything
+    // passes both tests above.
+    let host = "larql-plugin/5 larql-vindex/0.2.0 (rustc 1.98.0) x86_64 commit abc";
+    assert_eq!(refusal_against(host, host), None);
+    assert_eq!(abi_refusal(abi()).is_none(), abi_compatible(abi()));
+}

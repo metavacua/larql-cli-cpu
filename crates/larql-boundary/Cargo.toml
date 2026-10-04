@@ -8,7 +8,6 @@ description = "Confidence-gated BOUNDARY ref codec for LARQL"
 
 [dependencies]
 serde = { workspace = true }
-serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

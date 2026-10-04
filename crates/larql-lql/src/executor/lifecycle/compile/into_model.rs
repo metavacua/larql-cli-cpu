@@ -21,15 +21,7 @@ impl Session {
         let config = larql_vindex::load_vindex_config(vindex_path)
             .map_err(|e| LqlError::exec("failed to load vindex config", e))?;
 
-        if !config.has_model_weights {
-            return Err(LqlError::Execution(format!(
-                "COMPILE INTO MODEL requires model weights in the vindex.\n\
-                 This vindex was built without --include-weights.\n\
-                 Rebuild: EXTRACT MODEL \"{}\" INTO \"{}\" WITH ALL",
-                config.model,
-                vindex_path.display()
-            )));
-        }
+        Self::require_local_ffn("COMPILE INTO MODEL", vindex_path, &config)?;
 
         let final_dir = PathBuf::from(output);
         let vindex_path_owned = vindex_path.to_path_buf();

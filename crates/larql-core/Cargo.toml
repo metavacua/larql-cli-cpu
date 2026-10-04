@@ -37,7 +37,6 @@ io = []
 engine = []
 
 [dev-dependencies]
-assert_approx_eq = "1"
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]

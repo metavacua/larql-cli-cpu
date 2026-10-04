@@ -257,10 +257,10 @@ impl Session {
         out.push("-".repeat(48));
 
         for layer in &show_layers {
-            let gate_count = patched
-                .gate_vectors_at(*layer)
-                .map(|m| m.shape()[0])
-                .unwrap_or(0);
+            // `num_features` is what STATS reports and works on every
+            // storage mode; `gate_vectors_at` is `None` on mmap, which
+            // used to render as a silent 0.
+            let gate_count = patched.num_features(*layer);
             let (meta_count, top_tok) = if let Some(metas) = patched.down_meta_at(*layer) {
                 let count = metas.iter().filter(|m| m.is_some()).count();
                 let mut freq: HashMap<&str, usize> = HashMap::new();

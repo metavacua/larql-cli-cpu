@@ -251,3 +251,30 @@ fn label_map_containers_are_metadata_to_every_leaf() {
         assert_eq!(fact.status, KeyStatus::Metadata, "{path}");
     }
 }
+
+/// SmolLM2-Instruct ships `transformers.js_config.kv_cache_dtype` — a
+/// JavaScript-runtime hint that made its VINDEX3 plan inadmissible while
+/// the base model, lacking the key, passed. Scoped by container, not by
+/// leaf: the control is a bare `fp16` outside it, which stays unjudged.
+#[test]
+fn transformers_js_config_is_metadata_but_a_bare_fp16_is_not() {
+    let config = json!({
+        "transformers.js_config": {
+            "kv_cache_dtype": { "fp16": "float16", "q4f16": "float16" }
+        },
+        "fp16": true
+    });
+    let facts = classify_config(&config, &Default::default());
+    for path in [
+        "transformers.js_config.kv_cache_dtype.fp16",
+        "transformers.js_config.kv_cache_dtype.q4f16",
+    ] {
+        let fact = facts
+            .iter()
+            .find(|f| f.path == path)
+            .unwrap_or_else(|| panic!("{path}"));
+        assert_eq!(fact.status, KeyStatus::Metadata, "{path}");
+    }
+    let bare = facts.iter().find(|f| f.path == "fp16").expect("bare fp16");
+    assert_eq!(bare.status, KeyStatus::Unconsumed);
+}

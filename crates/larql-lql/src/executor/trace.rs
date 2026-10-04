@@ -53,13 +53,7 @@ impl super::Session {
         // Vindex backend: load weights, use walk FFN (editable — INSERT/DELETE affects trace)
         let (path, config, patched) = self.require_vindex()?;
 
-        if !config.has_model_weights {
-            return Err(LqlError::Execution(format!(
-                "TRACE requires model weights. Rebuild: EXTRACT MODEL \"{}\" INTO \"{}\" WITH ALL",
-                config.model,
-                path.display(),
-            )));
-        }
+        Self::require_local_ffn("TRACE", path, config)?;
 
         if config.quant != larql_vindex::QuantFormat::None {
             return Err(LqlError::Execution(

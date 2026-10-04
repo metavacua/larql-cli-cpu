@@ -150,56 +150,56 @@ impl Session {
         let memit_enabled = larql_compute::options::env_value("LARQL_MEMIT_ENABLE")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-        let memit_results = if !memit_facts.is_empty() && config.has_model_weights && memit_enabled
-        {
-            let mut cb = larql_vindex::SilentLoadCallbacks;
-            let weights = larql_vindex::load_model_weights(path, &mut cb)
-                .map_err(|e| LqlError::exec("load weights for MEMIT", e))?;
-            let tokenizer = larql_vindex::load_vindex_tokenizer(path)
-                .map_err(|e| LqlError::exec("load tokenizer for MEMIT", e))?;
-            // `LARQL_MEMIT_TARGET_DELTA=1` switches MEMIT from the
-            // `target_alpha × embed(target)` shortcut to the per-fact
-            // gradient-optimised delta (Python reference Phase 3 +
-            // Phase 4). Slow (60 Adam steps/fact) but unlocks scale.
-            // `LARQL_MEMIT_SPREAD=N` distributes each fact across N
-            // consecutive layers centred on its install layer.
-            // `LARQL_MEMIT_RIDGE=f` overrides the solve's ridge term.
-            let use_target_delta = std::env::var("LARQL_MEMIT_TARGET_DELTA")
-                .ok()
-                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-                .unwrap_or(false);
-            let spread = std::env::var("LARQL_MEMIT_SPREAD")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(1);
-            let ridge = std::env::var("LARQL_MEMIT_RIDGE")
-                .ok()
-                .and_then(|v| v.parse::<f64>().ok())
-                .unwrap_or(MEMIT_DEFAULT_RIDGE);
-            let results = if use_target_delta {
-                larql_inference::forward::memit::run_memit_with_target_opt_multi(
-                    &weights,
-                    &memit_facts,
-                    ridge,
-                    larql_inference::TargetDeltaOpts::default(),
-                    &tokenizer,
-                    spread,
-                )
+        let memit_results =
+            if !memit_facts.is_empty() && config.has_local_ffn_weights() && memit_enabled {
+                let mut cb = larql_vindex::SilentLoadCallbacks;
+                let weights = larql_vindex::load_model_weights(path, &mut cb)
+                    .map_err(|e| LqlError::exec("load weights for MEMIT", e))?;
+                let tokenizer = larql_vindex::load_vindex_tokenizer(path)
+                    .map_err(|e| LqlError::exec("load tokenizer for MEMIT", e))?;
+                // `LARQL_MEMIT_TARGET_DELTA=1` switches MEMIT from the
+                // `target_alpha × embed(target)` shortcut to the per-fact
+                // gradient-optimised delta (Python reference Phase 3 +
+                // Phase 4). Slow (60 Adam steps/fact) but unlocks scale.
+                // `LARQL_MEMIT_SPREAD=N` distributes each fact across N
+                // consecutive layers centred on its install layer.
+                // `LARQL_MEMIT_RIDGE=f` overrides the solve's ridge term.
+                let use_target_delta = std::env::var("LARQL_MEMIT_TARGET_DELTA")
+                    .ok()
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                let spread = std::env::var("LARQL_MEMIT_SPREAD")
+                    .ok()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(1);
+                let ridge = std::env::var("LARQL_MEMIT_RIDGE")
+                    .ok()
+                    .and_then(|v| v.parse::<f64>().ok())
+                    .unwrap_or(MEMIT_DEFAULT_RIDGE);
+                let results = if use_target_delta {
+                    larql_inference::forward::memit::run_memit_with_target_opt_multi(
+                        &weights,
+                        &memit_facts,
+                        ridge,
+                        larql_inference::TargetDeltaOpts::default(),
+                        &tokenizer,
+                        spread,
+                    )
+                } else {
+                    larql_inference::run_memit(
+                        &weights,
+                        &memit_facts,
+                        ridge,
+                        MEMIT_TARGET_ALPHA,
+                        &tokenizer,
+                    )
+                };
+                let results =
+                    results.map_err(|e| LqlError::Execution(format!("MEMIT solve failed: {e}")))?;
+                Some(results)
             } else {
-                larql_inference::run_memit(
-                    &weights,
-                    &memit_facts,
-                    ridge,
-                    MEMIT_TARGET_ALPHA,
-                    &tokenizer,
-                )
+                None
             };
-            let results =
-                results.map_err(|e| LqlError::Execution(format!("MEMIT solve failed: {e}")))?;
-            Some(results)
-        } else {
-            None
-        };
 
         // ── Step 1: gate_vectors.bin and down_meta.bin ──
         //
