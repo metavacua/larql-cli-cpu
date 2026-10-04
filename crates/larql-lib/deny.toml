@@ -1,0 +1,22 @@
+# Strict supply-chain config for larql-lib, run by the crate-gate inventory job for a crate that
+# has this file. Nothing is ignored and nothing is skipped: a dependency that needs an exception
+# is replaced by one that does not.
+
+[graph]
+all-features = true
+exclude-dev = true
+
+[advisories]
+version = 2
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+unmaintained = "all"
+unsound = "all"
+ignore = []
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+highlight = "all"
+skip = []
+skip-tree = []

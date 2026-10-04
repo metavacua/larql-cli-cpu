@@ -8,7 +8,7 @@ on:
   workflow_call:
     inputs:
       crate: {type: string, required: true}
-      kind: {type: string, required: true, description: "lib, or bin for a crate with no library"}
+      kind: {type: string, required: true, description: "lib, bin for a crate with no library, or both for a library with a binary"}
       target: {type: string, required: true}
       runs_on: {type: string, required: true, description: "Runner for build and (if lql) the matrix"}
       freestanding: {type: boolean, default: false, description: "No OS: no default features, and the core/alloc/std lints"}
@@ -21,17 +21,19 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Derived once, here, for the build and verify jobs.
+  # A library with a binary is gated as both, except on a freestanding target: the binary is
+  # the interface layer and keeps std, so only the library has to build there.
+  SELECT: ${{ inputs.kind == 'bin' && '--bins' || (inputs.kind == 'both' && !inputs.freestanding && '--lib --bins' || '--lib') }}
+  # From `freestanding`. The lint triple appears here only.
+  FEATURES: ${{ inputs.freestanding && '--no-default-features' || '' }}
+  LINTS: ${{ inputs.freestanding && '-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core' || '' }}
 
 jobs:
   build:
     name: build · ${{ inputs.target }}
     runs-on: ${{ inputs.runs_on }}
     timeout-minutes: 90
-    env:
-      SELECT: --${{ inputs.kind == 'bin' && 'bins' || 'lib' }}
-      # Derived once from `freestanding`, for both steps. The lint triple appears here only.
-      FEATURES: ${{ inputs.freestanding && '--no-default-features' || '' }}
-      LINTS: ${{ inputs.freestanding && '-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core' || '' }}
     steps:
       - uses: actions/checkout@v7
       - run: rustup target add ${{ inputs.target }}
@@ -42,6 +44,21 @@ jobs:
         env:
           SETUP: ${{ inputs.setup }}
         run: bash "$SETUP"
+      # Inventory, not a gate: the raw output of cargo and rustc for this target goes to the log
+      # and nothing is asserted, so it runs before clippy and a red clippy still leaves it. The
+      # crates are the ones that decide whether the graph can be local, std-free or parallel.
+      # `-i` exits non-zero for a crate absent from this target's graph; that is printed, not hidden.
+      - name: graph inventory (raw; no pass/fail)
+        env:
+          CRATE: ${{ inputs.crate }}
+          TARGET: ${{ inputs.target }}
+        run: |
+          rustc --print cfg --target "$TARGET"
+          for p in reqwest hf-hub tonic tokio rustyline rayon memmap2 clap; do
+            echo "::group::cargo tree -i $p"
+            cargo tree --locked -p "$CRATE" --target "$TARGET" -e normal -i "$p" --depth 1 --prefix none || echo "exit status $?: $p is not in this graph"
+            echo "::endgroup::"
+          done
       # clippy's lints depend on the cfg set the target selects, so it runs per target.
       - name: clippy
         run: >-
@@ -50,6 +67,43 @@ jobs:
       - name: build
         run: >-
           cargo build --locked --target ${{ inputs.target }} -p ${{ inputs.crate }}
+          $SELECT $FEATURES
+
+  # Beside build, in front of nothing: lql needs only build, so a red cargo-hack or unit test never
+  # skips the strict lql matrix (it did once: 13 lql jobs skipped). One more checkout and toolchain
+  # setup, and the dependencies compile again under the other profiles; that is the price of
+  # keeping the lql signal.
+  verify:
+    name: verify · ${{ inputs.target }}
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup target add ${{ inputs.target }}
+      # Build scripts run on the runner whatever the target is.
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libopenblas-dev pkg-config
+      - name: Cross toolchain
+        if: inputs.setup != ''
+        env:
+          SETUP: ${{ inputs.setup }}
+        run: bash "$SETUP"
+      # Every feature configuration the crate declares, on every target, freestanding included:
+      # compile only. --each-feature already runs the all-features, the no-default-features, each
+      # single feature and the defaults, so $FEATURES is not passed: cargo-hack refuses that flag
+      # beside --each-feature.
+      # No --no-dev-deps: cargo-hack rewrites the real Cargo.toml for it and --locked then refuses.
+      - uses: taiki-e/install-action@cargo-hack
+      - name: cargo-hack (each feature)
+        run: >-
+          cargo hack check --each-feature --locked --target ${{ inputs.target }}
+          -p ${{ inputs.crate }} $SELECT
+      # The fast path of `make test` (lib and bins, no integration tests). The default harness
+      # needs std, so not on the freestanding targets; riscv64 runs under QEMU through the lql
+      # matrix, not here.
+      - name: test
+        if: ${{ !inputs.freestanding && inputs.emulator == '' }}
+        run: >-
+          cargo test --locked --target ${{ inputs.target }} -p ${{ inputs.crate }}
           $SELECT $FEATURES
 
   # The CLI is built from this branch, so it carries the crate as it now stands, and the

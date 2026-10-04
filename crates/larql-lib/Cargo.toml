@@ -1,0 +1,15 @@
+[package]
+name = "larql-lib"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "The library half of larql: a copy of the library code, depending on no other larql crate."
+
+# No dependencies yet, on purpose. A dependency is declared in the commit that adds the code
+# using it, and `cargo-machete` and `deny.toml` (no duplicate versions, no advisories, nothing
+# unmaintained or unsound, no exceptions) must stay green after every such commit.
+
+[lints]
+workspace = true

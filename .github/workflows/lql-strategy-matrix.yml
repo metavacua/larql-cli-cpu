@@ -121,6 +121,13 @@ jobs:
         env:
           SETUP: ${{ inputs.setup }}
         run: bash "$SETUP"
+      # rust-toolchain.toml pins the toolchain, so this adds the target to the pinned one; without
+      # it the cross-build fails with `can't find crate for std`.
+      - name: Rust target for the cross-build
+        if: inputs.target != ''
+        env:
+          TARGET: ${{ inputs.target }}
+        run: rustup target add "$TARGET"
       - name: Build larql-cli (release)
         env:
           TARGET: ${{ inputs.target }}
