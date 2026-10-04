@@ -25,6 +25,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use quinn::{Connection, Endpoint, RecvStream, SendStream};
+use rustls::pki_types::pem::{Error as PemError, PemObject};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use rustls::{ClientConfig, RootCertStore};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -177,19 +178,27 @@ mod ring_compat {
     }
 }
 
+/// Every certificate in `pem`, in order.
+fn parse_cert_chain(pem: &str) -> Result<Vec<CertificateDer<'static>>, String> {
+    CertificateDer::pem_slice_iter(pem.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("parse cert PEM: {e}"))
+}
+
+/// The first PKCS#8 private key in `pem`; other PEM sections are skipped.
+fn parse_pkcs8_key(pem: &str) -> Result<PrivatePkcs8KeyDer<'static>, String> {
+    PrivatePkcs8KeyDer::from_pem_slice(pem.as_bytes()).map_err(|e| match e {
+        PemError::NoItemsFound => "no PKCS#8 key in --quic-key PEM".to_string(),
+        other => format!("parse key PEM: {other}"),
+    })
+}
+
 // ── quinn endpoint factories ────────────────────────────────────────────────
 
 /// Build a quinn server endpoint listening on `addr` and presenting `tls`.
 pub fn server_endpoint(addr: SocketAddr, tls: &SelfSignedTls) -> Result<Endpoint, String> {
-    let mut cert_pem_bytes = tls.cert_pem.as_bytes();
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_pem_bytes)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("parse cert PEM: {e}"))?;
-    let mut key_pem_bytes = tls.key_pem.as_bytes();
-    let key: PrivatePkcs8KeyDer<'static> = rustls_pemfile::pkcs8_private_keys(&mut key_pem_bytes)
-        .next()
-        .ok_or_else(|| "no PKCS#8 key in --quic-key PEM".to_string())?
-        .map_err(|e| format!("parse key PEM: {e}"))?;
+    let certs = parse_cert_chain(&tls.cert_pem)?;
+    let key = parse_pkcs8_key(&tls.key_pem)?;
 
     let server_config = quinn::ServerConfig::with_single_cert(certs, key.into())
         .map_err(|e| format!("quinn ServerConfig::with_single_cert: {e}"))?;
@@ -318,15 +327,8 @@ pub(crate) fn client_rustls_config_skip_verify() -> ClientConfig {
 /// without ALPN.
 #[cfg(feature = "http3")]
 pub(crate) fn server_rustls_config(tls: &SelfSignedTls) -> Result<rustls::ServerConfig, String> {
-    let mut cert_pem_bytes = tls.cert_pem.as_bytes();
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_pem_bytes)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("parse cert PEM: {e}"))?;
-    let mut key_pem_bytes = tls.key_pem.as_bytes();
-    let key: PrivatePkcs8KeyDer<'static> = rustls_pemfile::pkcs8_private_keys(&mut key_pem_bytes)
-        .next()
-        .ok_or_else(|| "no PKCS#8 key in --quic-key PEM".to_string())?
-        .map_err(|e| format!("parse key PEM: {e}"))?;
+    let certs = parse_cert_chain(&tls.cert_pem)?;
+    let key = parse_pkcs8_key(&tls.key_pem)?;
     let provider = rustls::crypto::ring::default_provider();
     rustls::ServerConfig::builder_with_provider(Arc::new(provider))
         .with_protocol_versions(&[&rustls::version::TLS13])
@@ -606,11 +608,11 @@ mod tests {
         // into the verifier branches. The verifier itself doesn't parse
         // ASN.1; it only hashes the bytes.
         let tls = self_signed_tls("verifier-test").unwrap();
-        let pem = rustls_pemfile::certs(&mut tls.cert_pem.as_bytes())
+        parse_cert_chain(&tls.cert_pem)
+            .unwrap()
+            .into_iter()
             .next()
             .unwrap()
-            .unwrap();
-        CertificateDer::from(pem.to_vec())
     }
 
     fn dummy_server_name() -> ServerName<'static> {

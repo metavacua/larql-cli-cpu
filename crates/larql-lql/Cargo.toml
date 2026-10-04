@@ -9,7 +9,6 @@ description = "LQL parser, executor, and REPL for LARQL"
 
 [dependencies]
 larql-compute = { path = "../larql-compute" }
-larql-core = { path = "../larql-core" }
 larql-inference = { path = "../larql-inference" }
 larql-kv = { path = "../larql-kv" }
 larql-models = { path = "../larql-models" }

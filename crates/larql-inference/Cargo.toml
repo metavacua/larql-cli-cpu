@@ -18,7 +18,6 @@ categories = ["science"]
 # binaries that don't use it.
 larql-models = { path = "../larql-models", features = ["test-utils"] }
 larql-compute = { path = "../larql-compute" }
-larql-core = { path = "../larql-core" }
 larql-vindex = { path = "../larql-vindex" }
 larql-execution = { path = "../larql-execution" }
 serde = { workspace = true }
@@ -29,7 +28,6 @@ sha2 = "0.10"
 thiserror = { workspace = true }
 zip = { version = "2", default-features = false }
 rand = "0.8"
-rand_distr = "0.4"
 
 # Model weights
 safetensors = "0.7"
@@ -45,7 +43,7 @@ ndarray = "0.16"
 rayon = "1.10"
 
 # Tokenizer
-tokenizers = "0.21"
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 
 # Used by `residual_diff::capture` to drive the backend-side per-layer
 # dump hooks into a private dir per call. dev-only would force every
@@ -100,7 +98,6 @@ ndarray = "0.16"
 blas-src = { version = "0.10", default-features = false }
 
 [dev-dependencies]
-assert_approx_eq = "1"
 tempfile = "3"
 criterion = { version = "0.5", features = ["html_reports"] }
 larql-kv = { path = "../larql-kv" }
