@@ -13,6 +13,13 @@
 //! FP4 storage is configured in the `extra["fp4"]` loader fields and
 //! isn't validated by this crate in v1 — the FP4 compliance gate
 //! already lives in `larql-vindex` and runs at extract time.
+//!
+//! **Layers.** Everything here is `core` (plain `f32`/`u32` data and a fixed
+//! five-slot array) except [`sampled_layers`], the `Vec`-returning form, which
+//! is `alloc` and a thin wrapper over the core [`sample_layers`].
+
+#[cfg(feature = "alloc")]
+use alloc::vec::Vec;
 
 use crate::{QuantFormat, StorageDtype};
 
@@ -47,25 +54,97 @@ pub fn thresholds_for(quant: QuantFormat, dtype: StorageDtype) -> Thresholds {
     }
 }
 
-/// Deterministic sampled-layer pattern: `[0, L/4, L/2, 3L/4, L-1]`.
-/// Five reads per validation regardless of model depth. Returns at
-/// most `num_layers` distinct indices (collapses for very shallow
-/// models).
-pub fn sampled_layers(num_layers: u32) -> Vec<u32> {
-    if num_layers == 0 {
-        return Vec::new();
+/// How many layers the validator samples at most: `[0, L/4, L/2, 3L/4, L-1]`.
+pub const SAMPLED_LAYER_SLOTS: usize = 5;
+
+/// The sampled layer indices of one model depth, held inline (no heap).
+///
+/// Ascending and deduplicated, at most [`SAMPLED_LAYER_SLOTS`] entries. Build
+/// it with [`sample_layers`]; read it with [`as_slice`](Self::as_slice) or
+/// [`iter`](Self::iter).
+#[derive(Clone, Copy, Debug)]
+pub struct SampledLayers {
+    buf: [u32; SAMPLED_LAYER_SLOTS],
+    len: usize,
+}
+
+impl SampledLayers {
+    /// The sampled indices, ascending, no duplicates.
+    pub fn as_slice(&self) -> &[u32] {
+        // `len <= SAMPLED_LAYER_SLOTS` is established by `sample_layers`, the
+        // only constructor, so this slice is always in range.
+        &self.buf[..self.len]
     }
-    let last = num_layers - 1;
-    let mut out = vec![
+
+    /// Number of distinct sampled layers.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// True for a zero-layer model.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Iterate the indices in ascending order.
+    pub fn iter(&self) -> core::slice::Iter<'_, u32> {
+        self.as_slice().iter()
+    }
+}
+
+impl PartialEq for SampledLayers {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for SampledLayers {}
+
+impl<'a> IntoIterator for &'a SampledLayers {
+    type Item = &'a u32;
+    type IntoIter = core::slice::Iter<'a, u32>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// Deterministic sampled-layer pattern: `[0, L/4, L/2, 3L/4, L-1]`.
+/// Five reads per validation regardless of model depth. Holds at most
+/// `num_layers` distinct indices (collapses for very shallow models). The
+/// allocation-free (`core`) form; [`sampled_layers`] is the `Vec` wrapper.
+pub fn sample_layers(num_layers: u32) -> SampledLayers {
+    if num_layers == 0 {
+        return SampledLayers {
+            buf: [0; SAMPLED_LAYER_SLOTS],
+            len: 0,
+        };
+    }
+    // floor(3L/4) without the `3 * L` that overflows u32 for L > u32::MAX / 3.
+    let three_quarters = (num_layers / 4) * 3 + ((num_layers % 4) * 3) / 4;
+    let mut buf = [
         0,
         num_layers / 4,
         num_layers / 2,
-        (3 * num_layers) / 4,
-        last,
+        three_quarters,
+        num_layers - 1,
     ];
-    out.sort_unstable();
-    out.dedup();
-    out
+    buf.sort_unstable();
+    // In-place dedup of the sorted array: keep the first of each run.
+    let mut len = 1;
+    for i in 1..SAMPLED_LAYER_SLOTS {
+        if buf[i] != buf[len - 1] {
+            buf[len] = buf[i];
+            len += 1;
+        }
+    }
+    SampledLayers { buf, len }
+}
+
+/// [`sample_layers`] as a `Vec`. `alloc` layer.
+#[cfg(feature = "alloc")]
+pub fn sampled_layers(num_layers: u32) -> Vec<u32> {
+    sample_layers(num_layers).as_slice().to_vec()
 }
 
 #[cfg(test)]
@@ -91,18 +170,71 @@ mod tests {
     }
 
     #[test]
+    fn sample_layers_picks_five_for_typical_depth() {
+        assert_eq!(sample_layers(34).as_slice(), &[0, 8, 17, 25, 33]);
+    }
+
+    #[test]
+    fn sample_layers_dedupes_shallow_models() {
+        // 4-layer model: indices [0, 1, 2, 3, 3] → dedup → [0,1,2,3]
+        assert_eq!(sample_layers(4).as_slice(), &[0, 1, 2, 3]);
+        // 1-layer model: [0, 0, 0, 0, 0] → [0]
+        assert_eq!(sample_layers(1).as_slice(), &[0]);
+    }
+
+    #[test]
+    fn sample_layers_empty_for_zero() {
+        let none = sample_layers(0);
+        assert!(none.is_empty());
+        assert_eq!(none.len(), 0);
+        assert_eq!(none.iter().count(), 0);
+    }
+
+    #[test]
+    fn sample_layers_does_not_overflow_on_huge_depth() {
+        // `3 * u32::MAX` overflows u32; floor(3L/4) must still be exact.
+        let l = u32::MAX;
+        let got = sample_layers(l);
+        assert_eq!(got.as_slice()[3], ((3 * u64::from(l)) / 4) as u32);
+        assert_eq!(*got.as_slice().last().unwrap(), l - 1);
+    }
+
+    #[test]
+    fn sample_layers_is_sorted_and_distinct_for_every_small_depth() {
+        for l in 0..200u32 {
+            let s = sample_layers(l);
+            assert!(s.len() <= SAMPLED_LAYER_SLOTS);
+            assert!(s.as_slice().windows(2).all(|w| w[0] < w[1]), "L={l}");
+            assert!(s.iter().all(|&i| i < l), "L={l}");
+        }
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
     fn sampled_layers_picks_five_for_typical_depth() {
         assert_eq!(sampled_layers(34), vec![0, 8, 17, 25, 33]);
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn sampled_layers_dedupes_shallow_models() {
-        // 4-layer model: indices [0, 1, 2, 3, 3] → dedup → [0,1,2,3]
         assert_eq!(sampled_layers(4), vec![0, 1, 2, 3]);
     }
 
+    #[cfg(feature = "alloc")]
     #[test]
     fn sampled_layers_empty_for_zero() {
         assert!(sampled_layers(0).is_empty());
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn core_form_equals_vec_form() {
+        for l in [0u32, 1, 4, 34] {
+            assert_eq!(sample_layers(l).as_slice(), sampled_layers(l).as_slice());
+        }
+        for l in 0..200u32 {
+            assert_eq!(sample_layers(l).as_slice(), sampled_layers(l).as_slice());
+        }
     }
 }

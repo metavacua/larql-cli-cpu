@@ -1,8 +1,13 @@
 //! Minimal, deterministic [`VindexManifest`] builders for downstream
 //! test suites. Feature-gated (`test-utils`) so production builds
 //! never compile this.
+//!
+//! **Layer: `alloc`** — a `VindexManifest` owns `String`/`Vec`/`BTreeMap`. The
+//! `test-utils` feature implies `alloc`.
 
-use std::collections::BTreeMap;
+use alloc::collections::BTreeMap;
+use alloc::string::ToString;
+use alloc::vec;
 
 use crate::{
     ExtractLevel, LayerEntry, QuantFormat, Source, StorageDtype, VindexManifest,
