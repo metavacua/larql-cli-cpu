@@ -20,7 +20,8 @@ def emit(text: str, summary: Path | None) -> None:
             handle.write(text + "\n")
 
 
-def run_check(root: Path, cells_dir: Path, crate_dir: str, base: str | None) -> tuple[list, list[Finding]]:
+def run_check(root: Path, cells_dir: Path, crate_dir: str, base: str | None):
+    """(cells, findings, policy)."""
     policy_rel = f"{crate_dir}/coverage-policy.json"
     raw = json.loads((root / policy_rel).read_text(encoding="utf-8"))
     policy = parse_policy(raw, crate_dir)
@@ -31,14 +32,15 @@ def run_check(root: Path, cells_dir: Path, crate_dir: str, base: str | None) -> 
     if base:
         findings += ratchet.compare_policies(ratchet.base_policy(base, policy_rel, root), raw)
         findings += ratchet.suppression(base, crate_dir, root)
-    return cells, findings
+    return cells, findings, policy
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    cells, findings = run_check(args.repo_root.resolve(), args.cells, args.crate_dir, args.base)
-    emit(report.markdown(cells, findings), args.summary)
+    cells, findings, policy = run_check(args.repo_root.resolve(), args.cells, args.crate_dir, args.base)
+    gating, _ = checks.split_gating(findings, policy)
+    emit(report.markdown(cells, findings, policy.gating_rules), args.summary)
     args.json.write_text(json.dumps(report.as_json(cells, findings), indent=1), encoding="utf-8")
-    return 1 if findings else 0
+    return 1 if gating else 0
 
 
 def cmd_mutation(args: argparse.Namespace) -> int:

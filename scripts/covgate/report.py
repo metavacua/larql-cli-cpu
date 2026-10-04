@@ -14,7 +14,7 @@ def _pct(ratio: metrics.Ratio) -> str:
     return f"{metrics.percent(ratio):.2f}% ({ratio[0]}/{ratio[1]})" if ratio[1] else "n/a"
 
 
-def markdown(cells: list[Cell], findings: list[Finding]) -> str:
+def markdown(cells: list[Cell], findings: list[Finding], gating_rules: frozenset[str] = frozenset()) -> str:
     lines = ["## Coverage gate", ""]
     lines += ["| cell | target | feature | lines | functions | traits below |", "|---|---|---|---|---|---|"]
     for cell in sorted(cells, key=lambda c: c.name):
@@ -31,12 +31,14 @@ def markdown(cells: list[Cell], findings: list[Finding]) -> str:
     retried = sorted(c.name for c in cells if c.attempt > 1)
     if retried:
         lines.append(f"**Retried cells** (a pass here is a pass on a re-run): {', '.join(retried)}.")
-    lines += ["", f"**{len(findings)} finding(s)**" if findings else "**All rules pass.**", ""]
+    gating = sum(1 for f in findings if f.rule in gating_rules)
+    lines += ["", f"**{gating} gating finding(s), {len(findings) - gating} reported.**" if findings else "**All rules pass.**", ""]
     by_rule: dict[str, list[Finding]] = {}
     for finding in findings:
         by_rule.setdefault(finding.rule, []).append(finding)
     for rule, group in sorted(by_rule.items()):
-        lines += [f"### {rule} ({len(group)})", "", "| cell | subject | detail |", "|---|---|---|"]
+        role = "gating" if rule in gating_rules else "reported"
+        lines += [f"### {rule} ({len(group)}, {role})", "", "| cell | subject | detail |", "|---|---|---|"]
         for finding in group[:WORST_FILES]:
             lines.append(f"| {finding.cell} | `{finding.subject}` | {finding.message} |")
         if len(group) > WORST_FILES:

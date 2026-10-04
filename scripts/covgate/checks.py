@@ -134,3 +134,9 @@ def run_all(cells: list[Cell], policy: Policy, added: Added | None) -> list[Find
         if added is not None:
             findings += diff_coverage(cell, added, policy)
     return findings
+
+
+def split_gating(findings: list[Finding], policy: Policy) -> tuple[list[Finding], list[Finding]]:
+    """(gating, reported-only) by the policy's `gating_rules`."""
+    gating = [f for f in findings if f.rule in policy.gating_rules]
+    return gating, [f for f in findings if f.rule not in policy.gating_rules]

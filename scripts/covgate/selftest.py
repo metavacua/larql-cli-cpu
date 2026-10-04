@@ -40,6 +40,8 @@ def _policy() -> dict:
             "diff_line_min_percent": 90.0,
             "mutation_min_kill_percent": 90.0, "mutation_confidence": 0.95,
             "required_cells": [f"{t}.release" for t in TARGETS] + ["missing.release"],
+            # The self-test gates every rule: it proves each one CAN fire.
+            "gating_rules": ["cells", "total", "file", "stale", "functions", "trait", "spread", "diff"],
         },
     }
 
@@ -104,7 +106,7 @@ def run(repo_root: Path) -> list[str]:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _crate(root, repo_root, clean)
-            cells, findings = run_check(root, root / "cells", CRATE, None)
+            cells, findings, _ = run_check(root, root / "cells", CRATE, None)
         rules = {f.rule for f in findings}
         measured = {metrics.total(c)[1] for c in cells}
         if measured != {40}:

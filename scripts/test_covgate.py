@@ -34,6 +34,7 @@ def policy(**gate_overrides) -> object:
         "mutation_min_kill_percent": 90.0,
         "mutation_confidence": 0.95,
         "required_cells": [],
+        "gating_rules": ["cells", "spread", "ratchet"],
     }
     gate.update(gate_overrides)
     return parse_policy(
@@ -171,6 +172,16 @@ class Rules(unittest.TestCase):
     def test_unified_zero_diff_parsing(self):
         text = f"--- a/{A}\n+++ b/{A}\n@@ -1,0 +2,3 @@\n+x\n@@ -9 +12 @@\n+y\n--- a/{B}\n+++ /dev/null\n"
         self.assertEqual(diff.parse(text), {A: {2, 3, 4, 12}})
+
+    def test_only_named_rules_gate_the_rest_are_reported(self):
+        found = [checks.Finding("file", "c", "a", "low"), checks.Finding("spread", "c", "a", "split")]
+        gating, reported = checks.split_gating(found, policy())
+        self.assertEqual([f.rule for f in gating], ["spread"])
+        self.assertEqual([f.rule for f in reported], ["file"])
+
+    def test_an_unknown_gating_rule_is_a_policy_error(self):
+        with self.assertRaisesRegex(ValueError, "unknown"):
+            policy(gating_rules=["spread", "vibes"])
 
 
 class Ratchet(unittest.TestCase):
