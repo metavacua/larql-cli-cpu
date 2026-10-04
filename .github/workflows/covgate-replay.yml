@@ -1,0 +1,180 @@
+# Replay experiment (PILOT): measure what the coverage gate's decision
+# rule needs and no history can supply.
+#
+# Past merged PRs that touched larql-cli are replayed: the same sampled
+# mutants run on each PR's base and head (a paired design). The outputs —
+# discordance, the per-PR drop in detection probability, CI minutes per
+# mutant, and how many past commits still build — feed the decision
+# module (scripts/covgate/decision) and size the main experiment.
+#
+# Resources are declared, not assumed: scripts/covgate/replay-plan.json
+# states the sample and a runner-minute budget, and the plan job refuses
+# a plan over budget before any runner starts. Every job has a timeout;
+# the run matrix is capped by max-parallel.
+
+name: covgate replay
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/covgate-replay.yml'
+      - 'scripts/covgate/replay/**'
+      - 'scripts/covgate/replay-plan.json'
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: plan (sample + budget)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      prs: ${{ steps.plan.outputs.prs }}
+      runs: ${{ steps.plan.outputs.runs }}
+      seed: ${{ steps.plan.outputs.seed }}
+      n: ${{ steps.plan.outputs.n }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Unit tests for the replay code
+        working-directory: scripts
+        run: python3 -m unittest discover -s . -p 'test_covgate_replay.py'
+      - name: Sample PRs and check the runner budget
+        id: plan
+        working-directory: scripts
+        run: |
+          python3 -m covgate.replay plan --config covgate/replay-plan.json \
+            --repo-root .. --ref origin/main --out "$RUNNER_TEMP/plan.json" > /dev/null
+          {
+            echo "prs=$(jq -c '[.prs[].number]' "$RUNNER_TEMP/plan.json")"
+            echo "runs=$(jq -c '{include: [.prs[] as $p | ("base","head") as $s | {pr: $p.number, side: $s, sha: $p[$s]}]}' "$RUNNER_TEMP/plan.json")"
+            echo "seed=$(jq -r '.config.seed' "$RUNNER_TEMP/plan.json")"
+            echo "n=$(jq -r '.config.mutants_per_pr' "$RUNNER_TEMP/plan.json")"
+          } >> "$GITHUB_OUTPUT"
+          jq '{frame_size, estimated_runner_minutes, prs: [.prs[].number]}' "$RUNNER_TEMP/plan.json"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: plan
+          path: ${{ runner.temp }}/plan.json
+
+  select:
+    name: select mutants (PR ${{ matrix.pr }})
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        pr: ${{ fromJSON(needs.plan.outputs.prs) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@cargo-mutants
+      - uses: actions/download-artifact@v7
+        with:
+          name: plan
+          path: ${{ runner.temp }}/plan
+      - name: List mutants on base and head (source only, no build)
+        run: |
+          for side in base head; do
+            sha=$(jq -r ".prs[] | select(.number == ${{ matrix.pr }}) | .$side" "$RUNNER_TEMP/plan/plan.json")
+            git worktree add -q "$RUNNER_TEMP/wt-$side" "$sha"
+            (cd "$RUNNER_TEMP/wt-$side" && cargo mutants --list --json -p larql-cli) > "$RUNNER_TEMP/$side-mutants.json"
+            echo "$side $sha: $(jq length "$RUNNER_TEMP/$side-mutants.json") mutants"
+          done
+      - name: Pair and sample
+        working-directory: scripts
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          python3 -m covgate.replay select \
+            --base-list "$RUNNER_TEMP/base-mutants.json" --head-list "$RUNNER_TEMP/head-mutants.json" \
+            --n ${{ needs.plan.outputs.n }} --seed $(( ${{ needs.plan.outputs.seed }} + ${{ matrix.pr }} )) \
+            --out "$RUNNER_TEMP/out/selection.json" \
+            --base-re "$RUNNER_TEMP/out/base.re" --head-re "$RUNNER_TEMP/out/head.re"
+          jq '{paired, base_only, head_only, sampled: (.selection | length)}' "$RUNNER_TEMP/out/selection.json"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: select-${{ matrix.pr }}
+          path: ${{ runner.temp }}/out/
+
+  run:
+    name: mutants (PR ${{ matrix.pr }} ${{ matrix.side }})
+    needs: [plan, select]
+    runs-on: ubuntu-latest
+    # Budgeted at setup + n x prior (replay-plan.json) with headroom; a
+    # job that hits this is reported as incomplete, never as clean.
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJSON(needs.plan.outputs.runs) }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopenblas-dev pkg-config protobuf-compiler
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@cargo-mutants
+      - uses: actions/download-artifact@v7
+        with:
+          name: select-${{ matrix.pr }}
+          path: ${{ runner.temp }}/select
+      - name: Run the sampled mutants on ${{ matrix.side }}
+        run: |
+          git worktree add -q "$RUNNER_TEMP/wt" "${{ matrix.sha }}"
+          mapfile -t patterns < "$RUNNER_TEMP/select/${{ matrix.side }}.re"
+          args=()
+          for p in "${patterns[@]}"; do [ -n "$p" ] && args+=(--re "$p"); done
+          cd "$RUNNER_TEMP/wt"
+          rustc_version=$(rustc -V)
+          set +e
+          # No fixed --timeout: cargo-mutants derives each mutant's test
+          # timeout from the measured baseline (x5 by default).
+          cargo mutants -p larql-cli --copy-vcs=true --no-shuffle \
+            -o "$RUNNER_TEMP/result" "${args[@]}"
+          status=$?
+          set -e
+          mkdir -p "$RUNNER_TEMP/result/mutants.out"
+          jq -n --argjson exit "$status" --arg rustc "$rustc_version" '{exit: $exit, rustc: $rustc}' \
+            > "$RUNNER_TEMP/result/mutants.out/status.json"
+          echo "cargo-mutants exit $status ($rustc_version)"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: run-${{ matrix.pr }}-${{ matrix.side }}
+          path: ${{ runner.temp }}/result/mutants.out/
+
+  analyze:
+    name: analyze pilot
+    needs: [plan, run]
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          path: ${{ runner.temp }}/artifacts
+      - name: Paired results per PR and the pilot aggregate
+        working-directory: scripts
+        run: |
+          python3 -m covgate.replay analyze --plan "$RUNNER_TEMP/artifacts/plan/plan.json" \
+            --artifacts "$RUNNER_TEMP/artifacts" --out "$RUNNER_TEMP/replay-report.json" \
+            --summary "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: replay-report
+          path: ${{ runner.temp }}/replay-report.json

@@ -1,0 +1,10 @@
+{
+  "note": "PILOT. Purpose: measure discordance, the per-PR drop in detection, CI minutes per mutant and how many past commits still build, so the main experiment can be sized by power analysis instead of guessed. prior_minutes_per_mutant is a deliberately conservative prior (a larql-cli baseline test pass took 65 s plus an incremental rebuild of one crate); the pilot replaces it with a measurement. The budget bounds the pilot's spend before any runner starts.",
+  "crate_dir": "crates/larql-cli",
+  "strata": 4,
+  "seed": 20261004,
+  "mutants_per_pr": 20,
+  "prior_minutes_per_mutant": 3.0,
+  "setup_minutes": 15.0,
+  "runner_minutes_budget": 720.0
+}
