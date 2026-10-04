@@ -6,8 +6,12 @@
 # crate PRs from waking every shared workflow fifteen times
 # (scripts/test_workflow_triggers.py asserts it).
 #
+#   inventory                once per crate, beside fmt, nothing waits on it: cargo-deny bans (a gate)
+#                            and raw git / ast-grep output (no pass/fail)
 #   fmt                      once per crate; a failure ends the run
-#   per target, in parallel  build job: clippy step, then build step; then lql-strategy-matrix (strict)
+#   per target, in parallel  build job: raw graph inventory, clippy, build, cargo-hack over every
+#                            feature, then unit tests (native gnu targets only); then
+#                            lql-strategy-matrix (strict)
 #   cross-target             structural agreement of the lql instances (read-only; no write token)
 #
 # clippy is per target because its lints depend on the cfg set the target selects; fmt is not.
@@ -48,6 +52,15 @@ jobs:
       - run: python3 scripts/test_workflow_triggers.py
       - run: python3 scripts/test_workflow_hygiene.py
       - run: python3 scripts/test_crate_gate_chain.py
+      # The workflows this gate runs are linted by the standard tool, pinned. SC2086 is ignored
+      # on purpose: SELECT, FEATURES and LINTS are unquoted so that one variable is several flags.
+      - name: actionlint
+        run: >-
+          docker run --rm -v "$PWD:/repo" --workdir /repo rhysd/actionlint:1.7.12
+          -ignore SC2086
+          .github/workflows/crate-gate.yml
+          .github/workflows/crate-gate-chain.yml
+          .github/workflows/lql-strategy-matrix.yml
 
   resolve:
     runs-on: ubuntu-latest
@@ -67,11 +80,43 @@ jobs:
             exit 0
           fi
           meta=$(cargo metadata --no-deps --format-version 1)
-          kind=$(echo "$meta" | jq -r --arg c "$crate" '.packages[] | select(.name == $c) | if any(.targets[]; .kind | index("lib")) then "lib" else "bin" end')
+          kind=$(echo "$meta" | jq -r --arg c "$crate" '.packages[] | select(.name == $c) | [.targets[].kind[]] as $k | if ($k | index("lib")) == null then "bin" elif ($k | index("bin")) == null then "lib" else "both" end')
           [ -n "$kind" ] || { echo "::error::$branch names no workspace package '$crate'"; exit 1; }
           echo "crate=$crate" >> "$GITHUB_OUTPUT"
           echo "kind=$kind" >> "$GITHUB_OUTPUT"
           echo "gating $crate ($kind)"
+
+  # Once per crate, in parallel with fmt; nothing waits on it. The bans are a gate (the crate's own
+  # graph, not the workspace's); the other two steps are inventory: raw git and ast-grep output in
+  # the log, no pass/fail. Interface-layer constructs are counted by the standard tool, so the
+  # lib/bin partition is argued from the log and not from a script of ours.
+  inventory:
+    needs: resolve
+    if: needs.resolve.outputs.crate != ''
+    name: inventory · ${{ needs.resolve.outputs.crate }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CRATE: ${{ needs.resolve.outputs.crate }}
+      BASE: ${{ github.base_ref }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: cargo-deny bans
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: crates/${{ needs.resolve.outputs.crate }}/Cargo.toml
+          command: check bans
+      # Verbatim copies show as 100%; a divergent copy shows its similarity.
+      - name: copy detection against the base (raw; no pass/fail)
+        run: git diff -C --find-copies-harder --summary "origin/$BASE...HEAD"
+      - name: interface-layer inventory (ast-grep, raw counts; no pass/fail)
+        run: |
+          python3 -m pip install --quiet 'ast-grep-cli==0.42.1'
+          for p in 'println!($$$)' 'eprintln!($$$)' 'std::process::exit($$$)' 'std::process::Command::new($$$)' 'reqwest::$$$' 'use clap::$$$;'; do
+            printf '%-36s %s\n' "$p" "$(ast-grep run -l rust -p "$p" --json=stream "crates/$CRATE/src" | wc -l)"
+          done
 
   fmt:
     needs: resolve
