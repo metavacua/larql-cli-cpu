@@ -1,7 +1,8 @@
 """No denominator games: what a change may not loosen, compared with the
 base branch.
 
-- include_globs may only grow; exclude_globs may only shrink
+- no file of the crate may leave the measured scope (judged on the
+  crate's actual files, so swapping a narrow glob for a wider one passes)
 - per-file debt entries may only rise or disappear; no new ones
 - no gate threshold may be lowered (the target spread may not be raised)
 - the count of coverage-suppressing source markers may not increase
@@ -9,6 +10,7 @@ base branch.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import re
 import subprocess
@@ -37,18 +39,23 @@ def _value(policy: dict, key: str, section: str | None) -> float | None:
     return None if value is None else float(value)
 
 
-def compare_policies(base: dict, head: dict) -> list[Finding]:
+def _in_scope(policy: dict, path: str) -> bool:
+    include = policy.get("include_globs") or []
+    if include and not any(fnmatch.fnmatch(path, g) for g in include):
+        return False
+    return not any(fnmatch.fnmatch(path, g) for g in policy.get("exclude_globs") or [])
+
+
+def compare_policies(base: dict, head: dict, files: list[str]) -> list[Finding]:
     out: list[Finding] = []
 
     def flag(subject: str, message: str) -> None:
         out.append(Finding("ratchet", "-", subject, message))
 
-    # An empty include list means "everything", which only widens.
-    if head.get("include_globs"):
-        for glob in sorted(set(base.get("include_globs", [])) - set(head["include_globs"])):
-            flag(glob, "include glob removed (narrows what is measured)")
-    for glob in sorted(set(head.get("exclude_globs", [])) - set(base.get("exclude_globs", []))):
-        flag(glob, "exclude glob added (removes code from the denominator)")
+    if base:
+        for path in sorted(files):
+            if _in_scope(base, path) and not _in_scope(head, path):
+                flag(path, "left the measured scope")
     base_debt = base.get("per_file_line_min_percent", {})
     for path, value in sorted(head.get("per_file_line_min_percent", {}).items()):
         if path not in base_debt:
@@ -91,3 +98,8 @@ def suppression(base: str, crate_dir: str, repo_root: Path) -> list[Finding]:
     if after > before:
         return [Finding("ratchet", "-", crate_dir, f"coverage-suppression markers {before} -> {after}")]
     return []
+
+
+def crate_files(crate_dir: str, repo_root: Path) -> list[str]:
+    listed = _git(repo_root, "ls-files", "--", crate_dir)
+    return listed.stdout.split()

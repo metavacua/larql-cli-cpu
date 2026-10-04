@@ -30,7 +30,8 @@ def run_check(root: Path, cells_dir: Path, crate_dir: str, base: str | None):
     added = diff.added_lines(base, crate_dir, root) if base else None
     findings = checks.run_all(cells, policy, added)
     if base:
-        findings += ratchet.compare_policies(ratchet.base_policy(base, policy_rel, root), raw)
+        findings += ratchet.compare_policies(
+            ratchet.base_policy(base, policy_rel, root), raw, ratchet.crate_files(crate_dir, root))
         findings += ratchet.suppression(base, crate_dir, root)
     return cells, findings, policy
 

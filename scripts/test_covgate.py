@@ -189,18 +189,26 @@ class Ratchet(unittest.TestCase):
             "total_line_min_percent": 90, "per_file_line_min_percent": {"f": 80},
             "gate": {"trait_line_min_percent": 90, "mutation_confidence": 0.95}}
 
+    files = ["a/1.rs", "a/2.rs", "b/3.rs", "x", "y"]
+
     def test_every_loosening_is_named(self):
         head = {"include_globs": ["b/*"], "exclude_globs": ["x", "y"], "default_line_min_percent": 89,
                 "total_line_min_percent": 90, "per_file_line_min_percent": {"f": 70, "g": 50},
                 "gate": {"trait_line_min_percent": 89}}
-        subjects = sorted(f.subject for f in ratchet.compare_policies(self.base, head))
-        self.assertEqual(subjects, ["a/*", "default_line_min_percent", "f", "g", "trait_line_min_percent", "y"])
+        subjects = sorted(f.subject for f in ratchet.compare_policies(self.base, head, self.files))
+        self.assertEqual(subjects, ["a/1.rs", "a/2.rs", "default_line_min_percent", "f", "g", "trait_line_min_percent"])
+
+    def test_scope_is_judged_on_real_files_not_glob_text(self):
+        # Replacing a narrow glob with a wider one is a widening, even
+        # though the narrow glob's text disappears.
+        head = {**self.base, "include_globs": ["*"], "exclude_globs": ["x"]}
+        self.assertEqual(ratchet.compare_policies(self.base, head, self.files), [])
 
     def test_tightening_and_widening_pass(self):
         head = {"include_globs": [], "exclude_globs": [], "default_line_min_percent": 95,
                 "total_line_min_percent": 92, "per_file_line_min_percent": {},
                 "gate": {"trait_line_min_percent": 91}}
-        self.assertEqual(ratchet.compare_policies(self.base, head), [])
+        self.assertEqual(ratchet.compare_policies(self.base, head, self.files), [])
 
     def test_suppression_markers_are_counted(self):
         text = "#[coverage(off)]\n#[cfg(not(coverage))]\n#[cfg_attr(coverage, x)]\nlet coverage = 1;"
