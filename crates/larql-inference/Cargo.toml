@@ -77,8 +77,9 @@ futures = "0.3"
 # the 36.x line. Staying in 36.x rather than jumping to the 48/49 series
 # the advisories also accept, since that is a much larger version jump
 # than a security patch bump warrants.
-wasmtime = { version = "36.0.16", default-features = false, features = ["cranelift", "runtime"] }
-wasmtime-wasi = "36.0.16"
+# wasmtime-wasi >=36.0.17: RUSTSEC-2026-0321 / -0322 / -0323.
+wasmtime = { version = "36.0.17", default-features = false, features = ["cranelift", "runtime"] }
+wasmtime-wasi = "36.0.17"
 anyhow = "1"
 
 

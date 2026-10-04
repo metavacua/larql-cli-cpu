@@ -427,7 +427,14 @@ pub const METADATA_LEAF_KEYS: &[&str] = &[
 /// (`id2label.0 = "LABEL_0"`), whose leaves are numbered and so cannot be
 /// named in [`METADATA_LEAF_KEYS`]. Only listed as a whole because nothing
 /// under them can move a forward pass.
-pub const METADATA_CONTAINER_KEYS: &[&str] = &["id2label", "label2id"];
+///
+/// `transformers.js_config` (a literal dotted key, as shipped in
+/// ONNX-ready checkpoints such as SmolLM2-Instruct) is a hint to the
+/// JavaScript runtime — `kv_cache_dtype.{fp16,q4f16}` picks the dtype
+/// that runtime allocates its cache in. Its leaves (`fp16`, `q4f16`) are
+/// dtype names, too generic to register by leaf: scoping by container
+/// keeps a `fp16` anywhere else judged on its own.
+pub const METADATA_CONTAINER_KEYS: &[&str] = &["id2label", "label2id", "transformers.js_config"];
 
 /// Config fields that declare a cross-component interface. The one known
 /// occupant is the DFlash-style drafter contract: `target_layer_ids` names

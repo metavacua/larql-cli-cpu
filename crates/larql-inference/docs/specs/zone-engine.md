@@ -551,7 +551,7 @@ Three levels, mirroring State Policy §6 and LayerEngine §8:
 - [`markov-residual-engine.md`](./markov-residual-engine.md) §14 —
   the engine WALK zones must use when PREDICT/CACHE zones are
   present in the same ZonePolicy.
-- [`compiled-ffn.md`](./compiled-ffn.md) — *to be written.* The
+- `compiled-ffn.md` — *to be written; no file yet.* The
   CompiledLookup engine spec; needs a working design before any
   CACHE-like LayerEngine constituent (currently aspirational; cf.
   LayerEngine v0.4 §7.1).

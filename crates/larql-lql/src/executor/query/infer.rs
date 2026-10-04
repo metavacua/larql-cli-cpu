@@ -85,14 +85,7 @@ impl Session {
         // Vindex backend: walk FFN with optional dense comparison
         let (path, config, patched) = self.require_vindex()?;
 
-        if !config.has_model_weights {
-            return Err(LqlError::Execution(format!(
-                "INFER requires model weights. This vindex was built without --include-weights.\n\
-                 Rebuild: EXTRACT MODEL \"{}\" INTO \"{}\" WITH INFERENCE",
-                config.model,
-                path.display(),
-            )));
-        }
+        Self::require_local_ffn("INFER", path, config)?;
 
         let mut cb = larql_vindex::SilentLoadCallbacks;
         let tokenizer = larql_vindex::load_vindex_tokenizer(path)

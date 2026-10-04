@@ -119,7 +119,7 @@ impl Session {
                     .saturating_sub(1)
                     .min(config.num_layers.saturating_sub(1))
             };
-            has_weights = config.has_model_weights;
+            has_weights = config.has_local_ffn_weights();
         }
 
         // ── Phase 2: Capture residual via forward pass ──

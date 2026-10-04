@@ -13,7 +13,7 @@ on:
     paths:
       - 'crates/larql-vindex/**'
       - 'crates/larql-lql/src/executor/lifecycle/compile/into_vindex.rs'
-      - 'crates/larql-compute/src/cpu/ops/q4k_q8k_dot.rs'
+      - 'crates/larql-compute/src/cpu/ops/q4k_q8k_dot/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'Makefile'
@@ -23,7 +23,7 @@ on:
     paths:
       - 'crates/larql-vindex/**'
       - 'crates/larql-lql/src/executor/lifecycle/compile/into_vindex.rs'
-      - 'crates/larql-compute/src/cpu/ops/q4k_q8k_dot.rs'
+      - 'crates/larql-compute/src/cpu/ops/q4k_q8k_dot/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'Makefile'
