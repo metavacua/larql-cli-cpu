@@ -166,7 +166,6 @@ These are the release bar. They apply to every crate and to test code as well as
 
 **Gates**
 - **Every file needs ≥90% line coverage**, enforced through each crate's `coverage-policy.json`. Raise debt baselines toward 90. Never ratchet them down.
-- **Run `make ci` (or the per-crate `make larql-<crate>-ci`) before pushing.** A change to a workspace-wide type needs the workspace-wide gates.
 
 ## Key architectural invariants
 
