@@ -21,7 +21,9 @@ carries a per-instance tag, or the second instance would read or cancel the firs
 Run: uv run scripts/test_crate_gate_chain.py
 """
 
+import json
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -156,6 +158,163 @@ class Targets(unittest.TestCase):
         gate = (WORKFLOWS / "crate-gate.yml").read_text()
         self.assertNotIn("std_instead_of", gate)
         self.assertNotIn("--no-default-features", gate)
+
+
+class Selection(unittest.TestCase):
+    """Which cargo targets a crate is gated on: its library, its binary, or both."""
+
+    def test_resolve_classifies_a_crate_as_lib_bin_or_both(self):
+        run = next(s["run"] for s in steps(load()["crate-gate"]) if s.get("id") == "r")
+        jq_filter = re.search(r"jq -r --arg c \"\$crate\" '([^']+)'", run).group(1)
+
+        def targets_of(*kinds):
+            return [{"kind": [k]} for k in kinds]
+
+        packages = {
+            "only-bin": targets_of("bin", "example", "test"),
+            "only-lib": targets_of("lib", "test"),
+            "lib-and-bin": targets_of("lib", "bin", "test"),
+            "cdylib-only": targets_of("cdylib"),
+        }
+        meta = json.dumps({"packages": [{"name": n, "targets": t} for n, t in packages.items()]})
+        for name, expected in (("only-bin", "bin"), ("only-lib", "lib"), ("lib-and-bin", "both")):
+            with self.subTest(name):
+                out = subprocess.run(
+                    ["jq", "-r", "--arg", "c", name, jq_filter],
+                    input=meta, capture_output=True, text=True, check=True,
+                ).stdout.strip()
+                self.assertEqual(out, expected)
+        # `lib` is the only library kind the gate recognises; a crate with none of lib or bin is
+        # treated as a binary, as before, rather than as an unknown.
+        out = subprocess.run(
+            ["jq", "-r", "--arg", "c", "cdylib-only", jq_filter],
+            input=meta, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        self.assertEqual(out, "bin")
+
+    def test_select_follows_kind_and_freestanding(self):
+        expr = load()["crate-gate-chain"]["jobs"]["build"]["env"]["SELECT"]
+        inner = re.fullmatch(r"\$\{\{\s*(.*?)\s*\}\}", expr).group(1)
+        # GitHub's `a && b || c` and Python's `a and b or c` agree on strings that are non-empty.
+        py = (inner.replace("&&", " and ").replace("||", " or ").replace("!", " not ")
+              .replace("inputs.kind", "kind").replace("inputs.freestanding", "freestanding"))
+        wanted = {
+            ("bin", False): "--bins", ("bin", True): "--bins",
+            ("lib", False): "--lib", ("lib", True): "--lib",
+            ("both", False): "--lib --bins", ("both", True): "--lib",
+        }
+        for (kind, freestanding), flags in wanted.items():
+            with self.subTest(kind=kind, freestanding=freestanding):
+                got = eval(py, {"__builtins__": {}}, {"kind": kind, "freestanding": freestanding})
+                self.assertEqual(got, flags)
+        for name, run in ((s["name"], s["run"]) for s in load()["crate-gate-chain"]["jobs"]["build"]["steps"] if "name" in s):
+            if name in ("clippy", "build"):
+                self.assertIn("$SELECT", run)
+
+
+class Inventory(unittest.TestCase):
+    """Standard tools run in the gate: bans are a gate, the rest print raw output and assert nothing."""
+
+    def gate_steps(self, job):
+        return load()["crate-gate"]["jobs"][job]["steps"]
+
+    def chain_steps(self):
+        return load()["crate-gate-chain"]["jobs"]["build"]["steps"]
+
+    def test_inventory_runs_once_per_crate_and_nothing_waits_on_it(self):
+        jobs = load()["crate-gate"]["jobs"]
+        self.assertEqual(needs(jobs["inventory"]), {"resolve"})
+        for name, job in jobs.items():
+            self.assertNotIn("inventory", needs(job), name)
+        self.assertIn("inventory", jobs["inventory"]["name"])
+
+    def test_cargo_deny_bans_check_the_crates_own_graph_and_are_the_only_gate_in_the_job(self):
+        by_name = {s["name"]: s for s in self.gate_steps("inventory") if "name" in s}
+        deny = by_name["cargo-deny bans"]
+        self.assertTrue(deny["uses"].startswith("EmbarkStudios/cargo-deny-action@"))
+        self.assertEqual(deny["with"]["command"], "check bans")
+        self.assertIn("needs.resolve.outputs.crate", deny["with"]["manifest-path"])
+        raw = [n for n in by_name if "no pass/fail" in n]
+        self.assertEqual(len(raw), 2)
+
+    def test_inventory_output_is_raw_never_redirected_or_excused(self):
+        # The raw job log is the evidence: nothing is sent to a file, discarded, or tolerated.
+        workflows = load()
+        for wf, job in (("crate-gate", "inventory"), ("crate-gate-chain", "build")):
+            body = workflows[wf]["jobs"][job]
+            self.assertNotIn("continue-on-error", body)
+            for step in body["steps"]:
+                self.assertNotIn("continue-on-error", step)
+                if "no pass/fail" in step.get("name", ""):
+                    run = step["run"]
+                    for forbidden in ("/dev/null", " > ", " 2>", "| tee", "|| true"):
+                        self.assertNotIn(forbidden, run, step["name"])
+
+    def test_the_graph_inventory_comes_before_clippy_so_a_red_clippy_still_leaves_it(self):
+        names = [s.get("name") for s in self.chain_steps()]
+        graph = "graph inventory (raw; no pass/fail)"
+        self.assertIn(graph, names)
+        self.assertLess(names.index(graph), names.index("clippy"))
+        step = next(s for s in self.chain_steps() if s.get("name") == graph)
+        self.assertIn("rustc --print cfg", step["run"])
+        self.assertIn("cargo tree", step["run"])
+        self.assertIn("inputs.crate", step["env"]["CRATE"])
+        self.assertIn("inputs.target", step["env"]["TARGET"])
+
+    def test_ast_grep_and_actionlint_are_pinned(self):
+        inventory = next(s for s in self.gate_steps("inventory") if s.get("name", "").startswith("interface-layer"))
+        self.assertRegex(inventory["run"], r"ast-grep-cli==\d+\.\d+\.\d+")
+        lint = next(s for s in self.gate_steps("tests") if s.get("name") == "actionlint")
+        self.assertRegex(lint["run"], r"rhysd/actionlint:\d+\.\d+\.\d+")
+        for wf in ("crate-gate.yml", "crate-gate-chain.yml", "lql-strategy-matrix.yml"):
+            self.assertIn(f".github/workflows/{wf}", lint["run"])
+        self.assertIn("-ignore SC2086", lint["run"])
+
+    def test_copy_detection_diffs_against_the_base_branch(self):
+        step = next(s for s in self.gate_steps("inventory") if s.get("name", "").startswith("copy detection"))
+        self.assertIn("--find-copies-harder", step["run"])
+        self.assertIn('origin/$BASE...HEAD', step["run"])
+        inv = load()["crate-gate"]["jobs"]["inventory"]
+        self.assertEqual(inv["env"]["BASE"], "${{ github.base_ref }}")
+        checkout = inv["steps"][0]
+        self.assertEqual(checkout["with"]["fetch-depth"], 0)
+
+
+class Verification(unittest.TestCase):
+    """What the chain verifies per target, in order: clippy, build, every feature, unit tests."""
+
+    def steps(self):
+        return load()["crate-gate-chain"]["jobs"]["build"]["steps"]
+
+    def by_name(self):
+        return {s["name"]: s for s in self.steps() if "name" in s}
+
+    def test_every_feature_is_checked_with_cargo_hack_on_every_target(self):
+        installs = [s for s in self.steps() if str(s.get("uses", "")).startswith("taiki-e/install-action@cargo-hack")]
+        self.assertEqual(len(installs), 1)
+        self.assertNotIn("if", installs[0], "freestanding targets are checked too")
+        hack = self.by_name()["cargo-hack (each feature)"]
+        self.assertNotIn("if", hack)
+        for part in ("cargo hack check", "--each-feature", "--no-dev-deps", "--locked",
+                     "--target ${{ inputs.target }}", "-p ${{ inputs.crate }}", "$SELECT", "$FEATURES"):
+            self.assertIn(part, hack["run"])
+
+    def test_the_order_is_clippy_then_build_then_every_feature_then_unit_tests(self):
+        names = [s.get("name") for s in self.steps()]
+        order = ["clippy", "build", "cargo-hack (each feature)", "test"]
+        self.assertEqual([n for n in names if n in order], order)
+
+    def test_unit_tests_run_only_where_the_harness_exists_and_the_binary_runs_natively(self):
+        step = self.by_name()["test"]
+        self.assertIn("!inputs.freestanding", step["if"])  # the default harness needs std
+        self.assertIn("inputs.emulator == ''", step["if"])  # the lql matrix is the run under QEMU
+
+    def test_unit_tests_are_the_fast_path_not_the_integration_suite(self):
+        run = self.by_name()["test"]["run"]
+        for part in ("cargo test", "--locked", "--target ${{ inputs.target }}", "-p ${{ inputs.crate }}", "$SELECT", "$FEATURES"):
+            self.assertIn(part, run)
+        for forbidden in ("--ignored", "--workspace", "--all-targets", "--tests", "--test "):
+            self.assertNotIn(forbidden, run)
 
 
 class Emulation(unittest.TestCase):
