@@ -20,7 +20,7 @@ Run: uv run scripts/test_workflow_hygiene.py      (or python3 with pyyaml)
 
 import unittest
 
-from test_workflow_triggers import load, triggers
+from workflow_lib import load, triggers
 
 # workflow -> the permissions its workflow-level block must be exactly, and why.
 DEFAULT = {"contents": "read"}

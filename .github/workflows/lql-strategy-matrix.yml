@@ -85,7 +85,7 @@ jobs:
   # Enumerate every leg as JSON → consumed by the matrix via fromJSON. A malformed
   # plan fails here in seconds, before any leg runs.
   plan:
-    runs-on: ${{ inputs.runs_on || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     outputs:
       legs: ${{ steps.gen.outputs.legs }}
     steps:
@@ -446,12 +446,12 @@ jobs:
   aggregate:
     needs: matrix
     if: always()
-    runs-on: ${{ inputs.runs_on || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v4
         with:
-          pattern: "*-${{ env.TAG }}*"
+          pattern: "results-${{ env.TAG }}-*"
           path: artifacts
       - name: Build matrix report
         run: |
@@ -469,12 +469,12 @@ jobs:
   conformance:
     needs: matrix
     if: always()
-    runs-on: ${{ inputs.runs_on || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v4
         with:
-          pattern: "*-${{ env.TAG }}*"
+          pattern: "results-${{ env.TAG }}-*"
           path: artifacts
       - name: Run conformance oracle
         env:
@@ -499,13 +499,18 @@ jobs:
   inventory:
     needs: [matrix, conformance]
     if: always()
-    runs-on: ${{ inputs.runs_on || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v4
         with:
-          pattern: "*-${{ env.TAG }}*"
+          pattern: "results-${{ env.TAG }}-*"
           path: artifacts
+      - uses: actions/download-artifact@v4
+        continue-on-error: true # the script below tolerates a missing verdict
+        with:
+          name: conformance-${{ env.TAG }}
+          path: artifacts/conformance-${{ env.TAG }}
       - name: Tensor-presence + Q8 resolution
         run: |
           python3 scripts/lql_matrix/tensor_presence.py \

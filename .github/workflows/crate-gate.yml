@@ -7,17 +7,17 @@
 # (scripts/test_workflow_triggers.py asserts it).
 #
 #   fmt                      once per crate; a failure ends the run
-#   per target, in parallel  clippy -> cargo build -> lql-strategy-matrix (strict)
+#   per target, in parallel  build job: clippy step, then build step; then lql-strategy-matrix (strict)
 #   cross-target             structural agreement of the lql instances (read-only; no write token)
 #
 # clippy is per target because its lints depend on the cfg set the target selects; fmt is not.
 # A failure at any stage ends that target only. The freestanding Tier 2 without-host-tools
-# targets use --no-default-features and the core/alloc/std lints; the gnu targets use default
-# features. lql runs where the CLI can run: natively on x86_64 and aarch64 Linux, and under
+# targets (freestanding: true) drop default features and add the core/alloc/std lints; the gnu
+# targets use default features. lql runs where the CLI can run: natively on x86_64 and aarch64 Linux, and under
 # QEMU user-mode on riscv64gc-unknown-linux-gnu; the freestanding targets have no OS. The
 # 32-bit riscv ladder i -> im -> imac -> imafc (+M, +A+C, +F) is an elimination: imac is the
-# control that isolates floating point from imafc. imc, riscv64imac and windows-gnu are trimmed. For now only
-# SmolLM2-135M (base and instruct) must pass; the heavier models are off.
+# control that isolates floating point from imafc. imc, riscv64imac and windows-gnu are
+# trimmed. For now only SmolLM2-135M (base and instruct) must pass; the heavier models are off.
 # Order and sharing rules: scripts/test_crate_gate_chain.py.
 name: crate-gate
 
@@ -67,10 +67,8 @@ jobs:
             exit 0
           fi
           meta=$(cargo metadata --no-deps --format-version 1)
-          echo "$meta" | jq -e --arg c "$crate" '.packages[] | select(.name == $c)' > /dev/null \
-            || { echo "::error::$branch names no workspace package '$crate'"; exit 1; }
-          kind=bin
-          echo "$meta" | jq -e --arg c "$crate" '.packages[] | select(.name == $c) | .targets[] | select(.kind | index("lib"))' > /dev/null && kind=lib
+          kind=$(echo "$meta" | jq -r --arg c "$crate" '.packages[] | select(.name == $c) | if any(.targets[]; .kind | index("lib")) then "lib" else "bin" end')
+          [ -n "$kind" ] || { echo "::error::$branch names no workspace package '$crate'"; exit 1; }
           echo "crate=$crate" >> "$GITHUB_OUTPUT"
           echo "kind=$kind" >> "$GITHUB_OUTPUT"
           echo "gating $crate ($kind)"
@@ -93,57 +91,40 @@ jobs:
       fail-fast: false # a red target hides none of the others
       matrix:
         t:
-          - { target: wasm32v1-none, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false, setup: "", emulator: "" }
-          - { target: riscv32i-unknown-none-elf, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false, setup: "", emulator: "" }
-          - { target: riscv32im-unknown-none-elf, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false, setup: "", emulator: "" }
-          - { target: riscv32imac-unknown-none-elf, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false, setup: "", emulator: "" }
-          - { target: riscv32imafc-unknown-none-elf, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false, setup: "", emulator: "" }
-          - { target: riscv64gc-unknown-none-elf, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false, setup: "", emulator: "" }
-          - { target: aarch64-unknown-none, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false, setup: "", emulator: "" }
-          - { target: x86_64-unknown-none, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false, setup: "", emulator: "" }
-          - { target: aarch64-unknown-uefi, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false, setup: "", emulator: "" }
-          - { target: x86_64-unknown-uefi, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false, setup: "", emulator: "" }
-          - { target: x86_64-unknown-linux-gnu, runs_on: ubuntu-latest, features: "", clippy_args: "", lql: true, setup: "", emulator: "" }
-          - { target: aarch64-unknown-linux-gnu, runs_on: ubuntu-24.04-arm, features: "", clippy_args: "", lql: true, setup: "", emulator: "" }
-          - { target: riscv64gc-unknown-linux-gnu, runs_on: ubuntu-latest, features: "", clippy_args: "", lql: true, setup: scripts/ci/riscv64gc_qemu.sh, emulator: "qemu-riscv64-static -cpu rv64 -L /usr/riscv64-linux-gnu" }
+          - { target: wasm32v1-none, freestanding: true }
+          - { target: riscv32i-unknown-none-elf, freestanding: true }
+          - { target: riscv32im-unknown-none-elf, freestanding: true }
+          - { target: riscv32imac-unknown-none-elf, freestanding: true }
+          - { target: riscv32imafc-unknown-none-elf, freestanding: true }
+          - { target: riscv64gc-unknown-none-elf, freestanding: true }
+          - { target: aarch64-unknown-none, freestanding: true }
+          - { target: x86_64-unknown-none, freestanding: true }
+          - { target: aarch64-unknown-uefi, freestanding: true }
+          - { target: x86_64-unknown-uefi, freestanding: true }
+          - { target: x86_64-unknown-linux-gnu, runs_on: ubuntu-latest, lql: true }
+          - { target: aarch64-unknown-linux-gnu, runs_on: ubuntu-24.04-arm, lql: true }
+          - { target: riscv64gc-unknown-linux-gnu, runs_on: ubuntu-latest, lql: true, setup: scripts/ci/riscv64gc_qemu.sh, emulator: "qemu-riscv64-static -cpu rv64 -L /usr/riscv64-linux-gnu" }
     uses: ./.github/workflows/crate-gate-chain.yml
     with:
       crate: ${{ needs.resolve.outputs.crate }}
       kind: ${{ needs.resolve.outputs.kind }}
       target: ${{ matrix.t.target }}
-      runs_on: ${{ matrix.t.runs_on }}
-      features: ${{ matrix.t.features }}
-      clippy_args: ${{ matrix.t.clippy_args }}
-      lql: ${{ matrix.t.lql }}
-      setup: ${{ matrix.t.setup }}
-      emulator: ${{ matrix.t.emulator }}
+      runs_on: ${{ matrix.t.runs_on || 'ubuntu-latest' }}
+      freestanding: ${{ matrix.t.freestanding || false }}
+      lql: ${{ matrix.t.lql || false }}
+      setup: ${{ matrix.t.setup || '' }}
+      emulator: ${{ matrix.t.emulator || '' }}
     secrets: inherit
 
-  # Structural agreement between targets: the same crate, run through the same SmolLM2-135M
-  # legs on x86_64, aarch64 and riscv64 (QEMU), must agree on mechanically decidable facts
-  # (scripts/lql_matrix/cross_target.py). It judges no model answer: a disagreement means
-  # something target-specific broke.
-  #   COMPARED: legs present; produce outcome; descriptor family/quant/generation/produced/
-  #     has_model_weights; STATS feature_count; per cell presence, bucket, exit_code and the
-  #     in-band err_signal (only for cells outside FP_DEPENDENT_CATS, whose Error verdict can
-  #     legitimately flip on float rounding).
-  #   NOT COMPARED: stdout/stderr and err_line text, floats, durations, and any cell or
-  #     produce that timed out or was hard-killed (exit 124/137), which depends on speed.
-  #   --slow-tag riscv64gc-unknown-linux-gnu is the QEMU-emulated target and the ONLY one
-  #     excused: there a timeout/124/137 or a missing leg or cell is inconclusive. On a native
-  #     target (x86_64, aarch64) a timeout where a peer finished the same cell, or a missing
-  #     leg, is a conclusive disagreement. It is explicit here; the script infers nothing.
-  # This needs NO write permission, so none is granted (workflow-level contents: read only):
-  #   - artifacts inside one run travel on the Actions runtime token, which upload/download-
-  #     artifact use directly; that is not a GITHUB_TOKEN scope, so contents: read suffices;
-  #   - the step summary is a local file ($GITHUB_STEP_SUMMARY) the runner publishes itself;
-  #   - the verdict is the exit code. No PR comment, check run or commit status is written.
-  # Runs even when a chain failed (!cancelled()), so a red freestanding target hides nothing;
-  # it compares whichever lql instances uploaded artifacts.
+  # Structural agreement of the lql instances (x86_64, aarch64, riscv64 under QEMU); it judges
+  # no model answer. Read-only: artifacts use the runtime token and the summary is a file, so
+  # no write token. !cancelled() so a red target hides nothing; the chain-not-skipped clause
+  # keeps a failed fmt (chain skipped, no artifacts) from reporting every target missing.
+  # Authoritative docs: scripts/lql_matrix/cross_target.py.
   cross-target:
     name: cross-target
     needs: [resolve, chain]
-    if: ${{ !cancelled() && needs.resolve.outputs.crate != '' }}
+    if: ${{ !cancelled() && needs.resolve.outputs.crate != '' && needs.chain.result != 'skipped' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

@@ -13,8 +13,8 @@ COMPARED, per leg, across instances:
   (c) descriptor fields: family, observed_quant, generation, produced, has_model_weights
   (d) feature_count, the integer from the STATS banner
   (e) per cell id: presence, bucket, exit_code, and err_signal (the in-band 'Error: ...' flag;
-      'larql lql' exits 0 on in-band errors, so this is the dominant failure shape) -- but
-      err_signal ONLY for cells whose 'cat' is not in FP_DEPENDENT_CATS
+      'larql lql' exits 0 on in-band errors, so this is the dominant failure shape), the
+      last except for FP_DEPENDENT_CATS cells (below)
   (f) completion: a cell or produce that timed out / was hard-killed on one instance while a
       peer finished it normally (see the slow-tag rule)
 
@@ -24,9 +24,9 @@ verdict can flip on float rounding or convergence). Which model answer is right 
 
 SPEED-DEPENDENT OUTCOMES. A cell or produce whose exit_code is 124 (timeout) or 137
 (SIGKILL after 'timeout --kill-after') or whose bucket is 'timeout' depends on speed or
-memory, not on larql's logic, so it is never compared as a crash/bucket/exit_code fact and
-its output (feature_count, descriptor, cells of that leg) is not used. inv_no_crash in
-conformance.py still reports crashes per instance, so nothing is lost.
+memory, not on larql's logic, so it is never compared as a crash/bucket/exit_code fact (what
+else it excludes is under FEATURE_COUNT/DESCRIPTOR). inv_no_crash in conformance.py still
+reports crashes per instance, so nothing is lost.
 
 EXPECTED TAGS (--expect-tag TAG, repeatable). Instances are otherwise inferred from the artifacts
 that exist, so a target whose whole lql run uploaded nothing would be invisible. An expected tag
@@ -137,24 +137,15 @@ def load_instances(results_glob):
 
 def _speed_dependent(row):
     """A timed-out or hard-killed cell/produce: its outcome depends on speed or memory."""
-    row = row or {}
     return row.get("bucket") == "timeout" or row.get("exit_code") in SPEED_EXIT_CODES
 
 
-_ABSENT = object()
-
-
-def _show(v):
-    return "(absent)" if v is _ABSENT else v
-
-
 def _finding(leg, fact, status, values):
-    return {"leg": leg, "fact": fact, "status": status,
-            "values": {t: _show(v) for t, v in values.items()}}
+    return {"leg": leg, "fact": fact, "status": status, "values": dict(values)}
 
 
 def _distinct(values):
-    return {json.dumps(_show(v), sort_keys=True, default=str) for v in values.values()}
+    return {json.dumps(v, sort_keys=True, default=str) for v in values.values()}
 
 
 def _decide(leg, fact, values, speed=(), slow=(), excused=()):
@@ -233,22 +224,16 @@ def compare(instances, slow_tags=(), expect_tags=()):
     report = {"instances": tags, "slow_tags": sorted(slow), "expected_tags": sorted(set(expect_tags)),
               "findings": [], "disagreements": 0, "inconclusive": 0, "compared": len(tags) >= 2}
     out = report["findings"]
-    # Instances are otherwise inferred from the artifacts that exist, so a target whose whole lql
-    # run uploaded nothing would be invisible. An expected tag with no artifacts is workflow
-    # breakage on that target, excused only when the target is slow (emulated).
     for t in sorted(set(expect_tags) - set(tags)):
         out.append(_finding("(instance)", "instance present", "inconclusive" if t in slow else "disagree",
-                            {x: (x in instances or x != t) for x in sorted(set(expect_tags) | set(tags))}))
-    if len(tags) < 2:
-        report["disagreements"] = sum(f["status"] == "disagree" for f in out)
-        report["inconclusive"] = sum(f["status"] == "inconclusive" for f in out)
-        return report
-    for name in sorted({n for legs in instances.values() for n in legs}):
-        present = {t: (name in instances[t]) for t in tags}
-        out.append(_decide_presence(name, "leg present", present, slow))
-        legs = {t: instances[t][name] for t in tags if present[t]}
-        if len(legs) >= 2:
-            _compare_leg(name, legs, slow, out)
+                            {x: x in instances for x in sorted(set(expect_tags) | set(tags))}))
+    if len(tags) >= 2:
+        for name in sorted({n for legs in instances.values() for n in legs}):
+            present = {t: (name in instances[t]) for t in tags}
+            out.append(_decide_presence(name, "leg present", present, slow))
+            legs = {t: instances[t][name] for t in tags if present[t]}
+            if len(legs) >= 2:
+                _compare_leg(name, legs, slow, out)
     report["disagreements"] = sum(f["status"] == "disagree" for f in out)
     report["inconclusive"] = sum(f["status"] == "inconclusive" for f in out)
     return report
@@ -256,7 +241,7 @@ def compare(instances, slow_tags=(), expect_tags=()):
 
 def render(report):
     L = ["# LQL Matrix -- Cross-target structural comparison", ""]
-    cols = sorted(set(report["instances"]) | set(report.get("expected_tags", [])))
+    cols = sorted(set(report["instances"]) | set(report["expected_tags"]))
     if not report["compared"] and not report["findings"]:
         n = len(report["instances"])
         L += [f"Nothing to compare: {n} instance(s) found "
@@ -264,7 +249,7 @@ def render(report):
         return "\n".join(L)
     agree = sum(f["status"] == "agree" for f in report["findings"])
     L += [f"Instances: {', '.join(f'`{t}`' for t in report['instances'])}"
-          + (f" (expected: {', '.join(f'`{t}`' for t in report['expected_tags'])})" if report.get("expected_tags") else ""), "",
+          + (f" (expected: {', '.join(f'`{t}`' for t in report['expected_tags'])})" if report["expected_tags"] else ""), "",
           f"Agree: {agree} · Disagree: {report['disagreements']} · "
           f"Inconclusive (speed-dependent): {report['inconclusive']}", "",
           "Compared: legs present, produce outcome, descriptor family/quant/generation/produced/"

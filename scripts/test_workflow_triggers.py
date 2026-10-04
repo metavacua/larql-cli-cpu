@@ -17,83 +17,15 @@ paths-ignore, pull_request types) well enough to assert that, from the workflow 
 Run: uv run scripts/test_workflow_triggers.py      (or: python3 -m unittest, with pyyaml)
 """
 
-import re
 import unittest
-from pathlib import Path
 
-import yaml
+from workflow_lib import glob, load, triggers, woken
 
-WORKFLOWS = Path(__file__).resolve().parent.parent / ".github" / "workflows"
 GATE_BASE = "experiment/crate-gate"
 CRATE_BRANCH = "experiment/crate/larql-core"
 CRATE_FILE = "crates/larql-core/src/lib.rs"
 # One gate workflow: fmt once per crate, then every target's chain in the same run.
-GATES = {"crate-gate"}
-
-
-def load():
-    out = {}
-    for path in sorted(WORKFLOWS.glob("*.yml")):
-        out[path.stem] = yaml.safe_load(path.read_text(encoding="utf-8"))
-    return out
-
-
-def glob(pattern):
-    """GitHub filter pattern -> regex: `**` crosses `/`, `*` and `?` do not."""
-    rx, i = "", 0
-    while i < len(pattern):
-        if pattern.startswith("**", i):
-            rx, i = rx + ".*", i + 2
-        elif pattern[i] == "*":
-            rx, i = rx + "[^/]*", i + 1
-        elif pattern[i] == "?":
-            rx, i = rx + "[^/]", i + 1
-        else:
-            rx, i = rx + re.escape(pattern[i]), i + 1
-    return re.compile(rx + r"\Z")
-
-
-def selected(patterns, value):
-    """Ordered include/`!`exclude evaluation, as GitHub documents it."""
-    hit = False
-    for p in patterns:
-        if p.startswith("!"):
-            if glob(p[1:]).match(value):
-                hit = False
-        elif glob(p).match(value):
-            hit = True
-    return hit
-
-
-def triggers(workflow, event, ref, changed):
-    """Does `event` on branch `ref` (the base branch, for pull_request) start this workflow?"""
-    on = workflow.get(True, workflow.get("on"))
-    if isinstance(on, str):
-        on = {on: None}
-    elif isinstance(on, list):
-        on = {e: None for e in on}
-    if event not in on:
-        return False
-    cfg = on[event] or {}
-    if event == "pull_request" and "types" in cfg and "opened" not in cfg["types"]:
-        return False
-    if "branches" in cfg and not selected(cfg["branches"], ref):
-        return False
-    if "branches" not in cfg and "tags" in cfg and "branches-ignore" not in cfg:
-        return False
-    if any(glob(p).match(ref) for p in cfg.get("branches-ignore", [])):
-        return False
-    if changed is None:  # ignore path filters: "could this ever fire on that branch?"
-        return True
-    if "paths" in cfg:
-        return any(selected(cfg["paths"], f) for f in changed)
-    if "paths-ignore" in cfg:
-        return any(not any(glob(p).match(f) for p in cfg["paths-ignore"]) for f in changed)
-    return True
-
-
-def woken(event, ref, changed):
-    return {n for n, w in load().items() if triggers(w, event, ref, changed)}
+GATE = "crate-gate"
 
 
 class CrateBranchTriggers(unittest.TestCase):
@@ -105,18 +37,22 @@ class CrateBranchTriggers(unittest.TestCase):
     def test_crate_pr_into_the_gate_base_wakes_only_the_gates(self):
         for changed in ([], [CRATE_FILE], ["Cargo.lock", ".github/workflows/crate-gate.yml"]):
             with self.subTest(changed=changed):
-                self.assertEqual(woken("pull_request", GATE_BASE, changed), GATES)
+                self.assertEqual(woken("pull_request", GATE_BASE, changed), {GATE})
 
     def test_ordinary_pr_into_main_still_wakes_the_usual_workflows(self):
         got = woken("pull_request", "main", [CRATE_FILE, "Cargo.lock"])
-        for expected in ("commit-messages", "quality", "larql-core", *GATES):
+        for expected in ("commit-messages", "quality", "larql-core", GATE):
             self.assertIn(expected, got)
 
     def test_the_gates_are_pull_request_only(self):
         # A push trigger as well would start the heavy strict matrix twice per commit.
-        for name in GATES:
-            with self.subTest(gate=name):
-                self.assertFalse(triggers(load()[name], "push", CRATE_BRANCH, [CRATE_FILE]))
+        self.assertFalse(triggers(load()[GATE], "push", CRATE_BRANCH, [CRATE_FILE]))
+
+    def test_a_filter_character_the_model_does_not_implement_fails_loudly(self):
+        for pattern in ("a?b", "a+b", "[ab]", "a\\b"):
+            with self.subTest(pattern=pattern):
+                with self.assertRaises(ValueError):
+                    glob(pattern)
 
 
 if __name__ == "__main__":

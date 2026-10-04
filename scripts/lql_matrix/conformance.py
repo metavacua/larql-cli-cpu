@@ -331,16 +331,17 @@ def root_causes(violations):
 def run(results_glob, out_md, out_json, strict):
     legs = load(results_glob)
     violations = [v for inv in INVARIANTS for v in inv(legs)]
+    rcs = root_causes(violations)
     Path(out_json).write_text(json.dumps(
-        {"violations": [v.__dict__ for v in violations],
-         "root_causes": root_causes(violations)}, indent=2), encoding="utf-8")
-    Path(out_md).write_text(render(legs, violations), encoding="utf-8")
+        {"violations": [v.__dict__ for v in violations], "root_causes": rcs},
+        indent=2), encoding="utf-8")
+    Path(out_md).write_text(render(legs, violations, rcs), encoding="utf-8")
     print(f"conformance: {len(violations)} violation(s) across {len(legs)} legs "
           f"(strict={strict})")
     return 1 if (strict and violations) else 0
 
 
-def render(legs, violations):
+def render(legs, violations, rcs=None):
     L = ["# LQL Matrix — Conformance", "",
          f"Legs: {len(legs)} · Violations: {len(violations)}", ""]
     if violations:
@@ -350,7 +351,8 @@ def render(legs, violations):
     else:
         L.append("No invariant violations.")
     L += ["", "## Root causes", ""]
-    rcs = root_causes(violations)
+    if rcs is None:
+        rcs = root_causes(violations)
     if rcs:
         L += ["| invariant | violations | legs | cells | example | first legs |",
               "|---|---|---|---|---|---|"]

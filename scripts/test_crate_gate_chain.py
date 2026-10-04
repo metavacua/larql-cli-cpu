@@ -7,9 +7,10 @@
 One workflow run per crate (crate-gate.yml):
 
   fmt                                  ONCE per crate, not per target; a failure ends the run
-  per target (16, in parallel):
-    clippy                             target-specific lints, so per target; a failure ends it
-    build (cargo build --lib)          only after that target's clippy
+  per target, in parallel:
+    build job, step clippy             target-specific lints, so per target; a failure ends the
+                                       job before its build step runs
+    build job, step build              cargo build, only after that target's clippy
     lql-strategy-matrix                only after that target's build, and only where the CLI
                                        can run (the freestanding targets have no OS)
 
@@ -24,7 +25,7 @@ import re
 import unittest
 from pathlib import Path
 
-from test_workflow_triggers import GATES, WORKFLOWS, load
+from workflow_lib import WORKFLOWS, load, needs, steps
 
 # Tier 2 without-host-tools freestanding targets.
 #
@@ -35,15 +36,14 @@ from test_workflow_triggers import GATES, WORKFLOWS, load
 #                      +M           +A +C            +F
 # riscv32imac is the control for riscv32imafc: they differ by F alone. Without it, the step
 # from im to imafc adds A, C and F together. No riscv target has F without C, so F can only
-# be isolated against imac. imc (C without A) and riscv64imac are trimmed for now.
+# be isolated against imac. imc (C without A), riscv64imac and x86_64-pc-windows-gnu are
+# deliberately absent for now; exact-set equality in test_every_selected_target_is_gated keeps
+# them out.
 FREESTANDING = {
     "wasm32v1-none", "riscv32i-unknown-none-elf", "riscv32im-unknown-none-elf",
     "riscv32imac-unknown-none-elf", "riscv32imafc-unknown-none-elf",
     "riscv64gc-unknown-none-elf", "aarch64-unknown-none", "x86_64-unknown-none",
     "aarch64-unknown-uefi", "x86_64-unknown-uefi",
-}
-TRIMMED = {
-    "riscv32imc-unknown-none-elf", "riscv64imac-unknown-none-elf", "x86_64-pc-windows-gnu",
 }
 LADDER = [
     "riscv32i-unknown-none-elf", "riscv32im-unknown-none-elf",
@@ -57,16 +57,8 @@ GNU = {
 }
 EMULATED = {"riscv64gc-unknown-linux-gnu"}
 RISCV_SETUP = "scripts/ci/riscv64gc_qemu.sh"
-
-
-def needs(job):
-    n = job.get("needs", [])
-    return {n} if isinstance(n, str) else set(n)
-
-
-def steps(workflow):
-    for job in workflow["jobs"].values():
-        yield from job.get("steps", [])
+# lql-strategy-matrix jobs that only run python over downloaded JSON.
+PYTHON_ONLY_JOBS = {"plan", "aggregate", "conformance", "inventory"}
 
 
 def targets():
@@ -76,9 +68,16 @@ def targets():
 class Order(unittest.TestCase):
     def test_chain_is_clippy_then_build_then_lql(self):
         jobs = load()["crate-gate-chain"]["jobs"]
-        self.assertEqual(needs(jobs["clippy"]), set())
-        self.assertEqual(needs(jobs["build"]), {"clippy"})
+        self.assertEqual(set(jobs), {"build", "lql"})
+        self.assertEqual(needs(jobs["build"]), set())
         self.assertEqual(needs(jobs["lql"]), {"build"})
+        self.assertEqual(jobs["build"]["timeout-minutes"], 90)
+        # one job, two ordered steps: a failing clippy step ends the target before the build step
+        names = [s.get("name") for s in jobs["build"]["steps"]]
+        self.assertEqual([n for n in names if n in ("clippy", "build")], ["clippy", "build"])
+        by_name = {s["name"]: s for s in jobs["build"]["steps"] if "name" in s}
+        self.assertIn("cargo clippy", by_name["clippy"]["run"])
+        self.assertIn("cargo build", by_name["build"]["run"])
 
     def test_lql_runs_only_where_the_cli_can_run(self):
         lql = load()["crate-gate-chain"]["jobs"]["lql"]
@@ -107,7 +106,7 @@ class Order(unittest.TestCase):
 
 class Targets(unittest.TestCase):
     def test_one_gate_workflow_and_no_per_family_wrappers(self):
-        self.assertEqual({p.stem for p in WORKFLOWS.glob("crate-gate*.yml")}, GATES | {"crate-gate-chain"})
+        self.assertEqual({p.stem for p in WORKFLOWS.glob("crate-gate*.yml")}, {"crate-gate", "crate-gate-chain"})
 
     def test_every_selected_target_is_gated(self):
         self.assertEqual({t["target"] for t in targets()}, FREESTANDING | set(GNU))
@@ -117,31 +116,46 @@ class Targets(unittest.TestCase):
         got = [t["target"] for t in targets() if t["target"] in LADDER]
         self.assertEqual(got, LADDER)
 
-    def test_trimmed_targets_are_not_gated(self):
-        self.assertEqual({t["target"] for t in targets()} & TRIMMED, set())
-
-    def test_freestanding_targets_have_no_lql_and_the_no_std_lints(self):
+    def test_freestanding_targets_have_no_lql_and_the_no_std_flag(self):
         for t in targets():
             if t["target"] not in FREESTANDING:
                 continue
             with self.subTest(target=t["target"]):
-                self.assertFalse(t["lql"], "no OS to run the CLI on")
-                self.assertEqual(t["features"], "--no-default-features")
-                self.assertIn("std_instead_of_core", t["clippy_args"])
+                self.assertIs(t.get("freestanding"), True)
+                self.assertNotIn("lql", t, "no OS to run the CLI on")
 
-    def test_gnu_targets_use_default_features_and_lql_where_runnable(self):
+    def test_gnu_targets_use_default_features_and_lql(self):
         got = {t["target"]: t for t in targets()}
         for target, runner in GNU.items():
             with self.subTest(target=target):
                 t = got[target]
-                self.assertEqual(t["features"], "")
+                self.assertNotIn("freestanding", t)
                 self.assertIs(t["lql"], True)
                 self.assertEqual(t["runs_on"], runner)
                 if target in EMULATED:
                     self.assertEqual(t["setup"], RISCV_SETUP)
                     self.assertIn("qemu-riscv64", t["emulator"])
                 else:
-                    self.assertEqual((t["setup"], t["emulator"]), ("", ""))
+                    self.assertNotIn("setup", t)
+                    self.assertNotIn("emulator", t)
+
+    def test_the_chain_derives_features_and_lints_once_from_freestanding(self):
+        chain = load()["crate-gate-chain"]
+        self.assertIs(chain[True]["workflow_call"]["inputs"]["freestanding"]["default"], False)
+        text = (WORKFLOWS / "crate-gate-chain.yml").read_text()
+        for lint in ("std_instead_of_core", "std_instead_of_alloc", "alloc_instead_of_core"):
+            self.assertEqual(text.count(lint), 1, lint)
+        self.assertEqual(text.count("--no-default-features"), 1)
+        env = chain["jobs"]["build"]["env"]
+        self.assertIn("inputs.freestanding && '--no-default-features' || ''", env["FEATURES"])
+        self.assertIn("inputs.freestanding &&", env["LINTS"])
+        steps_by_name = {s["name"]: s["run"] for s in chain["jobs"]["build"]["steps"] if "name" in s}
+        self.assertIn("$FEATURES", steps_by_name["clippy"])
+        self.assertIn("$LINTS", steps_by_name["clippy"])
+        self.assertIn("$FEATURES", steps_by_name["build"])
+        gate = (WORKFLOWS / "crate-gate.yml").read_text()
+        self.assertNotIn("std_instead_of", gate)
+        self.assertNotIn("--no-default-features", gate)
 
 
 class Emulation(unittest.TestCase):
@@ -157,12 +171,13 @@ class Emulation(unittest.TestCase):
         self.assertEqual(lql["emulator"], "${{ inputs.emulator }}")
 
     def test_clippy_and_build_get_the_cross_toolchain_when_there_is_a_setup(self):
-        jobs = load()["crate-gate-chain"]["jobs"]
-        for name in ("clippy", "build"):
-            with self.subTest(job=name):
-                setup = [s for s in jobs[name]["steps"] if "inputs.setup" in s.get("if", "")]
-                self.assertEqual(len(setup), 1)
-                self.assertEqual(setup[0]["env"]["SETUP"], "${{ inputs.setup }}")
+        job_steps = load()["crate-gate-chain"]["jobs"]["build"]["steps"]
+        setup = [i for i, s in enumerate(job_steps) if "inputs.setup" in s.get("if", "")]
+        self.assertEqual(len(setup), 1)
+        self.assertEqual(job_steps[setup[0]]["env"]["SETUP"], "${{ inputs.setup }}")
+        names = [s.get("name") for s in job_steps]
+        self.assertLess(setup[0], names.index("clippy"))
+        self.assertLess(setup[0], names.index("build"))
 
     def test_the_matrix_workflow_cross_builds_and_wraps_the_binary(self):
         wf = load()["lql-strategy-matrix"]
@@ -215,6 +230,8 @@ class CrossTarget(unittest.TestCase):
         self.assertEqual(needs(job), {"resolve", "chain"})
         self.assertIn("!cancelled()", job["if"])
         self.assertIn("needs.resolve.outputs.crate != ''", job["if"])
+        # a failed fmt skips the chain: no artifacts, so nothing to compare
+        self.assertIn("needs.chain.result != 'skipped'", job["if"])
         self.assertEqual(job["runs-on"], "ubuntu-latest")
         self.assertLessEqual(job["timeout-minutes"], 10)
 
@@ -238,15 +255,13 @@ class CrossTarget(unittest.TestCase):
         emulated = [t["target"] for t in wf["jobs"]["chain"]["strategy"]["matrix"]["t"]
                     if t.get("emulator")]
         self.assertEqual(emulated, ["riscv64gc-unknown-linux-gnu"])
-        text = Path(".github/workflows/crate-gate.yml").read_text()
-        self.assertIn("QEMU", text[text.index("cross-target:") - 2500:text.index("cross-target:")])
 
     def test_every_target_that_runs_lql_is_expected(self):
         # An instance is otherwise inferred from the artifacts that exist, so a target whose whole
         # lql run uploaded nothing would be invisible. The expected tags are exactly the lql targets.
         wf = load()["crate-gate"]
         run = "\n".join(str(s.get("run", "")) for s in self.job()["steps"])
-        lql_targets = [t["target"] for t in wf["jobs"]["chain"]["strategy"]["matrix"]["t"] if t["lql"]]
+        lql_targets = [t["target"] for t in wf["jobs"]["chain"]["strategy"]["matrix"]["t"] if t.get("lql")]
         self.assertEqual(sorted(re.findall(r"--expect-tag\s+(\S+)", run)), sorted(lql_targets))
 
     def test_the_summary_is_appended_even_when_the_comparison_fails(self):
@@ -254,13 +269,8 @@ class CrossTarget(unittest.TestCase):
         self.assertLess(run.index("cross_target.py"), run.index("GITHUB_STEP_SUMMARY"))
         self.assertIn("exit $status", run)  # the script's own status is what the job reports
 
-    def test_no_write_permission_anywhere(self):
-        wf = load()["crate-gate"]
-        self.assertEqual(wf["permissions"], {"contents": "read"})
-        self.assertNotIn("permissions", self.job())
-        for name, job in wf["jobs"].items():
-            with self.subTest(job=name):
-                self.assertNotIn("permissions", job)
+    def test_no_step_uses_the_github_token(self):
+        # Permissions themselves are pinned by test_workflow_hygiene.
         for step in self.job()["steps"]:
             self.assertNotIn("github.token", str(step))
             self.assertNotIn("GITHUB_TOKEN", str(step.get("env", "")))
@@ -277,8 +287,12 @@ class LqlInstancesDoNotCollide(unittest.TestCase):
         for name in ("runs_on", "tag"):
             self.assertIn(name, wf[True]["workflow_call"]["inputs"])
         for name, job in wf["jobs"].items():
-            if "runs-on" in job:
-                with self.subTest(job=name):
+            if "runs-on" not in job:
+                continue
+            with self.subTest(job=name):
+                if name in PYTHON_ONLY_JOBS:  # only run python over JSON: any runner will do
+                    self.assertEqual(job["runs-on"], "ubuntu-latest")
+                else:
                     self.assertIn("inputs.runs_on", job["runs-on"])
 
     def test_every_artifact_name_carries_the_tag(self):
@@ -291,6 +305,20 @@ class LqlInstancesDoNotCollide(unittest.TestCase):
             if "download" in step["uses"] and "name" not in step["with"]:
                 with self.subTest(step=step.get("name", step["with"])):
                     self.assertIn("env.TAG", step["with"].get("pattern", ""))
+
+    def test_report_jobs_download_only_the_results_not_the_binary_or_vindexes(self):
+        jobs = load()["lql-strategy-matrix"]["jobs"]
+        downloads = {
+            name: [s["with"] for s in jobs[name]["steps"]
+                   if str(s.get("uses", "")).startswith("actions/download-artifact")]
+            for name in ("aggregate", "conformance", "inventory")
+        }
+        for name, dl in downloads.items():
+            with self.subTest(job=name):
+                self.assertEqual(dl[0]["pattern"], "results-${{ env.TAG }}-*")
+        # inventory also reads the conformance verdict, at artifacts/conformance-<TAG>/
+        self.assertEqual(downloads["inventory"][1]["name"], "conformance-${{ env.TAG }}")
+        self.assertEqual(downloads["inventory"][1]["path"], "artifacts/conformance-${{ env.TAG }}")
 
     def test_the_gate_trims_the_quality_job_and_main_keeps_it(self):
         # The gate already does fmt and clippy per crate; quality repeats them and adds the

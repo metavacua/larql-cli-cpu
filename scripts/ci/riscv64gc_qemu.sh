@@ -29,7 +29,7 @@ sudo apt-get update \
   -o Dir::Etc::sourcelist="sources.list.d/ports-riscv64.list" \
   -o Dir::Etc::sourceparts="-" \
   -o APT::Get::List-Cleanup="0"
-sudo apt-get install -y libopenblas-dev:riscv64 pkg-config
+sudo apt-get install -y libopenblas-dev:riscv64
 
 {
   echo "OPENBLAS_LIB_DIR_riscv64gc_unknown_linux_gnu=/usr/lib/riscv64-linux-gnu"

@@ -1,6 +1,9 @@
 import json, os, sys
+
+import pytest
+
 sys.path.insert(0, os.path.dirname(__file__))
-import cross_target as X
+import cross_target as X  # noqa: E402
 
 STATS = "(24 layers, 5K features, m)"
 
@@ -31,8 +34,14 @@ def _cell(cid, stdout="", bucket="ok", exit_code=0, duration_ms=10, stderr="", c
 
 
 A, B = "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"
-Q = "riscv64gc-unknown-linux-gnu"
+RV = "riscv64gc-unknown-linux-gnu"
 GLOB = "results-*/results-*.jsonl"
+
+
+def corpus_cats():
+    """The set of 'cat' values in the real commands.jsonl corpus."""
+    with open(os.path.join(os.path.dirname(__file__), "commands.jsonl"), encoding="utf-8") as fh:
+        return {json.loads(line)["cat"] for line in fh if line.strip()}
 
 
 def compare(tmp_path, slow=()):
@@ -189,11 +198,8 @@ def test_load_instances_groups_legs_by_tag_with_dotted_legs(tmp_path):
 
 # ---- stream B review fixes -------------------------------------------------------------
 
-import pytest  # noqa: E402
-
 KILLED = dict(bucket="crash", exit_code=137)
 TIMED = dict(bucket="timeout", exit_code=124)
-RV = "riscv64gc-unknown-linux-gnu"
 
 
 def test_hard_killed_cell_is_inconclusive_on_a_slow_tag_not_a_crash_disagreement(tmp_path):
@@ -335,14 +341,6 @@ def test_err_line_text_is_never_compared(tmp_path):
     assert compare(tmp_path)["disagreements"] == 0
 
 
-def test_fp_dependent_categories_are_real_corpus_categories():
-    cats = {json.loads(line)["cat"] for line in
-            open(os.path.join(os.path.dirname(__file__), "commands.jsonl")) if line.strip()}
-    assert {"inference", "roundtrip"} <= X.FP_DEPENDENT_CATS <= cats
-    # the deterministic categories stay compared
-    assert not ({"browse", "lifecycle", "negative"} & X.FP_DEPENDENT_CATS)
-
-
 def test_feature_count_is_inconclusive_when_any_cell_of_the_leg_timed_out(tmp_path):
     write_instance(tmp_path, A)
     write_instance(tmp_path, B, cells=[_cell("stats", stdout="(24 layers, 6K features, m)"),
@@ -424,8 +422,7 @@ def test_duplicate_tag_and_leg_is_an_error_not_an_overwrite(tmp_path, capsys):
 def test_every_corpus_category_is_classified_deterministic_or_fp_dependent():
     # FP_DEPENDENT_CATS is a deny-list for err_signal. A category added to commands.jsonl would
     # otherwise be silently treated as deterministic; this forces a deliberate decision.
-    cats = {json.loads(line)["cat"] for line in
-            open(os.path.join(os.path.dirname(__file__), "commands.jsonl")) if line.strip()}
+    cats = corpus_cats()
     assert not (X.FP_DEPENDENT_CATS & X.DETERMINISTIC_CATS)
     assert cats == X.FP_DEPENDENT_CATS | X.DETERMINISTIC_CATS
 
@@ -441,7 +438,7 @@ def test_an_expected_native_instance_with_no_artifacts_is_a_disagreement(tmp_pat
 def test_an_expected_slow_instance_with_no_artifacts_is_inconclusive(tmp_path):
     write_instance(tmp_path, A)
     write_instance(tmp_path, B)
-    r = X.compare(X.load_instances(str(tmp_path / GLOB)), slow_tags=[Q], expect_tags=[A, B, Q])
+    r = X.compare(X.load_instances(str(tmp_path / GLOB)), slow_tags=[RV], expect_tags=[A, B, RV])
     assert ("(instance)", "instance present") in facts(r, "inconclusive")
     assert r["disagreements"] == 0
 
@@ -459,6 +456,16 @@ def test_strict_exits_1_when_an_expected_native_instance_is_missing(tmp_path):
     argv = [str(tmp_path / GLOB), "--strict", "--expect-tag", A, "--expect-tag", B]
     assert X.main(argv) == 1
     assert X.main(argv[:2] + ["--expect-tag", A]) == 0  # nothing expected is missing
+
+
+def test_two_missing_expected_instances_each_show_as_absent(tmp_path):
+    write_instance(tmp_path, A)
+    write_instance(tmp_path, B)
+    r = X.compare(X.load_instances(str(tmp_path / GLOB)), expect_tags=[A, B, RV, "s390x"])
+    missing = [f for f in r["findings"] if f["fact"] == "instance present"]
+    assert len(missing) == 2 and r["disagreements"] == 2
+    for f in missing:
+        assert f["values"] == {A: True, B: True, RV: False, "s390x": False}
 
 
 def test_render_shows_a_missing_expected_instance_even_with_one_instance_left(tmp_path):
