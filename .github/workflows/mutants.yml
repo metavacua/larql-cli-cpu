@@ -109,15 +109,24 @@ jobs:
       # across two pushes while moe_zero_copy.rs broke the ubuntu build
       # (chrishayuk/larql#244), and still showed a plain green
       # "cargo-mutants (informational) success" in the PR checks tab.
+      #
+      # `--copy-vcs=true`: cargo-mutants builds in a copy of the tree, and
+      # without `.git` larql-vindex's build.rs stamps the plugin ABI
+      # `commit unknown`, which `plugin::abi_compatible` refuses by design.
+      # The five continuation_plugin tests then fail the baseline (exit 4)
+      # and no mutant is ever tested — every PR touching larql-cli hit this.
+      #
+      # The script exits non-zero only for exit 4: a baseline that fails
+      # means zero mutants ran, so the job reds instead of reading green.
+      # Missed mutants (exit 2) stay a signal, not a failure.
       - name: Mutation-test the diff
         if: steps.diff.outputs.has_changes == 'true'
         run: |
           set +e
-          cargo mutants ${{ matrix.package_args }} --in-diff /tmp/pr.diff --timeout 120 --no-shuffle
+          cargo mutants ${{ matrix.package_args }} --in-diff /tmp/pr.diff --timeout 120 --no-shuffle --copy-vcs=true
           status=$?
           echo "cargo-mutants exit status: $status"
           bash scripts/check_mutants_exit_status.sh "$status"
-          exit 0
 
       - name: No changes in scope
         if: steps.diff.outputs.has_changes == 'false'
