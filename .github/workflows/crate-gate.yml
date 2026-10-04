@@ -14,7 +14,8 @@
 # targets use --no-default-features and the core/alloc/std lints; the gnu targets use default
 # features. lql runs where the CLI can run: natively on x86_64 and aarch64 Linux, and under
 # QEMU user-mode on riscv64gc-unknown-linux-gnu; the freestanding targets have no OS. The
-# C-extension riscv variants (imac, imc) and windows-gnu are trimmed for now. For now only
+# 32-bit riscv ladder i -> im -> imac -> imafc (+M, +A+C, +F) is an elimination: imac is the
+# control that isolates floating point from imafc. imc, riscv64imac and windows-gnu are trimmed. For now only
 # SmolLM2-135M (base and instruct) must pass; the heavier models are off.
 # Order and sharing rules: scripts/test_crate_gate_chain.py.
 name: crate-gate
@@ -94,6 +95,7 @@ jobs:
           - { target: wasm32v1-none, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false, setup: "", emulator: "" }
           - { target: riscv32i-unknown-none-elf, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false, setup: "", emulator: "" }
           - { target: riscv32im-unknown-none-elf, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false, setup: "", emulator: "" }
+          - { target: riscv32imac-unknown-none-elf, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false, setup: "", emulator: "" }
           - { target: riscv32imafc-unknown-none-elf, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false, setup: "", emulator: "" }
           - { target: riscv64gc-unknown-none-elf, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false, setup: "", emulator: "" }
           - { target: aarch64-unknown-none, runs_on: ubuntu-latest, features: "--no-default-features", clippy_args: "-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core", lql: false, setup: "", emulator: "" }

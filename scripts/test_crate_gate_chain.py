@@ -25,20 +25,29 @@ from pathlib import Path
 
 from test_workflow_triggers import GATES, WORKFLOWS, load
 
-# Tier 2 without-host-tools freestanding targets. The C-extension riscv variants (imac, imc,
-# 64imac) are trimmed: every riscv target that has F also has C (riscv32imafc, riscv32imfc,
-# riscv64gc), so imafc stays as the one F-bearing 32-bit target; riscv32i and riscv32im are
-# the only ones without C.
+# Tier 2 without-host-tools freestanding targets.
+#
+# The 32-bit riscv ladder is a controlled elimination, not a performance choice. Each rung adds
+# capability; a pass-to-fail step names what the code actually depends on, so float that
+# compiles on a soft-float rung is float that is used but not required:
+#     riscv32i  ->  riscv32im  ->  riscv32imac  ->  riscv32imafc
+#                      +M           +A +C            +F
+# riscv32imac is the control for riscv32imafc: they differ by F alone. Without it, the step
+# from im to imafc adds A, C and F together. No riscv target has F without C, so F can only
+# be isolated against imac. imc (C without A) and riscv64imac are trimmed for now.
 FREESTANDING = {
     "wasm32v1-none", "riscv32i-unknown-none-elf", "riscv32im-unknown-none-elf",
-    "riscv32imafc-unknown-none-elf", "riscv64gc-unknown-none-elf",
-    "aarch64-unknown-none", "x86_64-unknown-none",
+    "riscv32imac-unknown-none-elf", "riscv32imafc-unknown-none-elf",
+    "riscv64gc-unknown-none-elf", "aarch64-unknown-none", "x86_64-unknown-none",
     "aarch64-unknown-uefi", "x86_64-unknown-uefi",
 }
 TRIMMED = {
-    "riscv32imac-unknown-none-elf", "riscv32imc-unknown-none-elf",
-    "riscv64imac-unknown-none-elf", "x86_64-pc-windows-gnu",
+    "riscv32imc-unknown-none-elf", "riscv64imac-unknown-none-elf", "x86_64-pc-windows-gnu",
 }
+LADDER = [
+    "riscv32i-unknown-none-elf", "riscv32im-unknown-none-elf",
+    "riscv32imac-unknown-none-elf", "riscv32imafc-unknown-none-elf",
+]
 # The gnu targets, and where the lql matrix runs the CLI: natively, or under QEMU user-mode.
 GNU = {
     "x86_64-unknown-linux-gnu": "ubuntu-latest",
@@ -101,6 +110,11 @@ class Targets(unittest.TestCase):
 
     def test_every_selected_target_is_gated(self):
         self.assertEqual({t["target"] for t in targets()}, FREESTANDING | set(GNU))
+
+    def test_the_riscv32_ladder_is_complete_and_in_order(self):
+        # i -> im -> imac -> imafc, so imac stays as the one-extension control for F.
+        got = [t["target"] for t in targets() if t["target"] in LADDER]
+        self.assertEqual(got, LADDER)
 
     def test_trimmed_targets_are_not_gated(self):
         self.assertEqual({t["target"] for t in targets()} & TRIMMED, set())
