@@ -18,6 +18,11 @@ class Pr:
     base: str     # main before the merge (first parent)
     head: str     # the PR's tip (second parent)
     merged_at: float
+    # Where base and head can be BUILT. This repo's imported history was
+    # rewritten by git filter-repo: its old commits name workspace members
+    # whose files were never imported, so they cannot build here. The PR is
+    # replayed in the repository that merged it, at its original SHAs.
+    repo: str = ""
 
 
 def _git(root: Path, *args: str) -> str:
@@ -54,3 +59,16 @@ def sample(prs: list[Pr], strata: int, seed: int) -> list[Pr]:
         era = ordered[i * len(ordered) // strata : (i + 1) * len(ordered) // strata]
         chosen.append(rng.choice(era))
     return chosen
+
+
+def resolve(get, repo: str, number: int, merged_at: float = 0.0) -> Pr:
+    """The PR as merged in `repo`: base = the merge's first parent, head =
+    its second (or the merge commit itself for a squash or rebase merge).
+    `get(path)` returns a GitHub REST response body."""
+    pull = get(f"repos/{repo}/pulls/{number}")
+    if not pull.get("merged") or not pull.get("merge_commit_sha"):
+        raise ValueError(f"{repo}#{number} is not merged; nothing to replay")
+    merge = pull["merge_commit_sha"]
+    parents = [p["sha"] for p in get(f"repos/{repo}/commits/{merge}")["parents"]]
+    head = parents[1] if len(parents) > 1 else merge
+    return Pr(number, merge, parents[0], head, merged_at, repo)

@@ -9,7 +9,7 @@ pilot's measured cost for every later plan.
 from __future__ import annotations
 
 REQUIRED = (
-    "crate_dir", "strata", "seed", "mutants_per_pr",
+    "source_repo", "crate_dir", "strata", "seed", "mutants_per_pr",
     "prior_minutes_per_mutant", "setup_minutes", "runner_minutes_budget",
 )
 SIDES = 2  # base and head

@@ -37,6 +37,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       prs: ${{ steps.plan.outputs.prs }}
+      repo: ${{ steps.plan.outputs.repo }}
       runs: ${{ steps.plan.outputs.runs }}
       seed: ${{ steps.plan.outputs.seed }}
       n: ${{ steps.plan.outputs.n }}
@@ -47,15 +48,18 @@ jobs:
       - name: Unit tests for the replay code
         working-directory: scripts
         run: python3 -m unittest discover -s . -p 'test_covgate_replay.py'
-      - name: Sample PRs and check the runner budget
+      - name: Sample PRs, resolve them upstream, check the runner budget
         id: plan
         working-directory: scripts
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           python3 -m covgate.replay plan --config covgate/replay-plan.json \
             --repo-root .. --ref origin/main --out "$RUNNER_TEMP/plan.json" > /dev/null
           {
             echo "prs=$(jq -c '[.prs[].number]' "$RUNNER_TEMP/plan.json")"
-            echo "runs=$(jq -c '{include: [.prs[] as $p | ("base","head") as $s | {pr: $p.number, side: $s, sha: $p[$s]}]}' "$RUNNER_TEMP/plan.json")"
+            echo "runs=$(jq -c '{include: [.prs[] as $p | ("base","head") as $s | {pr: $p.number, side: $s, sha: $p[$s], repo: $p.repo}]}' "$RUNNER_TEMP/plan.json")"
+            echo "repo=$(jq -r '.config.source_repo' "$RUNNER_TEMP/plan.json")"
             echo "seed=$(jq -r '.config.seed' "$RUNNER_TEMP/plan.json")"
             echo "n=$(jq -r '.config.mutants_per_pr' "$RUNNER_TEMP/plan.json")"
           } >> "$GITHUB_OUTPUT"
@@ -78,6 +82,12 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      # The PR is replayed where it was merged (see replay-plan.json).
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ needs.plan.outputs.repo }}
+          path: src
+          fetch-depth: 0
       - name: Install cargo-mutants
         uses: taiki-e/install-action@cargo-mutants
       - uses: actions/download-artifact@v7
@@ -88,7 +98,7 @@ jobs:
         run: |
           for side in base head; do
             sha=$(jq -r ".prs[] | select(.number == ${{ matrix.pr }}) | .$side" "$RUNNER_TEMP/plan/plan.json")
-            git worktree add -q "$RUNNER_TEMP/wt-$side" "$sha"
+            git -C src worktree add -q "$RUNNER_TEMP/wt-$side" "$sha"
             (cd "$RUNNER_TEMP/wt-$side" && cargo mutants --list --json -p larql-cli) > "$RUNNER_TEMP/$side-mutants.json"
             echo "$side $sha: $(jq length "$RUNNER_TEMP/$side-mutants.json") mutants"
           done
@@ -119,9 +129,12 @@ jobs:
       max-parallel: 8
       matrix: ${{ fromJSON(needs.plan.outputs.runs) }}
     steps:
+      # Built where the PR was merged, at its original SHA.
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          repository: ${{ matrix.repo }}
+          ref: ${{ matrix.sha }}
+          path: src
       - name: Install build dependencies
         run: |
           sudo apt-get update
@@ -134,11 +147,10 @@ jobs:
           path: ${{ runner.temp }}/select
       - name: Run the sampled mutants on ${{ matrix.side }}
         run: |
-          git worktree add -q "$RUNNER_TEMP/wt" "${{ matrix.sha }}"
           mapfile -t patterns < "$RUNNER_TEMP/select/${{ matrix.side }}.re"
           args=()
           for p in "${patterns[@]}"; do [ -n "$p" ] && args+=(--re "$p"); done
-          cd "$RUNNER_TEMP/wt"
+          cd src
           rustc_version=$(rustc -V)
           set +e
           # No fixed --timeout: cargo-mutants derives each mutant's test

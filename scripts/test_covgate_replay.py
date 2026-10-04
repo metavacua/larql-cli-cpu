@@ -40,6 +40,23 @@ class Frame(unittest.TestCase):
         # One PR per era quartile: 1-10, 11-20, 21-30, 31-40.
         self.assertEqual([(p.number - 1) // 10 for p in sorted(a, key=lambda p: p.number)], [0, 1, 2, 3])
 
+    def test_a_pr_resolves_to_its_merge_in_the_source_repo(self):
+        api = {
+            "repos/up/larql/pulls/83": {"merged": True, "merge_commit_sha": "m83"},
+            "repos/up/larql/commits/m83": {"parents": [{"sha": "base83"}, {"sha": "head83"}]},
+            "repos/up/larql/pulls/90": {"merged": True, "merge_commit_sha": "m90"},
+            "repos/up/larql/commits/m90": {"parents": [{"sha": "base90"}]},  # squash merge
+        }
+        got = [frame.resolve(api.__getitem__, "up/larql", n) for n in (83, 90)]
+        self.assertEqual([(g.repo, g.base, g.head) for g in got],
+                         [("up/larql", "base83", "head83"), ("up/larql", "base90", "m90")])
+
+    def test_an_unmerged_pr_is_refused_not_guessed(self):
+        api = {"repos/up/larql/pulls/7": {"merged": False, "merge_commit_sha": None}}
+        with self.assertRaisesRegex(ValueError, "not merged"):
+            frame.resolve(api.__getitem__, "up/larql", 7)
+
+
 
 def mutant(file, fn, replacement, line, genre="FnValue"):
     return {"file": file, "function": {"function_name": fn}, "genre": genre, "replacement": replacement,
@@ -91,7 +108,7 @@ class Analyze(unittest.TestCase):
 
 
 class Plan(unittest.TestCase):
-    config = {"crate_dir": CRATE, "strata": 2, "seed": 1, "mutants_per_pr": 20,
+    config = {"source_repo": "up/larql", "crate_dir": CRATE, "strata": 2, "seed": 1, "mutants_per_pr": 20,
               "prior_minutes_per_mutant": 3.0, "setup_minutes": 15.0, "runner_minutes_budget": 400.0}
 
     def test_the_estimate_counts_both_sides_of_every_pr(self):

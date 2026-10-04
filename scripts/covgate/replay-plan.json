@@ -1,5 +1,6 @@
 {
-  "note": "PILOT. Purpose: measure discordance, the per-PR drop in detection, CI minutes per mutant and how many past commits still build, so the main experiment can be sized by power analysis instead of guessed. prior_minutes_per_mutant is a deliberately conservative prior (a larql-cli baseline test pass took 65 s plus an incremental rebuild of one crate); the pilot replaces it with a measurement. The budget bounds the pilot's spend before any runner starts.",
+  "note": "PILOT. Purpose: measure discordance, the per-PR drop in detection, CI minutes per mutant and how many past commits still build, so the main experiment can be sized by power analysis instead of guessed. prior_minutes_per_mutant is a deliberately conservative prior (a larql-cli baseline test pass took 65 s plus an incremental rebuild of one crate); the pilot replaces it with a measurement. The budget bounds the pilot's spend before any runner starts. source_repo: this repo's pre-extraction history was rewritten by git filter-repo and its old commits cannot build here (they list workspace members whose files were never imported), so each sampled PR is replayed in the repository that merged it, at its original SHAs.",
+  "source_repo": "chrishayuk/larql",
   "crate_dir": "crates/larql-cli",
   "strata": 4,
   "seed": 20261004,

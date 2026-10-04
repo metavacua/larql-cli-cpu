@@ -7,14 +7,19 @@ import json
 import sys
 from pathlib import Path
 
+from ..calibrate.client import Client
 from . import analyze, frame, pairing, plan
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
     config = json.loads(args.config.read_text(encoding="utf-8"))
     prs = frame.merged_prs(args.repo_root.resolve(), args.ref, config["crate_dir"])
-    chosen = frame.sample(prs, int(config["strata"]), int(config["seed"]))
-    minutes = plan.check_budget(config, len(chosen))
+    sampled = frame.sample(prs, int(config["strata"]), int(config["seed"]))
+    minutes = plan.check_budget(config, len(sampled))
+    # Two requests per PR, under a budget: serial, ETag-cached, rule-abiding.
+    client = Client(budget=2 * len(sampled))
+    chosen = [frame.resolve(lambda p: client.get(p).body, config["source_repo"], p.number, p.merged_at)
+              for p in sampled]
     out = {
         "config": config,
         "frame_size": len(prs),
@@ -22,7 +27,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         "prs": [p.__dict__ for p in chosen],
     }
     args.out.write_text(json.dumps(out, indent=1), encoding="utf-8")
-    print(json.dumps({"include": [{"pr": p.number, "side": s, "sha": getattr(p, s)}
+    print(json.dumps({"include": [{"pr": p.number, "side": s, "sha": getattr(p, s), "repo": p.repo}
                                   for p in chosen for s in ("base", "head")]}))
     return 0
 
