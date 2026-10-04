@@ -21,19 +21,19 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Derived once, here, for the build and verify jobs.
+  # A library with a binary is gated as both, except on a freestanding target: the binary is
+  # the interface layer and keeps std, so only the library has to build there.
+  SELECT: ${{ inputs.kind == 'bin' && '--bins' || (inputs.kind == 'both' && !inputs.freestanding && '--lib --bins' || '--lib') }}
+  # From `freestanding`. The lint triple appears here only.
+  FEATURES: ${{ inputs.freestanding && '--no-default-features' || '' }}
+  LINTS: ${{ inputs.freestanding && '-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core' || '' }}
 
 jobs:
   build:
     name: build · ${{ inputs.target }}
     runs-on: ${{ inputs.runs_on }}
     timeout-minutes: 90
-    env:
-      # A library with a binary is gated as both, except on a freestanding target: the binary is
-      # the interface layer and keeps std, so only the library has to build there.
-      SELECT: ${{ inputs.kind == 'bin' && '--bins' || (inputs.kind == 'both' && !inputs.freestanding && '--lib --bins' || '--lib') }}
-      # Derived once from `freestanding`, for both steps. The lint triple appears here only.
-      FEATURES: ${{ inputs.freestanding && '--no-default-features' || '' }}
-      LINTS: ${{ inputs.freestanding && '-W clippy::std_instead_of_core -W clippy::std_instead_of_alloc -W clippy::alloc_instead_of_core' || '' }}
     steps:
       - uses: actions/checkout@v7
       - run: rustup target add ${{ inputs.target }}
@@ -68,13 +68,32 @@ jobs:
         run: >-
           cargo build --locked --target ${{ inputs.target }} -p ${{ inputs.crate }}
           $SELECT $FEATURES
+
+  # Beside build, in front of nothing: lql needs only build, so a red cargo-hack or unit test never
+  # skips the strict lql matrix (it did once: 13 lql jobs skipped). One more checkout and toolchain
+  # setup, and the dependencies compile again under the other profiles; that is the price of
+  # keeping the lql signal.
+  verify:
+    name: verify · ${{ inputs.target }}
+    runs-on: ${{ inputs.runs_on }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup target add ${{ inputs.target }}
+      # Build scripts run on the runner whatever the target is.
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libopenblas-dev pkg-config
+      - name: Cross toolchain
+        if: inputs.setup != ''
+        env:
+          SETUP: ${{ inputs.setup }}
+        run: bash "$SETUP"
       # Every feature configuration the crate declares, on every target, freestanding included:
-      # compile only, so the cost is a check per configuration. --each-feature also runs with no
-      # default features and with the defaults.
+      # compile only. --each-feature also runs with no default features and with the defaults.
+      # No --no-dev-deps: cargo-hack rewrites the real Cargo.toml for it and --locked then refuses.
       - uses: taiki-e/install-action@cargo-hack
       - name: cargo-hack (each feature)
         run: >-
-          cargo hack check --each-feature --no-dev-deps --locked --target ${{ inputs.target }}
+          cargo hack check --each-feature --locked --target ${{ inputs.target }}
           -p ${{ inputs.crate }} $SELECT $FEATURES
       # The fast path of `make test` (lib and bins, no integration tests). The default harness
       # needs std, so not on the freestanding targets; riscv64 runs under QEMU through the lql
