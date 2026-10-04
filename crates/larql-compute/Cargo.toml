@@ -10,7 +10,18 @@ keywords = ["matmul", "cpu", "blas", "quantization", "trait"]
 categories = ["science"]
 
 [dependencies]
-# Matrix types — blas feature added per-platform below where a backend exists
+# Matrix types — blas feature added per-platform below where a backend exists.
+#
+# Windows: no BLAS dependency by design. This plain entry is the only one
+# Windows (and any other non-Linux/FreeBSD/macOS target) takes. The system
+# OpenBLAS has a memory-pool race that even `OPENBLAS_NUM_THREADS=1` +
+# `OMP_NUM_THREADS=1` + `RUST_TEST_THREADS=1` doesn't fully eliminate
+# (`BLAS : Bad memory unallocation!`, intermittent failures in the
+# larql-kv::{vindex_compare, markov_residual} self-equality tests; the CI
+# env-var fix (#124) reduced the rate but didn't close it). Without
+# ndarray's `blas` feature, matmul goes through the pure-Rust path:
+# slower, but deterministic. The `extern crate` lines in `src/lib.rs` are
+# cfg-gated to macOS and Linux/FreeBSD, so nothing links a BLAS elsewhere.
 ndarray = "0.16"
 # MoE expert parallelism: top-k experts run independently per token.
 rayon = "1.10"
@@ -21,35 +32,14 @@ larql-execution = { path = "../larql-execution" }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 ndarray = { version = "0.16", features = ["blas"] }
-blas-src = { version = "0.10", features = ["openblas"], default-features = false }
-openblas-src = { version = "0.10", features = ["system"] }
+# Native link to the system OpenBLAS (no openblas-src / pkg-config / downloads).
+larql-blas-link = { path = "../larql-blas-link" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # `metal` + `objc` moved to `larql-compute-metal` per ADR-019. This crate
 # is CPU-only; Metal GPU dependencies live in the sibling crate.
 ndarray = { version = "0.16", features = ["blas"] }
 blas-src = { version = "0.10", features = ["accelerate"] }
-
-# Windows: no BLAS *backend*. The system OpenBLAS has a memory-pool
-# race that even `OPENBLAS_NUM_THREADS=1` + `OMP_NUM_THREADS=1` +
-# `RUST_TEST_THREADS=1` doesn't fully eliminate (`BLAS : Bad memory
-# unallocation!` warning, ~0.6 K-buffer drift on successive matmuls
-# producing intermittent failures across
-# larql-kv::{vindex_compare, markov_residual} self-equality tests).
-# The CI env-var fix (#124) reduced the rate but didn't close it.
-#
-# Dropping ndarray's `blas` feature on Windows routes matmul through
-# the pure-Rust path — slower on Windows production inference but
-# deterministic. `blas-src` is kept as a featureless dep so the
-# `extern crate blas_src;` declarations across this crate's tests /
-# examples / benches still compile (the crate is essentially empty
-# without a backend feature, so nothing links to OpenBLAS).
-# Mac (Accelerate) and Linux (OpenBLAS, which works correctly there)
-# are unchanged.
-[target.'cfg(target_os = "windows")'.dependencies]
-ndarray = "0.16"
-blas-src = { version = "0.10", default-features = false }
-
 
 [features]
 default = []

@@ -4,8 +4,6 @@
 //! Usage:
 //!   cargo run --release -p larql-inference --example test_q4_projection_cosine
 
-extern crate blas_src;
-
 use larql_inference::{forward::forward_to_layer, InferenceModel};
 use larql_models::quant::ggml::{dequantize_q4_0, quantize_q4_0};
 

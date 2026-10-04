@@ -5,6 +5,7 @@
     {
       "manifest": "Cargo.toml",
       "members": [
+        "crates/larql-blas-link",
         "crates/larql-boundary",
         "crates/larql-cli",
         "crates/larql-compute",
@@ -35,7 +36,8 @@
         "crates/larql-cli",
         "crates/larql-router",
         "crates/larql-router-protocol",
-        "crates/larql-boundary"
+        "crates/larql-boundary",
+        "crates/larql-blas-link"
       ]
     },
     {
@@ -93,6 +95,16 @@
       "workspace": "crates/larql-experts/Cargo.toml",
       "version": "0.1.0",
       "description": "Shared ABI for LARQL WASM expert modules",
+      "features": {},
+      "local_dependencies": [],
+      "examples": []
+    },
+    {
+      "name": "larql-blas-link",
+      "path": "crates/larql-blas-link",
+      "workspace": "Cargo.toml",
+      "version": "0.2.0",
+      "description": "Links the system OpenBLAS on Linux/FreeBSD without openblas-src and its HTTP-client build chain. Exposes nothing.",
       "features": {},
       "local_dependencies": [],
       "examples": []
@@ -308,6 +320,16 @@
           "features": [
             "test-utils"
           ]
+        },
+        {
+          "name": "larql-blas-link",
+          "alias": "larql-blas-link",
+          "kind": "dependencies",
+          "path": "crates/larql-blas-link",
+          "target": "cfg(any(target_os = \"linux\", target_os = \"freebsd\"))",
+          "optional": false,
+          "default_features": true,
+          "features": []
         }
       ],
       "examples": []

@@ -99,6 +99,12 @@ larql-vindex-spec     public vindex on-disk contract: Rust types, JSON Schema,
                       validation thresholds (canonical home of ExtractLevel)
 larql-execution       execution-refusal semantics (RefusalKind) shared across
                       the runtime crates
+larql-blas-link       zero-dependency native-link crate: `-lopenblas` on Linux/
+                      FreeBSD only, exposes nothing. Replaces openblas-src (its
+                      build-dependency chain pulls in an HTTP client). Declared
+                      by larql-compute under the linux/freebsd target table and
+                      named by `extern crate larql_blas_link;` there; every
+                      other crate reaches it through larql-compute
 ```
 
 Upstream also has `larql-compute-metal`, `larql-server`, `larql-demos`, `vindex-cli`, `larql-python` and `model-compute`. None of them is here, and nothing in `larql`'s build reaches them.
@@ -130,7 +136,7 @@ make fmt                                          # cargo fmt --all
 make lint                                         # cargo clippy --workspace --tests -- -D warnings
 ```
 
-- No feature flags are needed on any OS: the default features are just larql-cli's `research`. `--no-default-features` gives the release shape. Linux needs a system OpenBLAS (`libopenblas-dev`); macOS uses Accelerate; Windows builds without a BLAS.
+- No feature flags are needed on any OS: the default features are just larql-cli's `research`. `--no-default-features` gives the release shape. Linux needs a system OpenBLAS (`libopenblas-dev`), linked by `larql-blas-link` (no pkg-config, no downloads; set `OPENBLAS_LIB_DIR`, or `OPENBLAS_LIB_DIR_<target>` when cross-compiling, if it is not on the linker path); macOS uses Accelerate; Windows builds without a BLAS.
 - `make test` is intentionally fast — `cargo test --workspace --lib --bins` (no integration tests). Use `make test-full` for `cargo test --workspace`, `make test-models` for the `#[ignore]`d model-backed goldens in larql-inference (`-- --ignored`), and `make larql-<crate>-ci` for the per-crate gate CI runs (fmt-check + lint + test + bench-test + coverage). Beyond per-crate workflows, `.github/workflows/quality.yml` adds cargo-audit/deny, MSRV, buf lint, and a dead-doc-link gate (scripts/check_doc_links.py).
 - Re-bench across architectures before landing perf claims — `make bench-cross-arch` runs Gemma 3 4B, Gemma 4 31B, Llama 2, Mistral 7B, Gemma 4 26B (ADR-017): an A/B promoted on Gemma 3 4B alone must be re-bench'd here.
 

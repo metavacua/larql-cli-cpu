@@ -1,8 +1,6 @@
 //! Coverage for the backend trait default methods (matmul_batch, gemv stubs)
 //! and quant_matvec dispatch for Q4_K / Q6_K / quant_matvec_q8_input.
 
-extern crate blas_src;
-
 use larql_compute::cpu::ops::q4_common::{quantize_q4_k, quantize_q6_k, quantize_to_q8};
 use larql_compute::prelude::*;
 use larql_compute::{cpu_backend, MatMulOp, QuantFormat};
