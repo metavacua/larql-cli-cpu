@@ -1,17 +1,17 @@
 {
-  "policy_note": "larql-vindex-spec is a wave-0 crate (per the leaf-first no_std segregation plan): a true leaf, zero larql-* dependencies, only serde/serde_json/thiserror. Its dependency graph has no unconditional OS coupling, but the crate does not yet declare `#![cfg_attr(not(feature = \"std\"), no_std)]` -- an ordinary crate implicitly links std unless it opts out at its crate root, and this one has not. Every target below is therefore expected-fail today, honestly, not because of anything this crate's dependencies need but because the no_std opt-out itself has not landed. Promote a target's entry to expected-pass only as part of the PR that adds that opt-out (see scripts/check_no_std_policy.py for what promoting means and why demoting is never done silently).",
+  "policy_note": "larql-vindex-spec is a wave-0 crate (per the leaf-first no_std segregation plan): a true leaf, zero larql-* dependencies, only serde/serde_json/thiserror. The `#![cfg_attr(not(feature = \"std\"), no_std)]` opt-out has landed: `std` is a default feature, and `--no-default-features` is the no_std + alloc shape (the manifest owns String/Vec/BTreeMap, so there is no heap-free core layer). target-matrix.yml passes `--no-default-features` for this crate. All 12 targets are Tier 2 without host tools and ship prebuilt core+alloc, so no -Zbuild-std; `cargo check --lib --no-default-features` passed on every one locally, so each is expected-pass. The clippy --fix gate for these cells has not been run locally.",
   "targets": {
-    "wasm32v1-none": "expected-fail",
-    "riscv32i-unknown-none-elf": "expected-fail",
-    "riscv32im-unknown-none-elf": "expected-fail",
-    "riscv32imac-unknown-none-elf": "expected-fail",
-    "riscv32imafc-unknown-none-elf": "expected-fail",
-    "riscv32imc-unknown-none-elf": "expected-fail",
-    "riscv64gc-unknown-none-elf": "expected-fail",
-    "riscv64imac-unknown-none-elf": "expected-fail",
-    "aarch64-unknown-none": "expected-fail",
-    "x86_64-unknown-none": "expected-fail",
-    "aarch64-unknown-uefi": "expected-fail",
-    "x86_64-unknown-uefi": "expected-fail"
+    "wasm32v1-none": "expected-pass",
+    "riscv32i-unknown-none-elf": "expected-pass",
+    "riscv32im-unknown-none-elf": "expected-pass",
+    "riscv32imac-unknown-none-elf": "expected-pass",
+    "riscv32imafc-unknown-none-elf": "expected-pass",
+    "riscv32imc-unknown-none-elf": "expected-pass",
+    "riscv64gc-unknown-none-elf": "expected-pass",
+    "riscv64imac-unknown-none-elf": "expected-pass",
+    "aarch64-unknown-none": "expected-pass",
+    "x86_64-unknown-none": "expected-pass",
+    "aarch64-unknown-uefi": "expected-pass",
+    "x86_64-unknown-uefi": "expected-pass"
   }
 }

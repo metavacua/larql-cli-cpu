@@ -3,9 +3,20 @@
 //! validates recipes and estimates bytes). Each consumer maps a preset to its
 //! own parts; only the names and aliases live here, so a new preset is a
 //! compile error in every consumer that has not decided what it means.
+//!
+//! **Layers.** The vocabulary itself ([`SlicePreset`], its spellings, the
+//! allocation-free [`SlicePreset::from_name`] parse and `Display`) is `core`.
+//! What *reports* a bad name owns a `String` and is `alloc`:
+//! `UnknownSlicePreset`, the `FromStr` impl that returns it, and
+//! [`SlicePreset::known_names`].
 
-use std::fmt;
-use std::str::FromStr;
+#[cfg(feature = "alloc")]
+use alloc::string::{String, ToString};
+#[cfg(feature = "alloc")]
+use alloc::vec::Vec;
+use core::fmt;
+#[cfg(feature = "alloc")]
+use core::str::FromStr;
 
 /// The name a recipe uses for the unsliced extract output. Not a slice
 /// preset: nothing is removed.
@@ -64,6 +75,24 @@ impl SlicePreset {
         }
     }
 
+    /// Parse a preset name, case-insensitively, accepting every alias.
+    ///
+    /// The allocation-free form of [`FromStr`](core::str::FromStr): it compares
+    /// with `eq_ignore_ascii_case` instead of lowercasing into a new `String`,
+    /// so it is available in the `core` layer. `None` means no preset spells
+    /// `s`; the `alloc` layer's `FromStr` turns that into an
+    /// `UnknownSlicePreset` carrying the name.
+    pub fn from_name(s: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|p| {
+            p.spellings()
+                .iter()
+                .any(|spelling| spelling.eq_ignore_ascii_case(s))
+        })
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl SlicePreset {
     /// The canonical names, comma-separated, for error messages.
     pub fn known_names() -> String {
         Self::ALL
@@ -74,7 +103,8 @@ impl SlicePreset {
     }
 }
 
-/// A preset name no [`SlicePreset`] spells.
+/// A preset name no [`SlicePreset`] spells. (`alloc` layer: it owns the name.)
+#[cfg(feature = "alloc")]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
     "unknown preset '{got}'. Expected one of: {}",
@@ -85,17 +115,13 @@ pub struct UnknownSlicePreset {
     pub got: String,
 }
 
+#[cfg(feature = "alloc")]
 impl FromStr for SlicePreset {
     type Err = UnknownSlicePreset;
 
     /// Case-insensitive; accepts every alias.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let lower = s.to_ascii_lowercase();
-        Self::ALL
-            .iter()
-            .copied()
-            .find(|p| p.spellings().contains(&lower.as_str()))
-            .ok_or_else(|| UnknownSlicePreset { got: s.to_string() })
+        Self::from_name(s).ok_or_else(|| UnknownSlicePreset { got: s.to_string() })
     }
 }
 
