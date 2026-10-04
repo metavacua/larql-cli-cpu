@@ -24,6 +24,7 @@ Run: uv run scripts/test_crate_gate_chain.py
 import json
 import re
 import subprocess
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -496,6 +497,79 @@ class LqlInstancesDoNotCollide(unittest.TestCase):
 
     def test_concurrency_group_is_per_instance(self):
         self.assertIn("inputs.tag", load()["lql-strategy-matrix"]["concurrency"]["group"])
+
+
+REPO = WORKFLOWS.parent.parent
+STRICT_CRATE = REPO / "crates" / "larql-lib"
+
+
+class StrictCrate(unittest.TestCase):
+    """larql-lib: no duplicate versions, no advisories, no unused dependencies, no larql-* edge.
+
+    Nothing is ignored or skipped: a crate that needs an exception does not get one, it gets a
+    different dependency. The gate runs the crate's own config only where the file exists.
+    """
+
+    def deny(self):
+        return tomllib.loads((STRICT_CRATE / "deny.toml").read_text())
+
+    def test_the_config_forbids_duplicates_advisories_and_wildcards_without_exceptions(self):
+        cfg = self.deny()
+        bans, adv = cfg["bans"], cfg["advisories"]
+        self.assertEqual(bans["multiple-versions"], "deny")
+        self.assertEqual(bans["wildcards"], "deny")
+        self.assertEqual(bans.get("skip", []), [])
+        self.assertEqual(bans.get("skip-tree", []), [])
+        self.assertEqual(adv["unmaintained"], "all")
+        self.assertEqual(adv["unsound"], "all")
+        self.assertEqual(adv["yanked"], "deny")
+        self.assertEqual(adv.get("ignore", []), [])
+        self.assertIs(cfg["graph"]["exclude-dev"], True)
+
+    def test_the_inventory_job_runs_the_crate_config_only_where_it_exists(self):
+        job = load()["crate-gate"]["jobs"]["inventory"]
+        by_name = {s["name"]: s for s in job["steps"] if "name" in s}
+        deny = by_name["cargo-deny (crate config; a gate)"]
+        self.assertIn("hashFiles(", deny["if"])
+        self.assertIn("deny.toml", deny["if"])
+        self.assertTrue(deny["uses"].startswith("EmbarkStudios/cargo-deny-action@"))
+        self.assertEqual(deny["with"]["command"], "check advisories bans")
+        self.assertIn("--all-features", deny["with"]["arguments"])
+        self.assertIn("--config crates/${{ needs.resolve.outputs.crate }}/deny.toml", deny["with"]["arguments"])
+        self.assertIn("needs.resolve.outputs.crate", deny["with"]["manifest-path"])
+
+    def test_unused_dependencies_fail_the_gate_for_such_crates(self):
+        job = load()["crate-gate"]["jobs"]["inventory"]
+        names = [s.get("name") or s.get("uses") for s in job["steps"]]
+        install = next(s for s in job["steps"] if str(s.get("uses", "")).startswith("taiki-e/install-action@cargo-machete"))
+        machete = next(s for s in job["steps"] if s.get("name") == "cargo-machete (unused dependencies; a gate)")
+        self.assertLess(job["steps"].index(install), job["steps"].index(machete))
+        for step in (install, machete):
+            self.assertIn("hashFiles(", step["if"])
+            self.assertIn("deny.toml", step["if"])
+        self.assertIn('cargo machete "crates/$CRATE"', machete["run"])
+        for forbidden in ("/dev/null", " > ", " 2>", "| tee", "|| true"):
+            self.assertNotIn(forbidden, machete["run"])
+        self.assertIn("cargo-deny (crate config; a gate)", names)
+
+    def test_the_crate_depends_on_no_other_larql_crate_and_is_a_workspace_member(self):
+        manifest = tomllib.loads((STRICT_CRATE / "Cargo.toml").read_text())
+        self.assertEqual(manifest["package"]["name"], "larql-lib")
+        for table in ("dependencies", "build-dependencies", "dev-dependencies"):
+            for name, spec in manifest.get(table, {}).items():
+                self.assertFalse(name.startswith("larql-"), f"{table}.{name}")
+                if isinstance(spec, dict):
+                    self.assertNotIn("path", spec, f"{table}.{name}")
+        root = tomllib.loads((REPO / "Cargo.toml").read_text())["workspace"]
+        self.assertIn("crates/larql-lib", root["members"])
+
+    def test_the_library_root_states_the_layer_and_the_interface_rules(self):
+        text = (STRICT_CRATE / "src" / "lib.rs").read_text()
+        self.assertIn("#![no_std]", text)
+        self.assertIn("unreachable_pub", text)
+        self.assertIn("missing_docs", text)
+        for lint in ("clippy::print_stdout", "clippy::print_stderr", "clippy::exit"):
+            self.assertIn(lint, text)
 
 
 if __name__ == "__main__":
