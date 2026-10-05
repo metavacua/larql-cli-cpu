@@ -14,6 +14,11 @@ for f in dispatch reads_backend; do
   [ -s "$W/facts/$f.facts" ] || { echo "NOT CHECKED: no $f facts extracted (rule or code shape changed?)"; exit 2; }
 done
 souffle -F "$W/facts" -D "$W/out" "$HERE/binding.dl" || exit 2
+# Partition of the code by statement class (data/statement_class.facts is the
+# recorded decision; CLASS_FACTS overrides it, e.g. for the skeleton tests).
+cp "${CLASS_FACTS:-$HERE/data/statement_class.facts}" "$W/facts/statement_class.facts"
+cp "$HERE/data/noise.facts" "$W/facts/noise.facts"
+souffle -F "$W/facts" -D "$W/out" "$HERE/partition.dl" || exit 2
 if [ -n "$IR" ]; then
   [ -s "$IR/calls.facts" ] || { echo "NOT CHECKED: IR facts are empty"; exit 2; }
   missing=$(cut -f2 "$W/facts/dispatch.facts" | sort -u | comm -23 - <(sort -u "$IR/ir_fn.facts"))
@@ -30,6 +35,6 @@ if command -v lean >/dev/null; then
   echo "lean: certificates checked"
 elif [ "${REQUIRE_LEAN:-0}" = 1 ]; then echo "NOT CHECKED: lean missing"; exit 2; fi
 show() { echo "-- $1"; sed 's/\t/  /' "$W/out/$1.csv"; }
-show no_read; show binds; show reads_never_raises; show reaches_use; show may_raise
+show side_total; show unclassified_statement; show recursive; show no_read; show binds; show reads_never_raises; show reaches_use; show may_raise
 if [ -n "$IR" ]; then show no_read_ir; show astgrep_missed; show indirect; fi
 exit 0

@@ -41,10 +41,14 @@ def astgrep(src, out):
             test_mods[m["file"]].append(span(m))
     in_test = lambda f, s: is_test_file(f) or any(a <= s < b for a, b in test_mods[f])
     fns = collections.defaultdict(list)
+    lines = set()
     for m in matches:
         s, e = span(m)
         if m["ruleId"] == "fn" and not in_test(m["file"], s):
-            fns[m["file"]].append((s, e, re.search(r"fn\s+(\w+)", m["text"]).group(1)))
+            name = re.search(r"fn\s+(\w+)", m["text"]).group(1)
+            fns[m["file"]].append((s, e, name))
+            lines.add((name, m["file"].lstrip("./"),
+                       str(m["range"]["end"]["line"] - m["range"]["start"]["line"] + 1)))
     names = {n for v in fns.values() for _, _, n in v}
 
     def owner(f, s):
@@ -62,7 +66,7 @@ def astgrep(src, out):
         rid = m["ruleId"]
         if rid == "call":
             callee = re.split(r"[.:]", m["text"].split("(")[0].split("<")[0].strip())[-1].strip()
-            if callee in names and callee != o:
+            if callee in names:          # self-calls kept: direct recursion
                 calls.add((o, callee))
         elif rid == "backend_read":
             reads.add(o)
@@ -80,6 +84,7 @@ def astgrep(src, out):
     write(out, "writes_backend", writes)
     write(out, "raises_nobackend", raises)
     write(out, "dispatch", dispatch)
+    write(out, "fn_lines", lines)
     if not os.path.exists(os.path.join(out, "ir_calls.facts")):
         write(out, "ir_calls", [])
     print(f"astgrep: {len(names)} fns, {len(calls)} call edges, {len(reads)} backend readers, "
@@ -147,8 +152,7 @@ def ir(files, out, demangler, crate):
             s = s.strip('"')
             if ours(s):
                 callee = short_name(full[s])
-                if callee != cur:
-                    edges.add((cur, callee))
+                edges.add((cur, callee))
         if INDIRECT.search(line):
             indirect[cur] += 1
     write(out, "calls", edges)

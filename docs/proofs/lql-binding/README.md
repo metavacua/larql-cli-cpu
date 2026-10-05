@@ -45,3 +45,25 @@ The exit status says only how the run ended: 0 when the facts were derived and
 the certificates checked, 2 when the tooling failed or the extraction was
 vacuous (no dispatch found, no backend readers found, or a dispatched handler
 absent from the IR).
+
+## Partition: toolchain against runtime
+
+`partition.dl` assigns each larql-lql function to the statement classes
+that reach it, using the class decision in `data/statement_class.facts` and
+the call graph above. The derived snapshot, and its data model, are in
+`results/`. At 63b9827f:
+
+| Side | Functions | Lines |
+|---|---|---|
+| toolchain only | 86 | 4,899 |
+| runtime only | 87 | 4,217 |
+| shared | 33 | 850 |
+| unreached | 140 | 3,737 |
+
+The shared functions are the binding (`exec_use`, `bind_v3_session`,
+`require_vindex`, Hugging Face path resolution), read access to the
+knowledge source, prompt encoding, WHERE-condition evaluation, and reading
+the edit overlay (`load_memit_store`, `compose_overrides`): the runtime
+cannot make edits but runs on the edited model, so the vindex and the edit
+overlay are the two formats the sides exchange. `recursive.tsv` includes
+`parse_value`, the self-recursion that makes LQL's grammar non-regular.

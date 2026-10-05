@@ -1,0 +1,51 @@
+// Which code each class of LQL statement reaches: the toolchain
+// (decompile, compile, edit) against the runtime (bind, read, run).
+// statement_class is a recorded decision, not derived; noise lists the
+// function names that collide across unrelated types and are therefore
+// not traversed (name-based call resolution would join unrelated code).
+.decl fn(f:symbol)
+.decl calls(a:symbol, b:symbol)
+.decl dispatch(v:symbol, h:symbol)
+.decl statement_class(v:symbol, cls:symbol)
+.decl noise(f:symbol)
+.decl fn_lines(f:symbol, file:symbol, n:number)
+.input fn
+.input calls
+.input dispatch
+.input statement_class
+.input noise
+.input fn_lines
+
+.decl step(a:symbol, b:symbol)
+step(a, b) :- calls(a, b), !noise(b).
+.decl reach(a:symbol, b:symbol)
+reach(a, a) :- fn(a).
+reach(a, c) :- reach(a, b), step(b, c).
+
+// recursion through any path, including direct self-calls
+.decl recursive(f:symbol)
+recursive(f) :- step(f, f).
+recursive(f) :- step(f, g), g != f, reach(g, f).
+
+.decl class_reach(cls:symbol, f:symbol)
+class_reach(c, f) :- statement_class(v, c), dispatch(v, h), reach(h, f).
+
+.decl side(f:symbol, s:symbol)
+side(f, "toolchain_only") :- class_reach("toolchain", f), !class_reach("runtime", f).
+side(f, "runtime_only")   :- class_reach("runtime", f), !class_reach("toolchain", f).
+side(f, "shared")         :- class_reach("toolchain", f), class_reach("runtime", f).
+side(f, "unreached")      :- fn(f), !class_reach("toolchain", f), !class_reach("runtime", f).
+
+// lines summed over every definition sharing the name
+.decl side_total(s:symbol, fns:number, lines:number)
+side_total(s, n, l) :- side(_, s),
+    n = count : { side(_f, s) },
+    l = sum k : { side(g, s), fn_lines(g, _file, k) }.
+
+.decl unclassified_statement(v:symbol)
+unclassified_statement(v) :- dispatch(v, _), !statement_class(v, _).
+
+.output recursive
+.output side
+.output side_total
+.output unclassified_statement

@@ -25,7 +25,7 @@ expect() { # name, file, needle, present(1)/absent(0)
   if [ "$got" = "$4" ]; then echo "PASS $1: $2 $want '$3'"
   else echo "FAIL $1: $2 should be $want '$3'"; fails=$((fails+1)); fi
 }
-run() { "$HERE/run_gate.sh" "$W/$1/src" "$W/$1/work" ${2:+"$2"} > "$W/$1/log" 2>&1; echo $?; }
+run() { CLASS_FACTS="$HERE/tests/skeleton_class.facts" "$HERE/run_gate.sh" "$W/$1/src" "$W/$1/work" ${2:+"$2"} > "$W/$1/log" 2>&1; echo $?; }
 
 [ "$(run base)" = 0 ] || { echo "FAIL base: gate did not exit 0"; cat "$W/base/log"; fails=$((fails+1)); }
 expect base no_read '^ShowModels\t' 1
@@ -36,6 +36,13 @@ expect base no_read '^Walk\t' 0
 expect base may_raise '^Stats\t' 1
 expect base may_raise '^Walk\t' 1
 expect base binds '^Use\t' 1
+
+expect base recursive '^depth$' 1                 # self-call kept by the extractor
+# partition: runtime and toolchain statements, and the code each reaches
+expect base side '^require_vindex\truntime_only$' 1
+expect base side '^exec_begin_patch\ttoolchain_only$' 1
+expect base side '^depth\truntime_only$' 1
+expect base side_total '^runtime_only\t' 1
 
 [ "$(run show_models_reads)" = 0 ] || { echo "FAIL show_models_reads: exit"; fails=$((fails+1)); }
 expect show_models_reads no_read '^ShowModels\t' 0

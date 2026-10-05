@@ -38,7 +38,17 @@ impl Session {
 
     fn exec_walk(&self, _prompt: &str) -> Result<Vec<String>, LqlError> {
         let _v = self.require_vindex()?;
+        let _d = self.depth(3);
         Ok(vec![])
+    }
+
+    // Direct self-recursion: the extractor must keep the self-call.
+    fn depth(&self, n: u32) -> u32 {
+        if n == 0 {
+            0
+        } else {
+            1 + self.depth(n - 1)
+        }
     }
 
     fn require_vindex(&self) -> Result<&Vindex, LqlError> {

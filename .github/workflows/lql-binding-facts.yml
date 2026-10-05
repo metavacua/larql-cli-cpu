@@ -60,6 +60,13 @@ jobs:
         run: |
           nix shell "$NIXPKGS#souffle" "$NIXPKGS#lean4" -c env REQUIRE_LEAN=1 \
             docs/proofs/lql-binding/run_gate.sh crates/larql-lql/src "$RUNNER_TEMP/syn" | tee "$RUNNER_TEMP/syn.txt"
+      - name: Committed partition matches the source
+        run: |
+          set -euo pipefail
+          for t in side side_total recursive unclassified_statement; do
+            LC_ALL=C sort "$RUNNER_TEMP/syn/out/$t.csv" | diff -u docs/proofs/lql-binding/results/$t.tsv -
+          done
+          test ! -s docs/proofs/lql-binding/results/unclassified_statement.tsv
       - name: Summary
         if: always()
         run: |
