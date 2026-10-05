@@ -12,14 +12,14 @@ All files are tab-separated, with no header.
 | `side.tsv` | function, side | Which statement class reaches the function (`toolchain_only`, `runtime_only`, `shared`, `unreached`) |
 | `side_total.tsv` | side, functions, lines | Counts per side; lines summed over every definition with that name, test code excluded |
 | `recursive.tsv` | function | Functions on a call cycle, including direct self-calls |
-| `unclassified_statement.tsv` | statement | Dispatched statement variants with no entry in `data/statement_class.facts`; must be empty |
+| `unclassified_statement.tsv` | statement | Dispatched statement variants with no entry in `decisions/statement_class.facts`; must be empty |
 
 Inputs that are decisions rather than facts:
-- `data/statement_class.facts`: each statement variant's class. Toolchain is
+- `decisions/statement_class.facts`: each statement variant's class. Toolchain is
   decompile, compile and edit (EXTRACT, COMPILE, MERGE, DIFF, COMPACT, INSERT,
   DELETE, UPDATE, REBALANCE, the patch statements). Runtime is bind, read and
   run (USE, WALK, DESCRIBE, SELECT, EXPLAIN, INFER, TRACE, STATS, SHOW…).
-- `data/noise.facts`: function names not traversed, because name-based
+- `decisions/noise.facts`: function names not traversed, because name-based
   resolution joins unrelated types through them (`new`, `default`, `from`,
   `parse`).
 

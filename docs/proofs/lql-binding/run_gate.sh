@@ -14,10 +14,10 @@ for f in dispatch reads_backend; do
   [ -s "$W/facts/$f.facts" ] || { echo "NOT CHECKED: no $f facts extracted (rule or code shape changed?)"; exit 2; }
 done
 souffle -F "$W/facts" -D "$W/out" "$HERE/binding.dl" || exit 2
-# Partition of the code by statement class (data/statement_class.facts is the
+# Partition of the code by statement class (decisions/statement_class.facts is the
 # recorded decision; CLASS_FACTS overrides it, e.g. for the skeleton tests).
-cp "${CLASS_FACTS:-$HERE/data/statement_class.facts}" "$W/facts/statement_class.facts"
-cp "$HERE/data/noise.facts" "$W/facts/noise.facts"
+cp "${CLASS_FACTS:-$HERE/decisions/statement_class.facts}" "$W/facts/statement_class.facts"
+cp "$HERE/decisions/noise.facts" "$W/facts/noise.facts"
 souffle -F "$W/facts" -D "$W/out" "$HERE/partition.dl" || exit 2
 if [ -n "$IR" ]; then
   [ -s "$IR/calls.facts" ] || { echo "NOT CHECKED: IR facts are empty"; exit 2; }

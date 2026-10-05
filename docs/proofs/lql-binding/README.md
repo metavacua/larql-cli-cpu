@@ -49,7 +49,7 @@ absent from the IR).
 ## Partition: toolchain against runtime
 
 `partition.dl` assigns each larql-lql function to the statement classes
-that reach it, using the class decision in `data/statement_class.facts` and
+that reach it, using the class decision in `decisions/statement_class.facts` and
 the call graph above. The derived snapshot, and its data model, are in
 `results/`. At 63b9827f:
 
