@@ -10,7 +10,8 @@
 //!      layer/feature filters (handles both heap and mmap modes).
 //!
 //! After collection, optional WHERE-score filter, ORDER BY, and
-//! LIMIT are applied before formatting.
+//! LIMIT are applied before formatting. Without ORDER BY the metadata scan
+//! is lazy and stops at LIMIT admitted rows (#16).
 
 use crate::ast::{CompareOp, Condition, Field, NearestClause, OrderBy, Value};
 use crate::error::LqlError;
@@ -19,6 +20,7 @@ use crate::executor::Session;
 use super::format::{
     also_display, banner, format_also, EDGES_DEFAULT_LIMIT, EDGES_WALK_TOP_K, SCORE_EQ_TOLERANCE,
 };
+use super::plan::ScanDecision;
 
 /// One row of `SELECT * FROM EDGES` output before formatting.
 struct EdgeRow {
@@ -153,14 +155,29 @@ impl Session {
             all_layers.clone()
         };
 
+        // Limit pushdown (#16): without ORDER BY the result is
+        // `take(limit, filter(score, scan))`, so the scan can stop at `limit`
+        // admitted rows. ORDER BY needs every row before sorting.
+        // What reaches the scan is decided by DataFusion's optimizer (plan.rs).
+        let decision = super::plan::scan_decision(order.is_some(), limit, filters.score.is_some())
+            .map_err(|e| LqlError::exec("SELECT planning failed", e))?;
+        if decision == ScanDecision::Skip {
+            return Ok(format_rows(&[], filters.relation.is_some()));
+        }
+        let stop_at = match decision {
+            ScanDecision::Fetch(n) => Some(n),
+            _ => None,
+        };
+
         let mut rows: Vec<EdgeRow> = Vec::new();
-        collect_edges(
+        let seen = collect_edges(
             &ctx,
             classifier,
             filters.entity,
             filters.relation,
             filters.feature,
             &scan_layers,
+            (&filters, stop_at),
             &mut rows,
         )?;
 
@@ -170,7 +187,9 @@ impl Session {
         // residual probe, not string/cosine — see relation_resolver) and
         // re-collect against the canonical relation.
         let mut notes: Vec<String> = Vec::new();
-        if rows.is_empty() {
+        // `seen` counts matches before the score filter, so a relation that
+        // matched rows which all fail `WHERE score` is not treated as unknown.
+        if seen == 0 {
             if let (Some(rel), Some(rc)) = (filters.relation, classifier) {
                 let relations = rc.relation_labels();
                 let already_exact = relations.iter().any(|r| r.eq_ignore_ascii_case(rel));
@@ -206,6 +225,7 @@ impl Session {
                             Some(canonical.as_str()),
                             filters.feature,
                             &scan_layers,
+                            (&filters, stop_at),
                             &mut rows,
                         )?;
                     }
@@ -340,22 +360,45 @@ fn collect_edges(
     relation: Option<&str>,
     feature: Option<usize>,
     scan_layers: &[usize],
+    (filters, stop_at): (&EdgeFilters<'_>, Option<usize>),
     rows: &mut Vec<EdgeRow>,
-) -> Result<(), LqlError> {
+) -> Result<usize, LqlError> {
     if let (Some(entity), Some(rel)) = (entity, relation) {
+        let before = rows.len();
         collect_via_walk(ctx, classifier, entity, rel, feature, scan_layers, rows)?;
+        Ok(rows.len() - before)
     } else {
-        collect_via_scan(
+        let scan = scan_edges(
             &ctx.source,
             classifier,
             entity,
             relation,
             feature,
             scan_layers,
-            rows,
         );
+        Ok(drain_scan(scan, filters, stop_at, rows))
     }
-    Ok(())
+}
+
+/// Consume a lazy edge scan into `rows`. With `stop_at = Some(n)` (no
+/// ORDER BY) this is `take(n, filter(score, scan))`: the iterator is not
+/// pulled past the n-th admitted row, so a LIMIT bounds the work, not just
+/// the output (#16). With `None` (ORDER BY) every row is collected and the
+/// caller sorts, filters and truncates. Returns how many rows the scan
+/// yielded before the score filter.
+fn drain_scan(
+    scan: impl Iterator<Item = EdgeRow>,
+    filters: &EdgeFilters<'_>,
+    stop_at: Option<usize>,
+    rows: &mut Vec<EdgeRow>,
+) -> usize {
+    let mut seen = 0usize;
+    let counted = scan.inspect(|_| seen += 1);
+    match stop_at {
+        Some(n) => rows.extend(counted.filter(|r| filters.score_matches(r.c_score)).take(n)),
+        None => rows.extend(counted),
+    }
+    seen
 }
 
 /// Walk-anchored collection: embed the entity, walk every requested
@@ -410,52 +453,47 @@ fn collect_via_walk(
     Ok(())
 }
 
-/// Direct metadata scan: enumerate features at the requested layers
-/// and apply optional entity/relation/feature filters.
-fn collect_via_scan(
-    source: &crate::executor::knowledge::KnowledgeSource<'_>,
-    classifier: Option<&crate::relations::RelationClassifier>,
-    entity_filter: Option<&str>,
-    relation_filter: Option<&str>,
+/// Direct metadata scan, lazily: features at the requested layers in
+/// (layer, feature) order, with the optional entity/relation/feature
+/// filters applied. Nothing is read from the source until the iterator is
+/// pulled, so `drain_scan` decides how much of it runs.
+fn scan_edges<'s>(
+    source: &'s crate::executor::knowledge::KnowledgeSource<'s>,
+    classifier: Option<&'s crate::relations::RelationClassifier>,
+    entity_filter: Option<&'s str>,
+    relation_filter: Option<&'s str>,
     feature_filter: Option<usize>,
-    scan_layers: &[usize],
-    rows: &mut Vec<EdgeRow>,
-) {
-    for layer in scan_layers {
-        let nf = source.num_features(*layer);
-        for feat_idx in 0..nf {
-            if let Some(ff) = feature_filter {
-                if feat_idx != ff {
-                    continue;
+    scan_layers: &'s [usize],
+) -> impl Iterator<Item = EdgeRow> + 's {
+    scan_layers.iter().flat_map(move |&layer| {
+        (0..source.num_features(layer))
+            .filter(move |&feat_idx| feature_filter.is_none_or(|ff| feat_idx == ff))
+            .filter_map(move |feat_idx| {
+                let meta = source.feature_meta(layer, feat_idx)?;
+                if let Some(ent) = entity_filter {
+                    if !meta.top_token.to_lowercase().contains(&ent.to_lowercase()) {
+                        return None;
+                    }
                 }
-            }
-            let Some(meta) = source.feature_meta(*layer, feat_idx) else {
-                continue;
-            };
-            if let Some(ent) = entity_filter {
-                if !meta.top_token.to_lowercase().contains(&ent.to_lowercase()) {
-                    continue;
+                let rel_label = classifier
+                    .and_then(|rc| rc.label_for_feature(layer, feat_idx))
+                    .unwrap_or("")
+                    .to_string();
+                if let Some(rel) = relation_filter {
+                    if !relation_match(&rel_label, rel) {
+                        return None;
+                    }
                 }
-            }
-            let rel_label = classifier
-                .and_then(|rc| rc.label_for_feature(*layer, feat_idx))
-                .unwrap_or("")
-                .to_string();
-            if let Some(rel) = relation_filter {
-                if !relation_match(&rel_label, rel) {
-                    continue;
-                }
-            }
-            rows.push(EdgeRow {
-                layer: *layer,
-                feature: feat_idx,
-                top_token: meta.top_token.clone(),
-                also: format_also(&meta.top_k),
-                relation: rel_label,
-                c_score: meta.c_score,
-            });
-        }
-    }
+                Some(EdgeRow {
+                    layer,
+                    feature: feat_idx,
+                    top_token: meta.top_token.clone(),
+                    also: format_also(&meta.top_k),
+                    relation: rel_label,
+                    c_score: meta.c_score,
+                })
+            })
+    })
 }
 
 fn sort_rows(rows: &mut [EdgeRow], ord: &OrderBy) {
@@ -556,191 +594,4 @@ fn format_rows(rows: &[EdgeRow], explicit_relation_filter: bool) -> Vec<String> 
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ast::CompareOp;
-
-    fn cond(field: &str, op: CompareOp, value: Value) -> Condition {
-        Condition {
-            field: field.into(),
-            op,
-            value,
-        }
-    }
-
-    #[test]
-    fn edge_filters_extracts_all_predicates() {
-        let cs = vec![
-            cond("entity", CompareOp::Eq, Value::String("France".into())),
-            cond("relation", CompareOp::Eq, Value::String("capital".into())),
-            cond("layer", CompareOp::Eq, Value::Integer(5)),
-            cond("feature", CompareOp::Eq, Value::Integer(7)),
-            cond("score", CompareOp::Gt, Value::Number(0.5)),
-        ];
-        let f = EdgeFilters::from_conditions(&cs);
-        assert_eq!(f.entity, Some("France"));
-        assert_eq!(f.relation, Some("capital"));
-        assert_eq!(f.layer, Some(5));
-        assert_eq!(f.feature, Some(7));
-        assert!(matches!(f.score, Some((CompareOp::Gt, _))));
-    }
-
-    #[test]
-    fn edge_filters_score_matches_each_op() {
-        let mk = |op, t: f32| EdgeFilters {
-            entity: None,
-            relation: None,
-            layer: None,
-            feature: None,
-            score: Some((op, t)),
-        };
-        assert!(mk(CompareOp::Gt, 0.5).score_matches(0.6));
-        assert!(!mk(CompareOp::Gt, 0.5).score_matches(0.4));
-        assert!(mk(CompareOp::Lt, 0.5).score_matches(0.4));
-        assert!(!mk(CompareOp::Lt, 0.5).score_matches(0.6));
-        assert!(mk(CompareOp::Gte, 0.5).score_matches(0.5));
-        assert!(mk(CompareOp::Lte, 0.5).score_matches(0.5));
-        assert!(mk(CompareOp::Eq, 0.5).score_matches(0.5));
-        assert!(mk(CompareOp::Eq, 0.5).score_matches(0.5005));
-        assert!(!mk(CompareOp::Eq, 0.5).score_matches(0.6));
-        assert!(mk(CompareOp::Neq, 0.5).score_matches(0.6));
-    }
-
-    #[test]
-    fn edge_filters_no_score_predicate_matches_anything() {
-        let f = EdgeFilters {
-            entity: None,
-            relation: None,
-            layer: None,
-            feature: None,
-            score: None,
-        };
-        assert!(f.score_matches(-1e9));
-        assert!(f.score_matches(1e9));
-    }
-
-    #[test]
-    fn relation_match_handles_substring_in_either_direction() {
-        assert!(relation_match("capital_of", "capital"));
-        assert!(relation_match("capital", "capital_of"));
-        assert!(!relation_match("", "capital"));
-        assert!(!relation_match("director", "actor"));
-    }
-
-    #[test]
-    fn sort_rows_by_layer_descending() {
-        let mut rows = vec![
-            EdgeRow {
-                layer: 1,
-                feature: 0,
-                top_token: "".into(),
-                also: "".into(),
-                relation: "".into(),
-                c_score: 0.0,
-            },
-            EdgeRow {
-                layer: 5,
-                feature: 0,
-                top_token: "".into(),
-                also: "".into(),
-                relation: "".into(),
-                c_score: 0.0,
-            },
-            EdgeRow {
-                layer: 3,
-                feature: 0,
-                top_token: "".into(),
-                also: "".into(),
-                relation: "".into(),
-                c_score: 0.0,
-            },
-        ];
-        sort_rows(
-            &mut rows,
-            &OrderBy {
-                field: "layer".into(),
-                descending: true,
-            },
-        );
-        assert_eq!(rows[0].layer, 5);
-        assert_eq!(rows[1].layer, 3);
-        assert_eq!(rows[2].layer, 1);
-    }
-
-    #[test]
-    fn format_rows_empty_emits_no_match_line() {
-        let out = format_rows(&[], false);
-        assert!(out.last().unwrap().contains("no matching edges"));
-    }
-
-    #[test]
-    fn format_rows_chooses_widest_layout_with_relation_and_also() {
-        let row = EdgeRow {
-            layer: 1,
-            feature: 2,
-            top_token: "Paris".into(),
-            also: "French, Europe".into(),
-            relation: "capital".into(),
-            c_score: 0.95,
-        };
-        let out = format_rows(&[row], true);
-        assert!(out[0].contains("Relation"));
-        assert!(out[0].contains("Also"));
-        assert!(out.iter().any(|l| l.contains("Paris")));
-        assert!(out.iter().any(|l| l.contains("[French, Europe]")));
-    }
-
-    #[test]
-    fn match_relation_top1_accepts_exact_and_subword_relations() {
-        let rels = vec![
-            "capital".to_string(),
-            "currency".to_string(),
-            "language".to_string(),
-        ];
-        // Full-word top-1 (the common case — these tokenise to one token).
-        assert_eq!(
-            match_relation_top1(&rels, " capital").as_deref(),
-            Some("capital")
-        );
-        assert_eq!(
-            match_relation_top1(&rels, "Currency").as_deref(),
-            Some("currency")
-        );
-        // Leading sub-word still resolves (prefix-match in either direction).
-        assert_eq!(
-            match_relation_top1(&rels, "lang").as_deref(),
-            Some("language")
-        );
-    }
-
-    #[test]
-    fn match_relation_top1_abstains_on_none_and_out_of_domain() {
-        let rels = vec![
-            "capital".to_string(),
-            "currency".to_string(),
-            "language".to_string(),
-        ];
-        // The `none` escape: top-1 == none → no relation → abstain.
-        assert_eq!(match_relation_top1(&rels, "none"), None);
-        // Out-of-domain distractors abstain (the confident-wrong fix).
-        assert_eq!(match_relation_top1(&rels, "weather"), None);
-        assert_eq!(match_relation_top1(&rels, "banana"), None);
-        // Empty / whitespace top-1 abstains rather than panicking.
-        assert_eq!(match_relation_top1(&rels, "   "), None);
-    }
-
-    #[test]
-    fn format_rows_drops_relation_column_when_no_filter_and_no_label() {
-        let row = EdgeRow {
-            layer: 0,
-            feature: 0,
-            top_token: "Foo".into(),
-            also: "".into(),
-            relation: "".into(),
-            c_score: 0.5,
-        };
-        let out = format_rows(&[row], false);
-        assert!(!out[0].contains("Relation"));
-        assert!(!out[0].contains("Also"));
-    }
-}
+mod tests;

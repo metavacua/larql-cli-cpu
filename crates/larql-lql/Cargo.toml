@@ -14,6 +14,11 @@ larql-inference = { path = "../larql-inference" }
 larql-kv = { path = "../larql-kv" }
 larql-models = { path = "../larql-models" }
 larql-vindex = { path = "../larql-vindex" }
+# SELECT planning (#16): DataFusion's optimizer decides limit/filter
+# pushdown into the edge scan. Planning only; nothing executes in DataFusion.
+datafusion-common = { version = "55.1", default-features = false }
+datafusion-expr = { version = "55.1", default-features = false }
+datafusion-optimizer = { version = "55.1", default-features = false }
 ndarray = "0.16"
 reqwest = { workspace = true, features = ["blocking", "json"] }
 rustyline = "15"
