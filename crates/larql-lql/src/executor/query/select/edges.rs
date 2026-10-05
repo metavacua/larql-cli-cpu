@@ -10,7 +10,8 @@
 //!      layer/feature filters (handles both heap and mmap modes).
 //!
 //! After collection, optional WHERE-score filter, ORDER BY, and
-//! LIMIT are applied before formatting.
+//! LIMIT are applied before formatting. Without ORDER BY the metadata scan
+//! is lazy and stops at LIMIT admitted rows (#16).
 
 use crate::ast::{CompareOp, Condition, Field, NearestClause, OrderBy, Value};
 use crate::error::LqlError;
@@ -19,6 +20,7 @@ use crate::executor::Session;
 use super::format::{
     also_display, banner, format_also, EDGES_DEFAULT_LIMIT, EDGES_WALK_TOP_K, SCORE_EQ_TOLERANCE,
 };
+use super::plan::ScanDecision;
 
 /// One row of `SELECT * FROM EDGES` output before formatting.
 struct EdgeRow {
@@ -153,14 +155,29 @@ impl Session {
             all_layers.clone()
         };
 
+        // Limit pushdown (#16): without ORDER BY the result is
+        // `take(limit, filter(score, scan))`, so the scan can stop at `limit`
+        // admitted rows. ORDER BY needs every row before sorting.
+        // What reaches the scan is decided by DataFusion's optimizer (plan.rs).
+        let decision = super::plan::scan_decision(order.is_some(), limit, filters.score.is_some())
+            .map_err(|e| LqlError::exec("SELECT planning failed", e))?;
+        if decision == ScanDecision::Skip {
+            return Ok(format_rows(&[], filters.relation.is_some()));
+        }
+        let stop_at = match decision {
+            ScanDecision::Fetch(n) => Some(n),
+            _ => None,
+        };
+
         let mut rows: Vec<EdgeRow> = Vec::new();
-        collect_edges(
+        let seen = collect_edges(
             &ctx,
             classifier,
             filters.entity,
             filters.relation,
             filters.feature,
             &scan_layers,
+            (&filters, stop_at),
             &mut rows,
         )?;
 
@@ -170,7 +187,9 @@ impl Session {
         // residual probe, not string/cosine — see relation_resolver) and
         // re-collect against the canonical relation.
         let mut notes: Vec<String> = Vec::new();
-        if rows.is_empty() {
+        // `seen` counts matches before the score filter, so a relation that
+        // matched rows which all fail `WHERE score` is not treated as unknown.
+        if seen == 0 {
             if let (Some(rel), Some(rc)) = (filters.relation, classifier) {
                 let relations = rc.relation_labels();
                 let already_exact = relations.iter().any(|r| r.eq_ignore_ascii_case(rel));
@@ -206,6 +225,7 @@ impl Session {
                             Some(canonical.as_str()),
                             filters.feature,
                             &scan_layers,
+                            (&filters, stop_at),
                             &mut rows,
                         )?;
                     }
@@ -340,22 +360,45 @@ fn collect_edges(
     relation: Option<&str>,
     feature: Option<usize>,
     scan_layers: &[usize],
+    (filters, stop_at): (&EdgeFilters<'_>, Option<usize>),
     rows: &mut Vec<EdgeRow>,
-) -> Result<(), LqlError> {
+) -> Result<usize, LqlError> {
     if let (Some(entity), Some(rel)) = (entity, relation) {
+        let before = rows.len();
         collect_via_walk(ctx, classifier, entity, rel, feature, scan_layers, rows)?;
+        Ok(rows.len() - before)
     } else {
-        collect_via_scan(
+        let scan = scan_edges(
             &ctx.source,
             classifier,
             entity,
             relation,
             feature,
             scan_layers,
-            rows,
         );
+        Ok(drain_scan(scan, filters, stop_at, rows))
     }
-    Ok(())
+}
+
+/// Consume a lazy edge scan into `rows`. With `stop_at = Some(n)` (no
+/// ORDER BY) this is `take(n, filter(score, scan))`: the iterator is not
+/// pulled past the n-th admitted row, so a LIMIT bounds the work, not just
+/// the output (#16). With `None` (ORDER BY) every row is collected and the
+/// caller sorts, filters and truncates. Returns how many rows the scan
+/// yielded before the score filter.
+fn drain_scan(
+    scan: impl Iterator<Item = EdgeRow>,
+    filters: &EdgeFilters<'_>,
+    stop_at: Option<usize>,
+    rows: &mut Vec<EdgeRow>,
+) -> usize {
+    let mut seen = 0usize;
+    let counted = scan.inspect(|_| seen += 1);
+    match stop_at {
+        Some(n) => rows.extend(counted.filter(|r| filters.score_matches(r.c_score)).take(n)),
+        None => rows.extend(counted),
+    }
+    seen
 }
 
 /// Walk-anchored collection: embed the entity, walk every requested
@@ -410,52 +453,47 @@ fn collect_via_walk(
     Ok(())
 }
 
-/// Direct metadata scan: enumerate features at the requested layers
-/// and apply optional entity/relation/feature filters.
-fn collect_via_scan(
-    source: &crate::executor::knowledge::KnowledgeSource<'_>,
-    classifier: Option<&crate::relations::RelationClassifier>,
-    entity_filter: Option<&str>,
-    relation_filter: Option<&str>,
+/// Direct metadata scan, lazily: features at the requested layers in
+/// (layer, feature) order, with the optional entity/relation/feature
+/// filters applied. Nothing is read from the source until the iterator is
+/// pulled, so `drain_scan` decides how much of it runs.
+fn scan_edges<'s>(
+    source: &'s crate::executor::knowledge::KnowledgeSource<'s>,
+    classifier: Option<&'s crate::relations::RelationClassifier>,
+    entity_filter: Option<&'s str>,
+    relation_filter: Option<&'s str>,
     feature_filter: Option<usize>,
-    scan_layers: &[usize],
-    rows: &mut Vec<EdgeRow>,
-) {
-    for layer in scan_layers {
-        let nf = source.num_features(*layer);
-        for feat_idx in 0..nf {
-            if let Some(ff) = feature_filter {
-                if feat_idx != ff {
-                    continue;
+    scan_layers: &'s [usize],
+) -> impl Iterator<Item = EdgeRow> + 's {
+    scan_layers.iter().flat_map(move |&layer| {
+        (0..source.num_features(layer))
+            .filter(move |&feat_idx| feature_filter.is_none_or(|ff| feat_idx == ff))
+            .filter_map(move |feat_idx| {
+                let meta = source.feature_meta(layer, feat_idx)?;
+                if let Some(ent) = entity_filter {
+                    if !meta.top_token.to_lowercase().contains(&ent.to_lowercase()) {
+                        return None;
+                    }
                 }
-            }
-            let Some(meta) = source.feature_meta(*layer, feat_idx) else {
-                continue;
-            };
-            if let Some(ent) = entity_filter {
-                if !meta.top_token.to_lowercase().contains(&ent.to_lowercase()) {
-                    continue;
+                let rel_label = classifier
+                    .and_then(|rc| rc.label_for_feature(layer, feat_idx))
+                    .unwrap_or("")
+                    .to_string();
+                if let Some(rel) = relation_filter {
+                    if !relation_match(&rel_label, rel) {
+                        return None;
+                    }
                 }
-            }
-            let rel_label = classifier
-                .and_then(|rc| rc.label_for_feature(*layer, feat_idx))
-                .unwrap_or("")
-                .to_string();
-            if let Some(rel) = relation_filter {
-                if !relation_match(&rel_label, rel) {
-                    continue;
-                }
-            }
-            rows.push(EdgeRow {
-                layer: *layer,
-                feature: feat_idx,
-                top_token: meta.top_token.clone(),
-                also: format_also(&meta.top_k),
-                relation: rel_label,
-                c_score: meta.c_score,
-            });
-        }
-    }
+                Some(EdgeRow {
+                    layer,
+                    feature: feat_idx,
+                    top_token: meta.top_token.clone(),
+                    also: format_also(&meta.top_k),
+                    relation: rel_label,
+                    c_score: meta.c_score,
+                })
+            })
+    })
 }
 
 fn sort_rows(rows: &mut [EdgeRow], ord: &OrderBy) {

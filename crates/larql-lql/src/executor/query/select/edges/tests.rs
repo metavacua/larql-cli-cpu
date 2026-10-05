@@ -224,7 +224,11 @@ fn collect_all_then_cut(scores: &[f32], filters: &EdgeFilters<'_>, limit: usize)
 fn drain_scan_returns_exactly_the_collect_all_rows() {
     // Exhaustive over a finite domain: every score sequence of length 0..=6
     // over {low, high}, with and without a score predicate, every limit 0..=7.
-    let preds = [None, Some((CompareOp::Gt, 0.5)), Some((CompareOp::Lte, 0.5))];
+    let preds = [
+        None,
+        Some((CompareOp::Gt, 0.5)),
+        Some((CompareOp::Lte, 0.5)),
+    ];
     for len in 0..=6usize {
         for mask in 0..(1u32 << len) {
             let scores: Vec<f32> = (0..len)
@@ -258,7 +262,11 @@ fn drain_scan_stops_pulling_at_the_limit() {
     let mut rows = Vec::new();
     drain_scan(scan, &score_filter(None), Some(3), &mut rows);
     assert_eq!(rows.len(), 3);
-    assert_eq!(pulled.get(), 3, "the scan must not be pulled past the limit");
+    assert_eq!(
+        pulled.get(),
+        3,
+        "the scan must not be pulled past the limit"
+    );
 }
 
 #[test]
@@ -270,7 +278,12 @@ fn drain_scan_pulls_past_rejected_rows_only_as_far_as_needed() {
         row(i, if i < 5 { 0.2 } else { 0.8 })
     });
     let mut rows = Vec::new();
-    drain_scan(scan, &score_filter(Some((CompareOp::Gt, 0.5))), Some(2), &mut rows);
+    drain_scan(
+        scan,
+        &score_filter(Some((CompareOp::Gt, 0.5))),
+        Some(2),
+        &mut rows,
+    );
     assert_eq!(rows.iter().map(|r| r.layer).collect::<Vec<_>>(), vec![5, 6]);
     assert_eq!(pulled.get(), 7);
 }
@@ -278,8 +291,35 @@ fn drain_scan_pulls_past_rejected_rows_only_as_far_as_needed() {
 #[test]
 fn drain_scan_without_a_limit_drains_and_leaves_filtering_to_the_caller() {
     // ORDER BY needs every row before sorting: no early stop, no filtering here.
-    let scan = [0.2f32, 0.8, 0.2].into_iter().enumerate().map(|(i, s)| row(i, s));
+    let scan = [0.2f32, 0.8, 0.2]
+        .into_iter()
+        .enumerate()
+        .map(|(i, s)| row(i, s));
     let mut rows = Vec::new();
-    drain_scan(scan, &score_filter(Some((CompareOp::Gt, 0.5))), None, &mut rows);
+    drain_scan(
+        scan,
+        &score_filter(Some((CompareOp::Gt, 0.5))),
+        None,
+        &mut rows,
+    );
     assert_eq!(rows.len(), 3);
+}
+
+#[test]
+fn drain_scan_reports_rows_seen_before_the_score_filter() {
+    // The FR3 synonym fallback must fire only when the relation matched
+    // nothing, not when matches exist but all fail `WHERE score`.
+    let scan = [0.2f32, 0.2]
+        .into_iter()
+        .enumerate()
+        .map(|(i, s)| row(i, s));
+    let mut rows = Vec::new();
+    let seen = drain_scan(
+        scan,
+        &score_filter(Some((CompareOp::Gt, 0.5))),
+        Some(5),
+        &mut rows,
+    );
+    assert!(rows.is_empty());
+    assert_eq!(seen, 2);
 }
