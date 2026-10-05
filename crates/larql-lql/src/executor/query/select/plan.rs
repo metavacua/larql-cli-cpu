@@ -8,8 +8,10 @@
 //! of the scan for `LIMIT 0`. LQL executes the optimised `TableScan` with
 //! its own lazy scan; ORDER BY, WHERE score and LIMIT are still applied by
 //! the caller afterwards, which is idempotent with what was pushed.
+//!
+//! API checked against the datafusion-{common,expr,optimizer} 55.1.0 sources:
+//! `TableSource` is `Any + Sync + Send` and has no `as_any`.
 
-use std::any::Any;
 use std::sync::Arc;
 
 use datafusion_common::arrow::datatypes::{DataType, Field as ArrowField, Schema, SchemaRef};
@@ -56,10 +58,6 @@ impl EdgesSource {
 }
 
 impl TableSource for EdgesSource {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> SchemaRef {
         Arc::clone(&self.schema)
     }
