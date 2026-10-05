@@ -1,0 +1,31 @@
+# Structural facts about larql-lql's executor, for binding.dl.
+id: fn
+language: rust
+rule: {kind: function_item}
+---
+id: testmod
+language: rust
+rule: {kind: mod_item, regex: '^mod tests'}
+---
+id: call
+language: rust
+rule: {kind: call_expression}
+---
+id: backend_read
+language: rust
+rule: {pattern: self.backend}
+---
+id: backend_write
+language: rust
+rule: {pattern: 'self.backend = $X'}
+---
+id: nobackend
+language: rust
+rule: {pattern: LqlError::NoBackend}
+---
+id: arm
+language: rust
+rule:
+  kind: match_arm
+  regex: '^Statement::'
+  inside: {kind: function_item, regex: '^(pub )?fn execute\(', stopBy: end}

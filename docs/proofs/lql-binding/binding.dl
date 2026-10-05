@@ -1,0 +1,53 @@
+// Which LQL statements depend on the session binding that USE establishes.
+// Input facts come from lqlfacts.py (ast-grep), optionally plus compiler
+// (LLVM IR) call edges in ir_calls. Every result is relative to these facts.
+.decl fn(f:symbol)
+.decl calls(a:symbol, b:symbol)
+.decl ir_calls(a:symbol, b:symbol)
+.decl reads_backend(f:symbol)
+.decl writes_backend(f:symbol)
+.decl raises_nobackend(f:symbol)
+.decl dispatch(v:symbol, h:symbol)
+.input fn
+.input calls
+.input ir_calls
+.input reads_backend
+.input writes_backend
+.input raises_nobackend
+.input dispatch
+
+.decl edge(a:symbol, b:symbol)
+edge(a, b) :- calls(a, b).
+edge(a, b) :- ir_calls(a, b), fn(a), fn(b).
+
+.decl reach(a:symbol, b:symbol)
+reach(a, a) :- fn(a).
+reach(a, c) :- reach(a, b), edge(b, c).
+
+.decl may_read(h:symbol)
+may_read(h) :- dispatch(_, h), reach(h, x), reads_backend(x).
+
+// no_read: the statement's handler reaches no access to self.backend.
+.decl no_read(v:symbol, h:symbol)
+no_read(v, h) :- dispatch(v, h), fn(h), !may_read(h).
+.decl may_raise(v:symbol, h:symbol)
+may_raise(v, h) :- dispatch(v, h), reach(h, x), raises_nobackend(x).
+.decl binds(v:symbol, h:symbol)
+binds(v, h) :- dispatch(v, h), reach(h, x), writes_backend(x).
+.decl reads_never_raises(v:symbol, h:symbol)
+reads_never_raises(v, h) :- dispatch(v, h), may_read(h), !may_raise(v, h).
+.decl reaches_use(v:symbol, h:symbol)
+reaches_use(v, h) :- dispatch(v, h), h != "exec_use", reach(h, "exec_use").
+.decl witness(h:symbol, x:symbol)
+witness(h, x) :- dispatch(_, h), reach(h, x), reads_backend(x).
+// call edges the compiler sees between larql-lql functions that ast-grep did not
+.decl astgrep_missed(a:symbol, b:symbol)
+astgrep_missed(a, b) :- ir_calls(a, b), fn(a), fn(b), !calls(a, b), a != b.
+
+.output no_read
+.output may_raise
+.output binds
+.output reads_never_raises
+.output reaches_use
+.output witness
+.output astgrep_missed
