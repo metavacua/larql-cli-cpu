@@ -13,7 +13,7 @@ on:
     branches: [main]
     paths:
       - 'crates/larql-kv/**'
-      - 'crates/larql-inference/src/test_utils.rs'
+      - 'crates/larql-inference/src/test_utils/**'
       - 'crates/larql-inference/src/forward/**'
       - 'crates/larql-inference/src/attention/**'
       - 'crates/larql-inference/src/ffn/**'
@@ -29,7 +29,7 @@ on:
     branches: [main]
     paths:
       - 'crates/larql-kv/**'
-      - 'crates/larql-inference/src/test_utils.rs'
+      - 'crates/larql-inference/src/test_utils/**'
       - 'crates/larql-inference/src/forward/**'
       - 'crates/larql-inference/src/attention/**'
       - 'crates/larql-inference/src/ffn/**'

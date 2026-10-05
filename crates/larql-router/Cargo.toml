@@ -40,12 +40,10 @@ tonic = "0.13"
 # the whole build, regardless of what other crates (e.g. larql-vindex)
 # already chose.
 reqwest = { workspace = true, features = ["json", "stream", "blocking"] }
-serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-thiserror = { workspace = true }
 futures = "0.3"
 futures-core = "0.3"
 # ADR-0017 — Prometheus /metrics endpoint. Pulled in unconditionally
@@ -69,7 +67,6 @@ rustls = { version = "0.23", optional = true, default-features = false, features
 [dev-dependencies]
 axum = { version = "0.8", features = ["ws"] }
 criterion = { version = "0.5", features = ["html_reports"] }
-tempfile = "3"
 # `tower::ServiceExt::oneshot` for axum-router unit testing in
 # tests/test_http_handlers.rs. Only needed for the HTTP-handler test
 # harness; not pulled into the binary.

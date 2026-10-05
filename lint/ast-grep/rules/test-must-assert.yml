@@ -1,0 +1,41 @@
+id: test-must-assert
+language: rust
+severity: error
+message: a #[test] must check something
+note: |
+  A test whose body never asserts, never expects an error and never panics
+  on a wrong value executes code without checking it: it adds coverage
+  without adding evidence. Assert on the result, unwrap the expected error
+  (`expect_err`/`unwrap_err`), or mark the test `#[should_panic]`. A test
+  that delegates to a helper must call one whose name says it checks
+  (`assert_*`, `check_*`, `expect_*`, `verify_*`).
+files:
+  - crates/larql-cli/**/*.rs
+rule:
+  kind: function_item
+  follows:
+    stopBy:
+      not:
+        kind: attribute_item
+    kind: attribute_item
+    regex: '^#\[(tokio::)?test'
+  not:
+    any:
+      - follows:
+          stopBy:
+            not:
+              kind: attribute_item
+          kind: attribute_item
+          regex: '^#\[should_panic'
+      - has:
+          stopBy: end
+          kind: macro_invocation
+          has:
+            field: macro
+            regex: '(^|::)(assert\w*|debug_assert\w*|prop_assert\w*|panic|unreachable|bail)$'
+      - has:
+          stopBy: end
+          kind: call_expression
+          has:
+            field: function
+            regex: '(^|::|\.)(expect_err|unwrap_err|(assert|check|expect|verify)_\w+)$'

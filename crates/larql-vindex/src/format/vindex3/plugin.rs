@@ -73,11 +73,50 @@ pub fn abi() -> &'static str {
     ABI.trim_end_matches('\0')
 }
 
+/// How [`ABI`] ends when build.rs could not read a git commit.
+const UNKNOWN_COMMIT: &str = "commit unknown";
+
 /// Whether `abi` is one this host can trust: identical to its own, and
 /// not built from an unknown commit (two unknowns are not evidence of
 /// one source).
 pub fn abi_compatible(abi: &str) -> bool {
-    abi == self::abi() && !abi.ends_with("commit unknown")
+    abi_refusal(abi).is_none()
+}
+
+/// Why a plugin stamped `stamp` is refused by this host, or `None` when
+/// [`abi_compatible`] accepts it. Names the rule that fired: an unknown
+/// commit refuses even two identical stamps, and saying only "built for
+/// X, this binary is X" leaves nothing to act on.
+pub fn abi_refusal(stamp: &str) -> Option<String> {
+    refusal_against(abi(), stamp)
+}
+
+fn refusal_against(host: &str, stamp: &str) -> Option<String> {
+    let unknown = [(stamp, "the plugin"), (host, "this binary")]
+        .into_iter()
+        .filter(|(s, _)| s.ends_with(UNKNOWN_COMMIT))
+        .map(|(_, who)| who)
+        .collect::<Vec<_>>();
+    if stamp == host && unknown.is_empty() {
+        return None;
+    }
+    let mut reason = if stamp == host {
+        format!("the stamps match (`{host}`), but")
+    } else {
+        format!("built for `{stamp}`, this binary is `{host}`")
+    };
+    if !unknown.is_empty() {
+        let connective = if stamp == host { "" } else { "; and" };
+        reason.push_str(&format!(
+            "{connective} {} {} built without a git commit (`{UNKNOWN_COMMIT}`), so a \
+             match would not show both came from one source — build from a git checkout",
+            unknown.join(" and "),
+            if unknown.len() == 1 { "was" } else { "were" }
+        ));
+    } else {
+        reason.push_str(" — rebuild the plugin against this larql checkout with the same compiler");
+    }
+    Some(reason)
 }
 
 /// Symbol a plugin exports: `extern "C" fn() -> *const c_char`, its [`ABI`].

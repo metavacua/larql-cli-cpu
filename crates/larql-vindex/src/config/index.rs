@@ -349,6 +349,15 @@ impl VindexConfig {
             || self.extract_level == ExtractLevel::All
     }
 
+    /// Whether this vindex can run a local forward pass: model weights
+    /// are present *and* the FFN is among them. The `Attention` tier sets
+    /// `has_model_weights` (attention + norms are weights) yet carries no
+    /// FFN up/down tensors, so `has_model_weights` alone is not enough
+    /// to gate INFER, TRACE or anything that runs the walk FFN.
+    pub fn has_local_ffn_weights(&self) -> bool {
+        self.has_model_weights && self.extract_level != ExtractLevel::Attention
+    }
+
     /// Resident-size estimate for a browse-only vindex — just the
     /// gate matrices + embeddings + tokenizer.  Sized as the f32
     /// expansion of the gate vectors (worst case under warmup).

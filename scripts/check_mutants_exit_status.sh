@@ -11,10 +11,12 @@
 #   5/6 - the --in-diff diff didn't apply / wasn't a valid diff
 #   70 - internal error
 #
-# Called from the `mutants` job's "Mutation-test the diff" step in
-# quality.yml, once per matrix leg (ubuntu-latest, macos-14) — this is the
-# one place both legs interpret cargo-mutants' outcome, so the two never
-# drift out of sync the way inlined copies would.
+# Called from the "Mutation-test the diff" step in mutants.yml, once per
+# matrix leg — this is the one place every leg interprets cargo-mutants'
+# outcome, so they never drift out of sync the way inlined copies would.
+#
+# Exits 1 for status 4 (the measurement is void) and 0 otherwise: missed
+# mutants and timeouts are reported, not failed.
 set -euo pipefail
 
 status="$1"
@@ -43,14 +45,15 @@ fi
 # in the PR checks tab — a blanket `exit 0` swallowed a real workspace
 # build break, not an absence of mutants.
 if [ "$status" -eq 4 ]; then
-  echo "::warning::cargo-mutants baseline build/test failed before any mutant ran (exit 4) — this is NOT a clean mutation-testing pass, the workspace baseline itself is broken. See the build log above."
+  echo "::error::cargo-mutants baseline build/test failed before any mutant ran (exit 4) — this is NOT a clean mutation-testing pass, the workspace baseline itself is broken. See the build log above."
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     {
       echo "### :warning: cargo-mutants baseline failed (exit 4)"
       echo
-      echo "The unmutated baseline failed to build or test — **zero mutants were tested**. Do not read this job's green check as \"no mutants in this diff\"; the run is incomplete, not clean."
+      echo "The unmutated baseline failed to build or test — **zero mutants were tested**. The run is void, not clean, so this job fails."
     } >> "$GITHUB_STEP_SUMMARY"
   fi
+  exit 1
 elif [ "$status" -ge 3 ]; then
   echo "::warning::cargo-mutants exited $status (timeout / diff-parse / internal error, see mutants.rs/exit-codes.html) — treat this run as incomplete, not clean."
 fi

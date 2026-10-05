@@ -36,11 +36,7 @@ impl Session {
 
         // ── Phase 1: load model weights and tokenise ──
         let (path, config, patched) = self.require_vindex()?;
-        if !config.has_model_weights {
-            return Err(LqlError::Execution(
-                "EXPLAIN INFER requires model weights. Rebuild with WITH INFERENCE.".into(),
-            ));
-        }
+        Self::require_local_ffn("EXPLAIN INFER", path, config)?;
         if with_attention && config.quant != larql_vindex::QuantFormat::None {
             return Err(LqlError::Execution(
                 "EXPLAIN INFER WITH ATTENTION does not yet support quantised (q4k) vindexes — \

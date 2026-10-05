@@ -363,6 +363,15 @@ pub fn run(args: ExtractIndexArgs) -> Result<(), Box<dyn std::error::Error>> {
     let build_start = Instant::now();
 
     let level = resolve_extract_level(args.include_weights, args.quant, args.level);
+    // A request *below* the default is deliberate; say so when it is not
+    // honoured. (`inference` -> `all` is the unremarkable default case.)
+    if level != args.level && args.level < larql_vindex::ExtractLevel::Inference {
+        eprintln!(
+            "note: --level {} raised to {level}: --quant q4k and --include-weights always \
+             write a full vindex",
+            args.level
+        );
+    }
 
     // Dtype resolution:
     //   --f16                → F16

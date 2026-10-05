@@ -7,6 +7,7 @@
 #
 # Jobs:
 #   audit       — RustSec advisory scan of Cargo.lock            (blocking)
+#   unused-deps — cargo-machete: declared but unreferenced deps  (blocking)
 #   deny        — licences, advisories, sources, bans            (blocking)
 #   msrv        — the declared rust-version really compiles      (blocking)
 #   proto-lint  — buf lint over the three gRPC schemas           (blocking)
@@ -85,13 +86,32 @@ jobs:
         uses: taiki-e/install-action@cargo-audit
 
       # Vulnerabilities fail the build. Unmaintained/unsound *warnings* do
-      # not: the four currently outstanding (number_prefix, paste,
-      # rustls-pemfile, scc) are all pinned by upstream crates we do not
-      # control, so failing on them would mean a permanently red gate that
+      # not: the two currently outstanding (paste, scc) are pinned by
+      # upstream crates we do not control, so failing on them would mean
+      # a permanently red gate that
       # people learn to ignore. They are still printed in the log, and the
       # rationale for each is recorded in deny.toml.
       - name: Scan Cargo.lock for advisories
         run: cargo audit --color always
+
+  unused-deps:
+    name: cargo-machete
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      # machete greps each crate's sources for the names in its manifest, so
+      # it needs no compile and no registry download. A dependency declared
+      # but never referenced is dead weight and attack surface; a crate
+      # linked only for its side effects (e.g. openblas-src) is listed under
+      # `[package.metadata.cargo-machete] ignored` in its own manifest, with
+      # the reason beside it.
+      - name: Install cargo-machete
+        uses: taiki-e/install-action@cargo-machete
+
+      - name: Find unused dependencies
+        run: cargo machete
 
   deny:
     name: cargo-deny · ${{ matrix.check }}

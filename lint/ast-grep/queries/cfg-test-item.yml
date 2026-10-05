@@ -1,0 +1,26 @@
+# An item compiled only under `cfg(test)` (a `mod tests { .. }` block, a
+# test-only helper or impl). Not a lint: covgate runs it with --rule to
+# remove these spans from the coverage denominator, because test code
+# executing itself is not evidence about the code under test. Items gated
+# on `any(test, feature = ..)` are compiled outside tests and stay counted.
+id: cfg-test-item
+language: rust
+severity: hint
+message: compiled only under cfg(test)
+rule:
+  any:
+    - kind: mod_item
+    - kind: function_item
+    - kind: impl_item
+    - kind: struct_item
+    - kind: enum_item
+    - kind: const_item
+    - kind: static_item
+    - kind: trait_item
+    - kind: macro_invocation
+  follows:
+    stopBy:
+      not:
+        kind: attribute_item
+    kind: attribute_item
+    regex: '^#\[cfg\((all\()?test\b'

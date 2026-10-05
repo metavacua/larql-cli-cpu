@@ -34,15 +34,9 @@ yanked = "deny"
 
 ignore = [
     # --- unmaintained, pinned by upstream crates we do not control -----------
-    # number_prefix <- indicatif 0.17. No maintained fork; indicatif has not
-    # cut a release that drops it. Formatting-only crate, no untrusted input.
-    { id = "RUSTSEC-2025-0119", reason = "number_prefix is pulled by indicatif 0.17; no upstream release drops it yet" },
     # paste <- tokenizers 0.21, metal 0.29, macro_rules_attribute. Proc-macro
     # that expands at compile time only; nothing of it survives into a binary.
     { id = "RUSTSEC-2024-0436", reason = "paste is a compile-time proc-macro pulled by tokenizers/metal; no runtime surface" },
-    # rustls-pemfile <- axum-server 0.7. Superseded by rustls-pki-types, which
-    # axum-server has not migrated to.
-    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is pulled by axum-server 0.7; upstream has not migrated to rustls-pki-types" },
 
     # NOTE: RUSTSEC-2026-0205 (scc 2.4.0, unsound `Array::insert`) is *not*
     # listed here. cargo-deny's dependency graph does not reach it, so an

@@ -218,14 +218,8 @@ fn load_one(path: &std::path::Path) -> Result<PluginRegistrar, BoxErr> {
         let abi: AbiFn = std::mem::transmute::<*mut libc::c_void, AbiFn>(abi);
         CStr::from_ptr(abi()).to_string_lossy().into_owned()
     };
-    if !plugin::abi_compatible(&stamp) {
-        return Err(format!(
-            "--plugin {}: built for `{stamp}`, this binary is `{}` — rebuild the plugin \
-             against this larql checkout with the same compiler",
-            path.display(),
-            plugin::abi()
-        )
-        .into());
+    if let Some(reason) = plugin::abi_refusal(&stamp) {
+        return Err(format!("--plugin {}: {reason}", path.display()).into());
     }
     let register = symbol(plugin::REGISTER_SYMBOL)?;
     let mut registrar = PluginRegistrar::new();

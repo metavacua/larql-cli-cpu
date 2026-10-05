@@ -110,13 +110,7 @@ impl Session {
             )));
         }
 
-        if !config.has_model_weights {
-            return Err(LqlError::Execution(
-                "COMPACT MAJOR requires model weights for residual capture. \
-                 Load a vindex with weights via USE."
-                    .into(),
-            ));
-        }
+        Self::require_local_ffn("COMPACT MAJOR", path, config)?;
 
         // Collect L1 edges from patches.
         //

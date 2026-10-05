@@ -1,0 +1,230 @@
+# larql-cli coverage gate (scripts/covgate).
+#
+# One CELL per (target triple x feature set): 4 targets x {release,
+# research} = 8 cells. Each cell uploads line hits (LCOV), function
+# regions (llvm-cov JSON) and the non-test build's dep-info; the gate job
+# decides crates/larql-cli/coverage-policy.json over all of them. Test
+# code is removed from every denominator, nothing is excluded, and only
+# rules with no free parameter gate (see the policy's note).
+#
+# Resources: 8 cells at up to 90 minutes each is the declared ceiling
+# (~12 runner-hours worst case, ~4-6 typical). The model download for
+# SmolLM2-backed tests is skipped until a test actually reads the model.
+
+name: larql-cli coverage
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'scripts/covgate/**'
+      - 'scripts/test_covgate*.py'
+      - 'lint/ast-grep/**'
+      - '.github/workflows/larql-cli-coverage.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'scripts/covgate/**'
+      - 'scripts/test_covgate*.py'
+      - 'lint/ast-grep/**'
+      - '.github/workflows/larql-cli-coverage.yml'
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # The OpenBLAS buffer pool races under the parallel test runner.
+  OPENBLAS_NUM_THREADS: "1"
+  OMP_NUM_THREADS: "1"
+  SMOLLM2_REPO: HuggingFaceTB/SmolLM2-135M
+
+jobs:
+  # Cheap, and a gate that cannot fail is worse than none: run its own
+  # controls before spending eight cells.
+  selftest:
+    name: covgate unit tests + self-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install ast-grep
+        run: python3 -m pip install --quiet ast-grep-cli
+      - name: Unit tests
+        working-directory: scripts
+        run: python3 -m unittest discover -s . -p 'test_covgate*.py'
+      - name: Known-clean passes, planted defects fail
+        working-directory: scripts
+        run: python3 -m covgate selftest --repo-root .. --summary "$GITHUB_STEP_SUMMARY"
+
+  lint:
+    name: no new test that checks nothing
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install ast-grep
+        run: python3 -m pip install --quiet ast-grep-cli
+      - name: Assertion lint (ratchet against the base branch)
+        working-directory: scripts
+        run: |
+          base=()
+          if [ "${{ github.event_name }}" = "pull_request" ]; then base=(--base "origin/${{ github.base_ref }}"); fi
+          python3 -m covgate lint --crate-dir crates/larql-cli --repo-root .. "${base[@]}" --summary "$GITHUB_STEP_SUMMARY"
+
+  cell:
+    name: cell ${{ matrix.target }}.${{ matrix.feature }}
+    needs: selftest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  feature: release,  flags: --no-default-features }
+          - { os: ubuntu-latest,    target: x86_64-unknown-linux-gnu,  feature: research, flags: '' }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, feature: release,  flags: --no-default-features }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, feature: research, flags: '' }
+          - { os: macos-14,         target: aarch64-apple-darwin,      feature: release,  flags: --no-default-features }
+          - { os: macos-14,         target: aarch64-apple-darwin,      feature: research, flags: '' }
+          - { os: windows-latest,   target: x86_64-pc-windows-msvc,    feature: release,  flags: --no-default-features }
+          - { os: windows-latest,   target: x86_64-pc-windows-msvc,    feature: research, flags: '' }
+    defaults:
+      run:
+        shell: bash
+    env:
+      CELL: ${{ matrix.target }}.${{ matrix.feature }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install OpenBLAS (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopenblas-dev pkg-config
+
+      - name: Install OpenBLAS (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
+          if (-not $vcpkgRoot) { $vcpkgRoot = "C:\vcpkg" }
+          "VCPKG_ROOT=$vcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+          & "$vcpkgRoot\vcpkg.exe" install openblas:x64-windows
+
+      - name: Install protoc (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install protoc -y --no-progress
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: The cell's target is the one it claims
+        run: |
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          if [ "$host" != "${{ matrix.target }}" ]; then
+            echo "::error::runner host is $host, cell claims ${{ matrix.target }}"
+            exit 1
+          fi
+
+      # Spend the model download only when a test reads the model.
+      - name: Do any tests need SmolLM2?
+        id: model
+        run: |
+          if grep -rq 'LARQL_TEST_SMOLLM2' crates/larql-cli; then echo "needed=true" >> "$GITHUB_OUTPUT"; else echo "needed=false" >> "$GITHUB_OUTPUT"; fi
+      - name: Cache SmolLM2
+        if: steps.model.outputs.needed == 'true'
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ env.SMOLLM2_REPO }}
+      - name: Fetch SmolLM2
+        if: steps.model.outputs.needed == 'true'
+        run: |
+          python3 -m pip install --quiet huggingface_hub
+          dir=$(python3 -c "from huggingface_hub import snapshot_download; print(snapshot_download('$SMOLLM2_REPO'))")
+          echo "LARQL_TEST_SMOLLM2=$dir" >> "$GITHUB_ENV"
+
+      - name: Non-test dep-info (which files production code compiles)
+        run: |
+          cargo check -p larql-cli --bins ${{ matrix.flags }} --target-dir target/depinfo
+          mkdir -p "cell/$CELL/depinfo"
+          cp target/depinfo/debug/deps/larql-*.d "cell/$CELL/depinfo/"
+          ls "cell/$CELL/depinfo"
+
+      - name: Run tests under coverage
+        run: |
+          cargo llvm-cov clean --workspace
+          cargo llvm-cov --no-report -p larql-cli ${{ matrix.flags }}
+          if [ "${{ steps.model.outputs.needed }}" = "true" ]; then
+            cargo llvm-cov --no-report -p larql-cli ${{ matrix.flags }} -- --ignored smol135_
+          fi
+
+      - name: Export line hits and function regions
+        run: |
+          cargo llvm-cov report --lcov --output-path "cell/$CELL/lcov.info"
+          cargo llvm-cov report --json --output-path "cell/$CELL/cov.json"
+          jq -n --arg name "$CELL" --arg target "${{ matrix.target }}" --arg feature "${{ matrix.feature }}" \
+            --argjson attempt "${{ github.run_attempt }}" \
+            '{name: $name, target: $target, feature: $feature, attempt: $attempt}' > "cell/$CELL/cell.json"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cov-${{ env.CELL }}
+          path: cell/${{ env.CELL }}/
+
+  gate:
+    name: coverage gate
+    needs: cell
+    if: always() && needs.cell.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install ast-grep
+        run: python3 -m pip install --quiet ast-grep-cli
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: cov-*
+          path: ${{ runner.temp }}/cells
+      # Artifact directories are named cov-<cell>; covgate reads the cell
+      # name from each cell.json, so the prefix is harmless.
+      - name: Decide the gate over every cell
+        working-directory: scripts
+        run: |
+          base=()
+          if [ "${{ github.event_name }}" = "pull_request" ]; then base=(--base "origin/${{ github.base_ref }}"); fi
+          python3 -m covgate check --cells "$RUNNER_TEMP/cells" --crate-dir crates/larql-cli --repo-root .. \
+            "${base[@]}" --json "$RUNNER_TEMP/covgate-report.json" --summary "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: covgate-report
+          path: ${{ runner.temp }}/covgate-report.json
