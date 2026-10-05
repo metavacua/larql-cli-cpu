@@ -5,21 +5,33 @@
 # PRODUCES a vindex on the current binary, records its structural descriptor
 # (family/dtype/quant vs expected — so extraction/convert breakage or silent
 # dequant is observed, not assumed), then runs the full LQL command corpus against
-# it and records the RAW MECHANICAL OUTCOME of every cell. Discovery experiment,
-# not a pass/fail gate: the breakage is the deliverable. Legs are enumerated by
+# it and records the RAW MECHANICAL OUTCOME of every cell. Legs are enumerated by
 # scripts/lql_matrix/gen_legs.py (no prediction-pruning — see that file).
+#
+# This is the correctness CI and it runs on every pull request. Every cell is
+# still recorded as data, and the run fails on any conformance violation, any
+# failing real-artifact check, or a cross-engine drift past the reference
+# threshold — whether or not the pull request introduced it. A pull request
+# passes only when the repository it would produce is clean. `strict=false` on
+# a manual dispatch is the only way to record without failing.
+#
+# The `reference` job is the former shannon-verify.yml: LARQL against
+# HF/PyTorch (bits/char, <=0.5%) on SmolLM2-135M at a pinned revision, reusing
+# this workflow's build.
 
 name: lql-strategy-matrix
 
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
     inputs:
       strict:
-        description: "Fail the run if any conformance invariant is violated"
+        description: "Fail the run if any conformance invariant is violated (always on for push and pull_request)"
         type: boolean
-        default: false
+        default: true
       include_bitnet2b:
         description: "Include BitNet-2B-4T legs (safetensors + GGUF ternary/dequant) -- heaviest source by far, off by default"
         type: boolean
@@ -32,9 +44,11 @@ on:
 permissions:
   contents: read
 
+# A newer push to a PR supersedes its runs; every main push keeps its own
+# record (keyed by run_id), as in the other workflows.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   RUST_BACKTRACE: "1"
@@ -68,9 +82,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-lqlmatrix-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-lqlmatrix-
+          key: ${{ runner.os }}-cargo-reg2-lqlmatrix-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-reg2-lqlmatrix-
       - name: Install BLAS (build)
         run: sudo apt-get update && sudo apt-get install -y libopenblas-dev
       - name: Build larql-cli (release)
@@ -82,6 +95,78 @@ jobs:
           path: target/release/larql
           retention-days: 1
           if-no-files-found: error
+
+  # Cross-engine reference (formerly shannon-verify.yml): LARQL's next-token
+  # bits/char on a fixed corpus against HF/PyTorch F32, failing past 0.5% --
+  # the float-accumulation regime in which HF and MLX agree with each other.
+  # The regression net for the config-loading bugs in
+  # docs/diagnoses/shannon-cross-engine-divergence.md.
+  #
+  # Both engines read ONE pinned revision through its snapshot directory.
+  # Passing the model id instead is not deterministic: larql's
+  # resolve_model_path takes the first snapshot in read_dir order that holds
+  # safetensors and ignores refs/ (larql-models/src/loading/safetensors/
+  # paths.rs), so a cache holding two revisions can score different weights
+  # on the two sides.
+  reference:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      REF_MODEL: HuggingFaceTB/SmolLM2-135M
+      REF_REVISION: 93efa2f097d58c2a74874c7e644dbc9b0cee75a2
+      REF_BYTES: '1024'
+      REF_THRESHOLD: '0.5'
+    steps:
+      - uses: actions/checkout@v6
+      - name: Download larql binary
+        uses: actions/download-artifact@v4
+        with:
+          name: larql-bin
+          path: bin
+      - name: Prep
+        run: |
+          chmod +x bin/larql
+          sudo apt-get update && sudo apt-get install -y libopenblas-dev
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install the HF reference scorer
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          # CPU-only torch: about 200 MB, skips the CUDA libraries.
+          .venv/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch
+          .venv/bin/pip install transformers huggingface_hub
+      - name: Cache the pinned model snapshot
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/huggingface/hub
+          # Exact key, no restore-keys: a partial match could bring a second
+          # revision into the cache.
+          key: ${{ runner.os }}-hf-smollm2-135m-${{ env.REF_REVISION }}
+      - name: Download the pinned revision
+        run: |
+          dir=$(.venv/bin/python -c "from huggingface_hub import snapshot_download; print(snapshot_download('${REF_MODEL}', revision='${REF_REVISION}'))")
+          echo "REF_DIR=$dir" >> "$GITHUB_ENV"
+          echo "snapshot: $dir"
+          ( cd "$dir" && sha256sum ./*.safetensors ./*.json )
+      - name: Prep corpus
+        run: |
+          mkdir -p ref
+          head -c "$REF_BYTES" tests/fixtures/shannon_frankenstein_2k.txt > ref/corpus.txt
+          wc -c ref/corpus.txt
+      - name: Cross-engine verify (LARQL vs HF F32)
+        run: |
+          ./bin/larql shannon verify "$REF_DIR" \
+            --corpus ref/corpus.txt \
+            --context 512 --stride 256 \
+            --engines hf \
+            --threshold "$REF_THRESHOLD" \
+            --python .venv/bin/python \
+            --hf-script scripts/shannon_score_hf.py \
+            --hf-device cpu
 
   quality:
     # Loud, obviously-directed signal on the LQL command stack: fmt + clippy +
@@ -102,9 +187,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-lqlmatrix-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-lqlmatrix-
+          key: ${{ runner.os }}-cargo-reg2-lqlmatrix-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-reg2-lqlmatrix-
       - name: fmt (loud)
         id: fmt
         continue-on-error: true
@@ -407,7 +491,7 @@ jobs:
           path: artifacts
       - name: Run conformance oracle
         env:
-          STRICT_INPUT: ${{ github.event.inputs.strict }}
+          STRICT_INPUT: ${{ github.event.inputs.strict || 'true' }}
         run: |
           STRICT=""
           [ "$STRICT_INPUT" = "true" ] && STRICT="--strict"
@@ -490,9 +574,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-realart-release-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-realart-release-
+          key: ${{ runner.os }}-cargo-reg2-realart-release-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-reg2-realart-release-
       - uses: actions/download-artifact@v4
         with: { name: vindex-smol135base.v3, path: art/smol135base.v3 }
       - uses: actions/download-artifact@v4
