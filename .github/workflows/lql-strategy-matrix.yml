@@ -466,22 +466,34 @@ jobs:
           path: lql-matrix.md
 
   conformance:
-    needs: matrix
+    needs: [plan, matrix]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      # The oracle and its helpers carry their own tests; nothing else runs them.
+      - name: Test the matrix tooling
+        run: |
+          python -m pip install --quiet pytest
+          python -m pytest -q scripts/lql_matrix/
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
+      # Every planned leg must have reported: a leg with no results (cancelled,
+      # timed out, never uploaded) is inconclusive, and strict mode fails on it.
       - name: Run conformance oracle
         env:
           STRICT_INPUT: ${{ github.event.inputs.strict || 'true' }}
+          PLANNED_LEGS: ${{ join(fromJSON(needs.plan.outputs.legs).*.name, ',') }}
         run: |
           STRICT=""
           [ "$STRICT_INPUT" = "true" ] && STRICT="--strict"
           python3 scripts/lql_matrix/conformance.py \
-            "artifacts/results-*/results-*.jsonl" conformance.md conformance.json $STRICT
+            "artifacts/results-*/results-*.jsonl" conformance.md conformance.json $STRICT \
+            "--expect-legs=$PLANNED_LEGS"
           echo "=== conformance.md ==="; cat conformance.md
           cat conformance.md >> "$GITHUB_STEP_SUMMARY"
       - name: Upload conformance report
