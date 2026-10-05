@@ -1,0 +1,115 @@
+# Which LQL statements depend on the session binding that USE establishes
+# (issues #44, #46). Facts about larql-lql's executor come from two sources
+# and feed the same Soufflé program (docs/proofs/lql-binding/):
+#   syntactic - ast-grep over the source; no Rust is compiled.
+#   compiler  - rustc's LLVM IR for larql-lql, which also sees calls inside
+#               macros and monomorphised generics; its edges are compared
+#               with the syntactic ones.
+# Lean checks a certificate for every "never touches the binding" result.
+# The derived tables are a measurement, written to the job summary. A job
+# fails only when the tooling fails or the extraction is vacuous (exit 2).
+
+name: lql-binding-facts
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/larql-lql/src/**'
+      - 'docs/proofs/lql-binding/**'
+      - '.github/workflows/lql-binding-facts.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/larql-lql/src/**'
+      - 'docs/proofs/lql-binding/**'
+      - '.github/workflows/lql-binding-facts.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  NIXPKGS: github:NixOS/nixpkgs/nixos-26.05
+
+jobs:
+  syntactic:
+    name: syntactic facts (ast-grep, Soufflé, Lean)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install ast-grep (pinned)
+        run: python -m pip install --quiet 'ast-grep-cli==0.42.1'
+      # Soufflé and Lean come from the pinned nixos-26.05 binary cache.
+      - uses: cachix/install-nix-action@v31
+      - name: Test the tooling (mutants of a skeleton executor; a forged Lean claim)
+        shell: bash
+        run: |
+          nix shell "$NIXPKGS#souffle" "$NIXPKGS#lean4" -c env REQUIRE_LEAN=1 \
+            docs/proofs/lql-binding/run_tests.sh
+      - name: Derive binding facts
+        shell: bash
+        run: |
+          nix shell "$NIXPKGS#souffle" "$NIXPKGS#lean4" -c env REQUIRE_LEAN=1 \
+            docs/proofs/lql-binding/run_gate.sh crates/larql-lql/src "$RUNNER_TEMP/syn" | tee "$RUNNER_TEMP/syn.txt"
+      - name: Summary
+        if: always()
+        run: |
+          { echo "## LQL binding facts (syntactic)"; echo '```'; cat "$RUNNER_TEMP/syn.txt" 2>/dev/null; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+  compiler:
+    name: compiler facts (rustc LLVM IR)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Install OpenBLAS
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopenblas-dev pkg-config
+      - name: Cache cargo registry (downloads only, never target/)
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-reg2-lql-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-reg2-lql-
+      # One codegen unit, no incremental, no optimisation: every larql-lql
+      # function keeps its own `define` and its calls stay visible.
+      - name: Emit larql-lql's LLVM IR
+        env:
+          CARGO_INCREMENTAL: '0'
+        run: cargo rustc -p larql-lql --lib --locked -- --emit=llvm-ir,link -C codegen-units=1
+      - name: Extract call edges from the IR
+        run: |
+          ls -la target/debug/deps/larql_lql-*.ll
+          c++filt --version | head -1
+          python3 docs/proofs/lql-binding/lqlfacts.py ir --demangler c++filt --crate larql_lql \
+            target/debug/deps/larql_lql-*.ll "$RUNNER_TEMP/ir"
+      - name: Install ast-grep (pinned)
+        run: python -m pip install --quiet 'ast-grep-cli==0.42.1'
+      - uses: cachix/install-nix-action@v31
+      - name: Derive binding facts with compiler edges
+        shell: bash
+        run: |
+          nix shell "$NIXPKGS#souffle" "$NIXPKGS#lean4" -c env REQUIRE_LEAN=1 \
+            docs/proofs/lql-binding/run_gate.sh crates/larql-lql/src "$RUNNER_TEMP/cmp" "$RUNNER_TEMP/ir" | tee "$RUNNER_TEMP/cmp.txt"
+      - name: Summary
+        if: always()
+        run: |
+          { echo "## LQL binding facts (syntactic + compiler edges)"; echo '```'; cat "$RUNNER_TEMP/cmp.txt" 2>/dev/null; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
