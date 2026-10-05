@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 # (file, total, functions, trait, diff) report until a measured
 # derivation replaces the number; rules with no free parameter gate.
 RULES = (
-    "cells", "total", "file", "stale", "functions", "trait", "spread", "diff",
+    "demangle", "cells", "total", "file", "stale", "functions", "trait", "spread", "diff",
     "ratchet", "assert-lint", "mutation",
 )
 

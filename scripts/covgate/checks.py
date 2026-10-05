@@ -3,6 +3,8 @@
 Every rule is decided per cell, so a number can never be carried by a
 different target or feature set than the one it describes:
 
+- demangle:  every function name was demangled (otherwise the trait
+             rule would pass vacuously)
 - cells:     every cell the policy requires reported (a cell that did
              not run is a failure, not an absent row)
 - total:     a cell's line coverage
@@ -23,6 +25,7 @@ from dataclasses import dataclass
 
 from . import metrics
 from .cell import Cell
+from .demangle import still_mangled
 from .diff import Added
 from .policy import Policy
 
@@ -55,6 +58,21 @@ def required_cells(cells: list[Cell], policy: Policy) -> list[Finding]:
 
 
 def thresholds(cell: Cell, policy: Policy) -> list[Finding]:
+    out = demangling(cell)
+    return out + _threshold_rules(cell, policy)
+
+
+def demangling(cell: Cell) -> list[Finding]:
+    """Names left mangled cannot be attributed to traits; reporting the
+    trait rule as passing on them would be a vacuous pass."""
+    left = [f.name for f in cell.functions if still_mangled(f.name)]
+    if not left:
+        return []
+    return [Finding("demangle", cell.name, f"{len(left)} of {len(cell.functions)} functions",
+                    f"names still mangled, e.g. {left[0][:80]}")]
+
+
+def _threshold_rules(cell: Cell, policy: Policy) -> list[Finding]:
     files = {p: r for p, r in metrics.per_file(cell).items() if policy.in_scope(p)}
     covered = sum(c for c, _ in files.values())
     coverable = sum(t for _, t in files.values())

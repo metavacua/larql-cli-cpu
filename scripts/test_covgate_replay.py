@@ -80,6 +80,11 @@ class Pairing(unittest.TestCase):
         files = sorted(pairs[k][0]["file"] for k in picked)
         self.assertEqual((files.count("a.rs"), files.count("b.rs")), (6, 4))
 
+    def test_files_are_the_distinct_files_of_the_selected_mutants(self):
+        names = ["crates/x/src/a.rs:1:5: replace f with 0", "crates/x/src/a.rs:9:1: replace g with 1",
+                 "crates/x/src/b/c.rs:3:2: replace h -> bool with true"]
+        self.assertEqual(pairing.files(names), ["crates/x/src/a.rs", "crates/x/src/b/c.rs"])
+
     def test_names_are_escaped_for_rust_regex_and_anchored(self):
         name = "crates/x/src/a.rs:1:5: replace f -> Result<(), Box<dyn E>> with Ok(())"
         pattern = pairing.rust_regex(name)

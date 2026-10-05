@@ -148,8 +148,12 @@ jobs:
       - name: Run the sampled mutants on ${{ matrix.side }}
         run: |
           mapfile -t patterns < "$RUNNER_TEMP/select/${{ matrix.side }}.re"
+          mapfile -t files < "$RUNNER_TEMP/select/${{ matrix.side }}.files"
           args=()
           for p in "${patterns[@]}"; do [ -n "$p" ] && args+=(--re "$p"); done
+          # --re does not filter struct-field deletion mutants (cargo-mutants
+          # #632); -f bounds those extras to the selected files.
+          for f in "${files[@]}"; do [ -n "$f" ] && args+=(-f "$f"); done
           cd src
           rustc_version=$(rustc -V)
           set +e

@@ -24,10 +24,11 @@ TEST_FILE = f"{CRATE}/src/lib_tests.rs"
 TARGETS = ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu")
 # 40 production lines, then `#[cfg(test)]` on 42 and its `mod tests` on 43..44.
 SOURCE = "\n".join(["pub fn f() {}"] * 40 + ["", "#[cfg(test)]", "mod tests {", "}", ""])
-TRAIT_SYMBOL = "_ZN" + "".join(
-    f"{len(s)}{s}" for s in ("_$LT$demo..S$u20$as$u20$demo..Tr$GT$", "f", "h0123456789abcdef")
-) + "E"
-EXPECTED_PLANTED = {"cells", "total", "file", "functions", "trait", "spread"}
+# A real v0 trait-impl symbol (rustc's default scheme), demangled by c++filt.
+TRAIT_SYMBOL = "_RNvXNtCs93EXaNUS1sC_5larql10trampolineNtB2_19ResearchUnavailableNtNtCsc36rpYXAlPq_4core3fmt7Display3fmt"
+# Not a valid symbol: c++filt leaves it as is, which must be a finding.
+UNDEMANGLABLE = "_RNvXXXbroken"
+EXPECTED_PLANTED = {"demangle", "cells", "total", "file", "functions", "trait", "spread"}
 
 
 def _policy() -> dict:
@@ -41,7 +42,7 @@ def _policy() -> dict:
             "mutation_min_kill_percent": 90.0, "mutation_confidence": 0.95,
             "required_cells": [f"{t}.release" for t in TARGETS] + ["missing.release"],
             # The self-test gates every rule: it proves each one CAN fire.
-            "gating_rules": ["cells", "total", "file", "stale", "functions", "trait", "spread", "diff"],
+            "gating_rules": ["demangle", "cells", "total", "file", "stale", "functions", "trait", "spread", "diff"],
         },
     }
 
@@ -60,9 +61,10 @@ def _cell(root: Path, target: str, covered: int, trait_ran: bool) -> None:
         f"SF:/w/{SRC}\n{da}end_of_record\nSF:/w/{TEST_FILE}\nDA:1,9\nend_of_record\n")
     (d / CELL_DEPINFO / "demo.d").write_text(f"/t/demo: /w/{SRC}\n")
     region = [1, 1, 40, 2, 1 if trait_ran else 0, 0, 0, 0]
-    (d / CELL_JSON).write_text(json.dumps({"data": [{"functions": [
-        {"name": TRAIT_SYMBOL, "count": int(trait_ran), "filenames": [f"/w/{SRC}"], "regions": [region]},
-    ]}]}))
+    funcs = [{"name": TRAIT_SYMBOL, "count": int(trait_ran), "filenames": [f"/w/{SRC}"], "regions": [region]}]
+    if not trait_ran:  # the planted cell also carries a name nothing can demangle
+        funcs.append({"name": UNDEMANGLABLE, "count": 1, "filenames": [f"/w/{SRC}"], "regions": [[2, 1, 3, 2, 1, 0, 0, 0]]})
+    (d / CELL_JSON).write_text(json.dumps({"data": [{"functions": funcs}]}))
 
 
 def _crate(root: Path, repo_root: Path, clean: bool) -> None:

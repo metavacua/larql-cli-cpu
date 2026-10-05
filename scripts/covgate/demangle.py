@@ -1,64 +1,51 @@
-"""Rust legacy-mangling demangler and trait attribution.
+"""Symbol demangling (by the standard tool) and trait attribution.
 
-llvm-cov names functions by their linker symbol. rustc's default (legacy)
-scheme is `_ZN` + length-prefixed segments + a `h<hash>` segment + `E`, with
-`$LT$`-style escapes. A trait method is `<Type as path::Trait>::method`, so
-the trait a function implements is recoverable from its name alone.
-v0 symbols (`_R`) are not demangled: they are opted into by a flag this
-workspace does not set, and an undemangled name simply attributes to no
-trait rather than to a wrong one.
+llvm-cov names functions by linker symbol. Since rustc made the v0 scheme
+the default, symbols are `_R...`; older builds and dependencies may still
+be legacy `_ZN...`. Both are demangled by binutils' `c++filt`, preinstalled
+on the CI runners, rather than by code written here: an earlier
+hand-written legacy-only demangler silently attributed no traits on real
+data. Any name still mangled afterwards is reported (`still_mangled`), so
+a demangling failure is a finding, never a vacuous pass.
+
+A trait method demangles to `<Type as path::Trait>::method`. v0 output
+carries crate disambiguators (`core[8c5ac2f034688f9a]::fmt::Display`),
+which are stripped so one trait groups across builds.
 """
 
 from __future__ import annotations
 
 import re
+import subprocess
 
-_ESCAPES = {
-    "$SP$": "@", "$BP$": "*", "$RF$": "&", "$LT$": "<", "$GT$": ">",
-    "$LP$": "(", "$RP$": ")", "$C$": ",",
-}
-_UNICODE = re.compile(r"\$u([0-9a-f]+)\$")
-_HASH = re.compile(r"^h[0-9a-f]{16}$")
+DEMANGLER = ["c++filt"]
+_DISAMBIGUATOR = re.compile(r"\[[0-9a-f]+\]")
+_MANGLED = re.compile(r"(^|:)_(R|ZN)[0-9A-Za-z_]")
 
 
-def _unescape(segment: str) -> str:
-    if segment.startswith("_$"):
-        segment = segment[1:]
-    for escape, char in _ESCAPES.items():
-        segment = segment.replace(escape, char)
-    segment = _UNICODE.sub(lambda m: chr(int(m.group(1), 16)), segment)
-    return segment.replace("..", "::")
+def demangle_all(names: list[str]) -> dict[str, str]:
+    """name -> demangled name, one `c++filt` process for the whole batch.
+    llvm-cov's `file.rs:<symbol>` local-name form keeps its prefix."""
+    unique = list(dict.fromkeys(names))
+    if not unique:
+        return {}
+    result = subprocess.run(
+        DEMANGLER, input="\n".join(unique) + "\n", capture_output=True, text=True, check=True,
+    )
+    lines = result.stdout.splitlines()
+    if len(lines) != len(unique):
+        raise RuntimeError(f"{DEMANGLER[0]} returned {len(lines)} lines for {len(unique)} names")
+    return dict(zip(unique, lines))
 
 
-def demangle(symbol: str) -> str | None:
-    """The demangled path without its hash, or `None` if `symbol` is not a
-    legacy Rust symbol. Accepts llvm-cov's `file.rs:_ZN...` local-name form."""
-    start = symbol.find("_ZN")
-    if start < 0:
-        return None
-    rest, segments = symbol[start + 3 :], []
-    while rest and rest[0] != "E":
-        match = re.match(r"(\d+)", rest)
-        if match is None:
-            return None
-        length = int(match.group(1))
-        body = rest[match.end() : match.end() + length]
-        if len(body) != length:
-            return None
-        segments.append(body)
-        rest = rest[match.end() + length :]
-    if not rest:
-        return None
-    if segments and _HASH.match(segments[-1]):
-        segments.pop()
-    return "::".join(_unescape(s) for s in segments) or None
+def still_mangled(name: str) -> bool:
+    return bool(_MANGLED.search(name))
 
 
 def implemented_trait(path: str) -> str | None:
-    """`core::fmt::Display` for `<x::Foo as core::fmt::Display>::fmt`, and for
-    anything nested in such a method (closures included); `None` otherwise.
-    Bracket-aware, so `<Vec<T> as Trait>` and nested impls resolve to the
-    outermost `as`."""
+    """`core::fmt::Display` for `<x::Foo as core[..]::fmt::Display>::fmt` and
+    for anything nested in such a method; `None` for inherent items, even
+    when a trait appears inside their generic arguments."""
     if not path.startswith("<"):
         return None
     depth = 0
@@ -80,6 +67,6 @@ def implemented_trait(path: str) -> str | None:
         elif char == ">":
             depth -= 1
         elif depth == 0 and inner.startswith(" as ", index):
-            trait = inner[index + 4 :]
-            return re.sub(r"<.*>$", "", trait).strip() or None
+            trait = re.sub(r"<.*>$", "", inner[index + 4 :]).strip()
+            return _DISAMBIGUATOR.sub("", trait) or None
     return None

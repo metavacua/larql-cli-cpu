@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from covgate import checks, depinfo, diff, functions, lcov, metrics, mutation, ratchet, stats  # noqa: E402
 from covgate.cell import Cell, restrict  # noqa: E402
-from covgate.demangle import demangle, implemented_trait  # noqa: E402
+from covgate.demangle import demangle_all, implemented_trait, still_mangled  # noqa: E402
 from covgate.functions import Function  # noqa: E402
 from covgate.paths import repo_relative  # noqa: E402
 from covgate.policy import parse as parse_policy  # noqa: E402
@@ -80,31 +80,42 @@ class DepInfo(unittest.TestCase):
         self.assertEqual(depinfo.parse(text), {A, B})
 
 
+# Real symbols from a larql-cli coverage export (rustc 1.98, v0 mangling is
+# the default). Not hand-written: hand-written legacy symbols are how the
+# trait rule passed vacuously on real data.
+V0_DISPLAY = "_RNvXNtCs93EXaNUS1sC_5larql10trampolineNtB2_19ResearchUnavailableNtNtCsc36rpYXAlPq_4core3fmt7Display3fmt"
+V0_CAPTURE = ("_RNvXNtNtNtCs93EXaNUS1sC_5larql8commands10extraction13residuals_cmdNtB2_17ProgressCallbacks"
+              "NtNtCsepvdsOKcNLz_15larql_inference7capture16CaptureCallbacks14on_entity_done")
+
+
 class Demangle(unittest.TestCase):
-    def test_trait_impl_method_and_its_closure_name_the_trait(self):
-        impl = "_$LT$larql_cli..Foo$u20$as$u20$core..fmt..Display$GT$"
-        self.assertEqual(implemented_trait(demangle(mangle(impl, "fmt"))), "core::fmt::Display")
-        closure = demangle(mangle(impl, "fmt", "_$u7b$$u7b$closure$u7d$$u7d$"))
-        self.assertEqual(implemented_trait(closure), "core::fmt::Display")
+    def test_real_v0_trait_impls_demangle_to_their_trait_without_disambiguators(self):
+        names = demangle_all([V0_DISPLAY, V0_CAPTURE])
+        self.assertEqual(implemented_trait(names[V0_DISPLAY]), "core::fmt::Display")
+        self.assertEqual(implemented_trait(names[V0_CAPTURE]), "larql_inference::capture::CaptureCallbacks")
 
-    def test_generic_self_type_resolves_to_the_outer_as(self):
-        impl = "_$LT$alloc..vec..Vec$LT$T$GT$$u20$as$u20$x..Tr$GT$"
-        self.assertEqual(implemented_trait(demangle(mangle(impl, "f"))), "x::Tr")
+    def test_legacy_symbols_still_demangle(self):
+        legacy = mangle("_$LT$larql_cli..Foo$u20$as$u20$core..fmt..Display$GT$", "fmt")
+        self.assertEqual(implemented_trait(demangle_all([legacy])[legacy]), "core::fmt::Display")
 
-    def test_inherent_functions_and_non_rust_symbols_name_no_trait(self):
-        self.assertEqual(demangle("src/a.rs:" + mangle("larql_cli", "main")), "larql_cli::main")
-        self.assertIsNone(implemented_trait("larql_cli::main"))
-        self.assertIsNone(demangle("_RNvC5crate4main"))
-        self.assertIsNone(demangle("_ZN3abc"))  # truncated
+    def test_an_inherent_method_with_a_trait_in_its_generics_names_no_trait(self):
+        self.assertIsNone(implemented_trait("<larql[ab12]::X>::f::<<larql[ab12]::Y as core[cd34]::ops::Fn>>"))
+
+    def test_a_name_left_mangled_is_detected(self):
+        self.assertTrue(still_mangled("_RNvCs1_5larql4main"))
+        self.assertTrue(still_mangled("src/a.rs:_ZN3foo3barE"))
+        self.assertFalse(still_mangled("larql::main"))
 
 
 class Functions(unittest.TestCase):
     def test_instantiations_merge_and_execute_if_any_ran(self):
-        name = mangle("_$LT$larql_cli..S$u20$as$u20$x..Tr$GT$", "f")
-        record = lambda count: {"name": name, "count": count, "filenames": [f"/w/{A}"],
+        record = lambda count: {"name": V0_DISPLAY, "count": count, "filenames": [f"/w/{A}"],
                                 "regions": [[3, 1, 7, 2, count, 0, 0, 0], [9, 1, 9, 5, 0, 1, 0, 0]]}
         found = functions.parse({"data": [{"functions": [record(0), record(4)]}]})
-        self.assertEqual(found, [Function(A, "<larql_cli::S as x::Tr>::f", "x::Tr", 3, 7, True)])
+        self.assertEqual(len(found), 1)
+        f = found[0]
+        self.assertEqual((f.path, f.trait, f.start, f.end, f.executed), (A, "core::fmt::Display", 3, 7, True))
+        self.assertFalse(still_mangled(f.name))
 
 
 class Restrict(unittest.TestCase):
@@ -139,6 +150,12 @@ class Metrics(unittest.TestCase):
 class Rules(unittest.TestCase):
     def rules(self, findings):
         return sorted({f.rule for f in findings})
+
+    def test_a_cell_whose_names_stayed_mangled_fails_instead_of_passing_the_trait_rule(self):
+        mangled = cell(hits={A: full(10, 10)}, funcs=[Function(A, "_RNvCs1_5larql4main", None, 1, 10, True)])
+        self.assertEqual(self.rules(checks.thresholds(mangled, policy())), ["demangle"])
+        clean = cell(hits={A: full(10, 10)}, funcs=[Function(A, "larql::main", None, 1, 10, True)])
+        self.assertEqual(checks.thresholds(clean, policy()), [])
 
     def test_each_threshold_fires_below_and_not_at_its_minimum(self):
         low = cell(hits={A: full(10, 8)}, funcs=[Function(A, "f", "x::Tr", 1, 10, True),

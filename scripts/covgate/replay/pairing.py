@@ -60,3 +60,12 @@ def sample(pairs: dict[Key, tuple[dict, dict]], n: int, seed: int) -> list[Key]:
 
 def rust_regex(name: str) -> str:
     return "^" + "".join("\\" + c if c in _RUST_META else c for c in name) + "$"
+
+
+def files(names: list[str]) -> list[str]:
+    """Distinct source files of the selected mutants (a name starts with
+    `path:line:col:`). Passed to cargo-mutants as `-f` because its `--re`
+    does not filter struct-field deletion mutants (cargo-mutants #632, open
+    in 27.1.0): restricting files bounds those extras to the selected files.
+    The analysis reads only the selected names, so extras never count."""
+    return sorted({name.split(":", 1)[0] for name in names})

@@ -44,6 +44,10 @@ def cmd_select(args: argparse.Namespace) -> int:
     }, indent=1), encoding="utf-8")
     args.base_re.write_text("\n".join(pairing.rust_regex(b) for b, _ in selection.values()) + "\n")
     args.head_re.write_text("\n".join(pairing.rust_regex(h) for _, h in selection.values()) + "\n")
+    for side, path in (("base", args.base_re), ("head", args.head_re)):
+        index = 0 if side == "base" else 1
+        path.with_suffix(".files").write_text(
+            "\n".join(pairing.files([pair[index] for pair in selection.values()])) + "\n")
     return 0
 
 

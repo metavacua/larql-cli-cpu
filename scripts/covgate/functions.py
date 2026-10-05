@@ -11,7 +11,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from .demangle import demangle, implemented_trait
+from .demangle import demangle_all, implemented_trait
 from .paths import repo_relative
 
 # llvm-cov region tuple: [line_start, col_start, line_end, col_end,
@@ -33,8 +33,8 @@ class Function:
 def parse(export: dict) -> list[Function]:
     """One `Function` per distinct (file, start line, name). Generic
     instantiations share a source span; the function counts as executed
-    if any instantiation ran."""
-    merged: dict[tuple[str, int, str], Function] = {}
+    if any instantiation ran. Names are demangled in one batch."""
+    rows = []
     for data in export.get("data", []):
         for record in data.get("functions", []):
             filenames = record.get("filenames") or []
@@ -45,19 +45,20 @@ def parse(export: dict) -> list[Function]:
                 r for r in record.get("regions", [])
                 if r[_FILE_ID] == 0 and r[_KIND] == _CODE_REGION
             ]
-            if not regions:
-                continue
-            raw = record.get("name", "")
-            name = demangle(raw) or raw
-            start = min(r[_LINE_START] for r in regions)
-            end = max(r[_LINE_END] for r in regions)
-            executed = int(record.get("count", 0)) > 0
-            key = (path, start, name)
-            previous = merged.get(key)
-            if previous is not None:
-                executed = executed or previous.executed
-                end = max(end, previous.end)
-            merged[key] = Function(path, name, implemented_trait(name), start, end, executed)
+            if regions:
+                rows.append((path, record.get("name", ""), regions, int(record.get("count", 0)) > 0))
+    names = demangle_all([raw for _, raw, _, _ in rows])
+    merged: dict[tuple[str, int, str], Function] = {}
+    for path, raw, regions, executed in rows:
+        name = names.get(raw, raw)
+        start = min(r[_LINE_START] for r in regions)
+        end = max(r[_LINE_END] for r in regions)
+        key = (path, start, name)
+        previous = merged.get(key)
+        if previous is not None:
+            executed = executed or previous.executed
+            end = max(end, previous.end)
+        merged[key] = Function(path, name, implemented_trait(name), start, end, executed)
     return list(merged.values())
 
 

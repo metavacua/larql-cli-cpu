@@ -21,6 +21,6 @@
       "x86_64-pc-windows-msvc.release",
       "x86_64-pc-windows-msvc.research"
     ],
-    "gating_rules": ["cells", "spread", "stale", "ratchet", "assert-lint"]
+    "gating_rules": ["demangle", "cells", "spread", "stale", "ratchet", "assert-lint"]
   }
 }
