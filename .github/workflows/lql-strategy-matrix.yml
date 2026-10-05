@@ -16,8 +16,9 @@
 # a manual dispatch is the only way to record without failing.
 #
 # The `reference` job is the former shannon-verify.yml: LARQL against
-# HF/PyTorch (bits/char, <=0.5%) on SmolLM2-135M at a pinned revision, reusing
-# this workflow's build.
+# HF/PyTorch (bits/char, <=0.5%) on SmolLM2-135M, reusing this workflow's
+# build. Models are never pinned: the question is whether larql works on the
+# models as published now, so an upstream change that breaks it must show.
 
 name: lql-strategy-matrix
 
@@ -101,20 +102,12 @@ jobs:
   # the float-accumulation regime in which HF and MLX agree with each other.
   # The regression net for the config-loading bugs in
   # docs/diagnoses/shannon-cross-engine-divergence.md.
-  #
-  # Both engines read ONE pinned revision through its snapshot directory.
-  # Passing the model id instead is not deterministic: larql's
-  # resolve_model_path takes the first snapshot in read_dir order that holds
-  # safetensors and ignores refs/ (larql-models/src/loading/safetensors/
-  # paths.rs), so a cache holding two revisions can score different weights
-  # on the two sides.
   reference:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       REF_MODEL: HuggingFaceTB/SmolLM2-135M
-      REF_REVISION: 93efa2f097d58c2a74874c7e644dbc9b0cee75a2
       REF_BYTES: '1024'
       REF_THRESHOLD: '0.5'
     steps:
@@ -139,19 +132,11 @@ jobs:
           # CPU-only torch: about 200 MB, skips the CUDA libraries.
           .venv/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch
           .venv/bin/pip install transformers huggingface_hub
-      - name: Cache the pinned model snapshot
-        uses: actions/cache@v5
-        with:
-          path: ~/.cache/huggingface/hub
-          # Exact key, no restore-keys: a partial match could bring a second
-          # revision into the cache.
-          key: ${{ runner.os }}-hf-smollm2-135m-${{ env.REF_REVISION }}
-      - name: Download the pinned revision
+      # Downloaded the same way as every matrix leg: the current revision,
+      # into a fresh runner's cache.
+      - name: Download the model
         run: |
-          dir=$(.venv/bin/python -c "from huggingface_hub import snapshot_download; print(snapshot_download('${REF_MODEL}', revision='${REF_REVISION}'))")
-          echo "REF_DIR=$dir" >> "$GITHUB_ENV"
-          echo "snapshot: $dir"
-          ( cd "$dir" && sha256sum ./*.safetensors ./*.json )
+          .venv/bin/python -c "from huggingface_hub import snapshot_download; print(snapshot_download('${REF_MODEL}'))"
       - name: Prep corpus
         run: |
           mkdir -p ref
@@ -159,7 +144,7 @@ jobs:
           wc -c ref/corpus.txt
       - name: Cross-engine verify (LARQL vs HF F32)
         run: |
-          ./bin/larql shannon verify "$REF_DIR" \
+          ./bin/larql shannon verify "$REF_MODEL" \
             --corpus ref/corpus.txt \
             --context 512 --stride 256 \
             --engines hf \

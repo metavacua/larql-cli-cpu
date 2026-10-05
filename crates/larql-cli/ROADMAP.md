@@ -39,7 +39,7 @@ application surfaced four config-loading bugs in `larql-models` (rms_norm_eps
 not parsed; Gemma 3 per-layer-type rope_scaling missing; llama3 rope_scaling
 missing; StarCoder2 norm_epsilon alias). CI gate: the `reference` job of
 [`.github/workflows/lql-strategy-matrix.yml`](../../.github/workflows/lql-strategy-matrix.yml)
-runs it on every PR, at a pinned model revision. Per-arch sweep:
+runs it on every PR. Per-arch sweep:
 [`scripts/diagnose_models.py`](../../scripts/diagnose_models.py). See
 [`docs/cli.md#cross-engine-verify`](../../docs/cli.md#cross-engine-verify) and
 [`docs/diagnoses/shannon-cross-engine-divergence.md`](../../docs/diagnoses/shannon-cross-engine-divergence.md).
