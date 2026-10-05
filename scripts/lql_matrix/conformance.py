@@ -1,6 +1,8 @@
 """Conformance oracle for the lql-strategy-matrix. Evaluates principled,
 no-expected-output invariants over already-captured artifacts and emits a
-report. Default exit 0 (discovery preserved); non-zero only under --strict."""
+report. Default exit 0 (discovery preserved); non-zero only under --strict, where
+no results at all, or a leg named by --expect-legs=a,b,... without results, also
+fails: an unchecked leg is inconclusive, not clean."""
 import glob
 import json
 import re
@@ -293,20 +295,31 @@ def transformation_report(legs):
     return L
 
 
-def run(results_glob, out_md, out_json, strict):
+def run(results_glob, out_md, out_json, strict, expected_legs=None):
     legs = load(results_glob)
     violations = [v for inv in INVARIANTS for v in inv(legs)]
+    # Inconclusive is not clean: a planned leg with no results (cancelled,
+    # timed out, never uploaded) means its cells were never checked.
+    missing = sorted(set(expected_legs or []) - set(legs))
     Path(out_json).write_text(json.dumps(
-        {"violations": [v.__dict__ for v in violations]}, indent=2), encoding="utf-8")
-    Path(out_md).write_text(render(legs, violations), encoding="utf-8")
-    print(f"conformance: {len(violations)} violation(s) across {len(legs)} legs "
-          f"(strict={strict})")
-    return 1 if (strict and violations) else 0
+        {"violations": [v.__dict__ for v in violations], "missing_legs": missing},
+        indent=2), encoding="utf-8")
+    Path(out_md).write_text(render(legs, violations, missing), encoding="utf-8")
+    print(f"conformance: {len(violations)} violation(s) across {len(legs)} legs, "
+          f"{len(missing)} planned leg(s) without results (strict={strict})")
+    inconclusive = not legs or bool(missing)
+    return 1 if (strict and (violations or inconclusive)) else 0
 
 
-def render(legs, violations):
+def render(legs, violations, missing=()):
     L = ["# LQL Matrix — Conformance", "",
-         f"Legs: {len(legs)} · Violations: {len(violations)}", ""]
+         f"Legs: {len(legs)} · Violations: {len(violations)} · "
+         f"Planned legs without results: {len(missing)}", ""]
+    if not legs:
+        L += ["**No results were found: nothing was checked.**", ""]
+    if missing:
+        L += ["**Planned legs without results (not checked):** "
+              + ", ".join(f"`{m}`" for m in missing), ""]
     if violations:
         L += ["| invariant | leg | cell | detail |", "|---|---|---|---|"]
         for v in violations:
@@ -320,10 +333,12 @@ def render(legs, violations):
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     strict = "--strict" in sys.argv[1:]
+    expect = next((a.split("=", 1)[1] for a in sys.argv[1:] if a.startswith("--expect-legs=")), "")
+    expected_legs = [n for n in expect.split(",") if n]
     results_glob = args[0] if args else "artifacts/results-*/results-*.jsonl"
     out_md = args[1] if len(args) > 1 else "conformance.md"
     out_json = args[2] if len(args) > 2 else "conformance.json"
-    sys.exit(run(results_glob, out_md, out_json, strict))
+    sys.exit(run(results_glob, out_md, out_json, strict, expected_legs=expected_legs))
 
 
 if __name__ == "__main__":

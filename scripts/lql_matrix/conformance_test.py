@@ -240,3 +240,44 @@ def test_non_dict_sidecar_does_not_crash(tmp_path):
     # running the full oracle over this leg must not raise
     C.run(str(tmp_path / "results-*/results-*.jsonl"),
           str(tmp_path / "m.md"), str(tmp_path / "j.json"), strict=False)
+
+
+# Inconclusive is not clean: under --strict, a run with no results, or with a
+# planned leg missing its results (cancelled, timed out, never uploaded), must
+# fail rather than pass on zero violations.
+def test_run_strict_fails_when_no_results(tmp_path, monkeypatch):
+    monkeypatch.setattr(C, "INVARIANTS", [])
+    monkeypatch.setattr(C, "load", lambda g: {})
+    assert C.run("x", str(tmp_path/"c.md"), str(tmp_path/"c.json"), strict=True) == 1
+    assert C.run("x", str(tmp_path/"c.md"), str(tmp_path/"c.json"), strict=False) == 0
+
+
+def test_run_strict_fails_when_a_planned_leg_has_no_results(tmp_path, monkeypatch):
+    monkeypatch.setattr(C, "INVARIANTS", [])
+    monkeypatch.setattr(C, "load", lambda g: {"a": make_leg("a")})
+    code = C.run("x", str(tmp_path/"c.md"), str(tmp_path/"c.json"), strict=True,
+                 expected_legs=["a", "b"])
+    assert code == 1
+    assert json.loads((tmp_path/"c.json").read_text())["missing_legs"] == ["b"]
+    assert "b" in (tmp_path/"c.md").read_text()
+
+
+def test_run_strict_passes_when_every_planned_leg_reported_clean(tmp_path, monkeypatch):
+    monkeypatch.setattr(C, "INVARIANTS", [])
+    monkeypatch.setattr(C, "load", lambda g: {"a": make_leg("a"), "b": make_leg("b")})
+    assert C.run("x", str(tmp_path/"c.md"), str(tmp_path/"c.json"), strict=True,
+                 expected_legs=["a", "b"]) == 0
+
+
+def test_main_reads_expected_legs_flag(tmp_path, monkeypatch):
+    seen = {}
+    def fake_run(g, md, js, strict, expected_legs=None):
+        seen.update(strict=strict, expected=expected_legs)
+        return 0
+    monkeypatch.setattr(C, "run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["conformance.py", "g", "m", "j", "--strict", "--expect-legs=a,b"])
+    try:
+        C.main()
+    except SystemExit:
+        pass
+    assert seen == {"strict": True, "expected": ["a", "b"]}

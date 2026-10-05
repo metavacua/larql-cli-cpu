@@ -37,8 +37,8 @@ bits/char correctness check that orchestrates the LARQL Rust forward
 any pair-wise delta exceeds `--threshold` (default 0.5%). Its first serious
 application surfaced four config-loading bugs in `larql-models` (rms_norm_eps
 not parsed; Gemma 3 per-layer-type rope_scaling missing; llama3 rope_scaling
-missing; StarCoder2 norm_epsilon alias). CI gate:
-[`.github/workflows/shannon-verify.yml`](../../.github/workflows/shannon-verify.yml)
+missing; StarCoder2 norm_epsilon alias). CI gate: the `reference` job of
+[`.github/workflows/lql-strategy-matrix.yml`](../../.github/workflows/lql-strategy-matrix.yml)
 runs it on every PR. Per-arch sweep:
 [`scripts/diagnose_models.py`](../../scripts/diagnose_models.py). See
 [`docs/cli.md#cross-engine-verify`](../../docs/cli.md#cross-engine-verify) and
