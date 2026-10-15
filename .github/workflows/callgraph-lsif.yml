@@ -1,0 +1,61 @@
+# Resolved definitions and references for the whole workspace.
+#
+# `rust-analyzer lsif` resolves every identifier to its definition
+# (traits, methods, re-exports, macro expansions included), which a text
+# or name match cannot. The output is JSON lines. It is uploaded as an
+# artifact (one day, the retention this account gets) and its size and the
+# indexer's own resource use are printed in the job log.
+#
+# The indexer runs build scripts and proc macros, so it compiles: that is
+# why this runs on a runner and not on the development machine.
+
+name: callgraph-lsif
+
+on:
+  push:
+    branches: [analysis/rust-analyzer-lsif]
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/callgraph-lsif.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lsif:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Activate the pinned Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Add rust-analyzer and the standard library sources
+        run: rustup component add rust-analyzer rust-src
+
+      - name: System libraries the build scripts need
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopenblas-dev pkg-config
+
+      - name: Index the workspace
+        run: /usr/bin/time -v rust-analyzer lsif . > workspace.lsif
+
+      - name: Size of the index
+        run: |
+          ls -l workspace.lsif
+          wc -l workspace.lsif
+          df -h .
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: workspace-lsif
+          path: workspace.lsif
+          retention-days: 1
+          compression-level: 9
