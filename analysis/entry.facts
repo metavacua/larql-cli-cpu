@@ -1,0 +1,4 @@
+compile	crates/larql-cli/src/commands/extraction/compile_cmd/.*
+extract	crates/larql-cli/src/commands/extraction/extract_index_cmd\.rs
+walk	crates/larql-cli/src/commands/extraction/walk_cmd(\.rs|/.*)
+run	crates/larql-cli/src/commands/primary/run_cmd.*

@@ -78,9 +78,11 @@ jobs:
           for r in fn call_id call_scoped call_method lit_files ty_weights; do
             ast-grep scan -r "analysis/rules/$r.yml" --json=stream \
               --globs '!**/tests/**' --globs '!**/benches/**' --globs '!**/examples/**' \
+              --globs '!**/tests.rs' --globs '!**/*_tests.rs' --globs '!**/*_test.rs' \
               crates/*/src > "$RUNNER_TEMP/$r.jsonl"
             echo "$r: $(wc -l < "$RUNNER_TEMP/$r.jsonl") matches"
           done
+          cp analysis/entry.facts analysis/calcname.facts facts/
           cd "$RUNNER_TEMP"
           jq -r 'select(.text | test("fn\\s+[A-Za-z0-9_]+"))
                  | [.file, .range.start.line, .range.end.line, (.text | capture("fn\\s+(?<n>[A-Za-z0-9_]+)").n)] | @tsv' \
@@ -116,14 +118,22 @@ jobs:
 
       - name: Findings
         run: |
+          sort -t $'\t' -k2,2nr -k3,3nr out/cli_file.csv > "$RUNNER_TEMP/cli_file.sorted"
+          sort -t $'\t' -k2,2nr out/cli_calc.csv > "$RUNNER_TEMP/cli_calc.sorted"
           {
             echo "## Weight use through the call graph"
-            echo
             echo '```'
             column -t -s $'\t' out/summary.csv
             echo
-            echo 'larql-cli files: direct weight use, reaching weights through resolved calls'
-            sort -t $'\t' -k2,2nr -k3,3nr out/cli_file.csv | head -40 | column -t -s $'\t'
+            echo 'functions each command needs, by crate (resolved calls from the command files):'
+            awk -F '\t' '{ split($2, p, "/"); n[$1 "\t" p[2]]++ } END { for (k in n) print k "\t" n[k] }' out/needs.csv \
+              | sort | column -t -s $'\t'
+            echo
+            echo 'larql-cli files that reach a weight-computing function (file, functions reaching):'
+            head -30 "$RUNNER_TEMP/cli_calc.sorted" | column -t -s $'\t'
+            echo
+            echo 'larql-cli files: direct weight use, reaching weights through resolved calls:'
+            head -40 "$RUNNER_TEMP/cli_file.sorted" | column -t -s $'\t'
             echo '```'
           } | tee "$GITHUB_STEP_SUMMARY"
 

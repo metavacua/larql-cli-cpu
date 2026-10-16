@@ -1,7 +1,10 @@
-functions	3
-call sites	2
-reference occurrences	1
-call sites resolved to a workspace function	1
-resolved caller->callee edges	1
+functions	4
+call sites	3
+reference occurrences	2
+call sites resolved to a workspace function	2
+resolved caller->callee edges	2
 weight-touching functions	1
-functions reaching weights	2
+functions reaching weights	3
+weight-computing functions found	1
+functions reaching weight computation	3
+command needs: cmdA	3

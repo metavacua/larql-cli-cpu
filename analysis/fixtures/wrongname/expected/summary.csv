@@ -1,7 +1,10 @@
-functions	3
+functions	4
 call sites	1
 reference occurrences	1
 call sites resolved to a workspace function	0
 resolved caller->callee edges	0
 weight-touching functions	1
 functions reaching weights	1
+weight-computing functions found	1
+functions reaching weight computation	1
+command needs: cmdA	1
