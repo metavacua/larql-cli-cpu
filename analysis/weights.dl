@@ -1,0 +1,66 @@
+// Where does the workspace touch weights, and which functions reach those places?
+//
+// Facts are extracted mechanically (ast-grep rules in analysis/rules; rust-analyzer lsif).
+// Nothing here is typed in by hand. A function is identified by (file, first line, name).
+
+.decl fn(file:symbol, s:number, e:number, name:symbol)          .input fn
+.decl call(file:symbol, line:number, name:symbol)                .input call
+.decl lit(file:symbol, line:number)                              .input lit   // string names a weight file
+.decl ty(file:symbol, line:number)                               .input ty    // type name contains Weight(s)
+.decl lrange(id:number, line:number)                              .input lrange
+.decl doc(id:number, path:symbol)                                .input doc
+.decl item(outv:number, prop:symbol, doc:number, rid:number)     .input item
+
+// Innermost function containing a source position.
+.decl pos(file:symbol, line:number)
+pos(f, l) :- call(f, l, _).
+pos(f, l) :- lit(f, l).
+pos(f, l) :- ty(f, l).
+.decl cont(file:symbol, line:number, s:number, e:number, name:symbol)
+cont(f, l, s, e, n) :- pos(f, l), fn(f, s, e, n), s <= l, l <= e.
+.decl bigger(file:symbol, line:number, s:number, name:symbol)
+bigger(f, l, s, n) :- cont(f, l, s, e, n), cont(f, l, _, e2, _), cont(f, l, s2, _, _), e2 - s2 < e - s.
+.decl owner(file:symbol, line:number, s:number, name:symbol)
+owner(f, l, s, n) :- cont(f, l, s, _, n), !bigger(f, l, s, n).
+
+// Resolved references (rust-analyzer): occurrence position -> definition position.
+.decl refocc(rf:symbol, rl:number, df:symbol, dl:number)
+refocc(rf, rl, df, dl) :-
+    item(o, "references", rd, rr), item(o, "definitions", dd, dr),
+    doc(rd, rf), doc(dd, df), lrange(rr, rl), lrange(dr, dl).
+
+// A call site whose resolved definition is a function in the workspace with that name.
+.decl resolved_site(file:symbol, line:number, name:symbol)
+resolved_site(f, l, n) :- refocc(f, l, df, dl), call(f, l, n), fn(df, ds, _, n), ds <= dl, dl <= ds + 3.
+.decl edge(cf:symbol, cs:number, cn:symbol, df:symbol, ds:number, dn:symbol)
+edge(cf, cs, cn, df, ds, dn) :-
+    refocc(cf, rl, df, dl), call(cf, rl, dn), owner(cf, rl, cs, cn), fn(df, ds, _, dn), ds <= dl, dl <= ds + 3.
+
+// Weight-touching functions, and everything that reaches them through resolved calls.
+.decl seed(file:symbol, s:number, name:symbol)
+seed(f, s, n) :- lit(f, l), owner(f, l, s, n).
+seed(f, s, n) :- ty(f, l), owner(f, l, s, n).
+.decl reach(file:symbol, s:number, name:symbol)
+reach(f, s, n) :- seed(f, s, n).
+reach(f, s, n) :- edge(f, s, n, g, gs, gn), reach(g, gs, gn).
+
+.decl cli_file(file:symbol, direct:number, via_calls:number)
+cli_file(f, d, r) :-
+    fn(f, _, _, _), match("crates/larql-cli/src/.*", f),
+    d = count : { seed(f, _, _) },
+    r = count : { reach(f, s, n), !seed(f, s, n) }.
+
+.decl summary(what:symbol, n:number)
+summary("functions", n)                      :- n = count : { fn(_, _, _, _) }.
+summary("call sites", n)                     :- n = count : { call(_, _, _) }.
+summary("reference occurrences", n)          :- n = count : { refocc(_, _, _, _) }.
+summary("call sites resolved to a workspace function", n) :- n = count : { resolved_site(_, _, _) }.
+summary("resolved caller->callee edges", n)  :- n = count : { edge(_, _, _, _, _, _) }.
+summary("weight-touching functions", n)      :- n = count : { seed(_, _, _) }.
+summary("functions reaching weights", n)     :- n = count : { reach(_, _, _) }.
+
+.output edge
+.output seed
+.output reach
+.output cli_file
+.output summary
