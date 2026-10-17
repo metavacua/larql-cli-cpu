@@ -1,0 +1,81 @@
+# The LARQL walk and trace on one prompt, run to read the executed route: which features the walk selects per layer, the
+# per-layer attention and feed-forward decomposition of the answer token, the inference trace. SmolLM2-135M, float
+# vindex at the inference level (the leg the strategy matrix runs as smol135base). Read-only: nothing here edits a vindex.
+name: walk-trace-france
+
+on:
+  push:
+    branches: ["analysis/**"]
+    paths: [".github/workflows/walk-trace-france.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: walk-trace-france-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_BACKTRACE: "1"
+  MODEL: HuggingFaceTB/SmolLM2-135M
+
+jobs:
+  walk-trace:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - name: Cache cargo deps
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-reg2-walktrace-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-reg2-walktrace-
+      - name: Install BLAS
+        run: sudo apt-get update && sudo apt-get install -y libopenblas-dev
+      - name: Build larql-cli (release)
+        run: cargo build --release -p larql-cli 2>&1 | tail -n 3
+      - name: The model revision
+        run: |
+          mkdir -p out
+          curl -sS "https://huggingface.co/api/models/$MODEL" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d["sha"])' | tee out/revision.txt
+          target/release/larql --version | tee out/larql-version.txt
+      - name: Extract the vindex (float, inference level)
+        run: |
+          /usr/bin/time -v target/release/larql extract "$MODEL" -o smol.vindex --level inference > out/extract.stdout 2> out/extract.stderr || true
+          tail -n 5 out/extract.stdout; grep -E "Maximum resident|Elapsed" out/extract.stderr || true
+          du -sh smol.vindex; find smol.vindex -maxdepth 1 -type f -printf "%s %f\n" | sort -k2 | head -30
+      - name: The statements, each recorded whole
+        run: |
+          i=0
+          run() {
+            i=$((i+1)); id="$(printf '%02d' "$i")_$1"; shift
+            /usr/bin/time -f "%e s %M KB" -o "out/$id.time" target/release/larql lql "USE \"smol.vindex\"; $*" > "out/$id.txt" 2> "out/$id.err" || true
+            echo "== $id: $* ($(cat "out/$id.time"))"
+            head -n 40 "out/$id.txt"
+          }
+          run walk_top10      'WALK "The capital of France is" TOP 10;'
+          run walk_all        'WALK "The capital of France is";'
+          run infer_top5      'INFER "The capital of France is" TOP 5;'
+          run infer_compare   'INFER "The capital of France is" TOP 5 COMPARE;'
+          run explain_infer   'EXPLAIN INFER "The capital of France is" TOP 5;'
+          run explain_attn    'EXPLAIN INFER "The capital of France is" TOP 5 WITH ATTENTION;'
+          run trace_basic     'TRACE "The capital of France is";'
+          run trace_for_paris 'TRACE "The capital of France is" FOR "Paris";'
+          run trace_for_the   'TRACE "The capital of France is" FOR "the";'
+          run trace_decompose 'TRACE "The capital of France is" FOR "Paris" DECOMPOSE;'
+          run trace_all_pos   'TRACE "The capital of France is" POSITIONS ALL SAVE "france_all.trace";'
+          run spain_trace     'TRACE "The capital of Spain is" FOR "Madrid" DECOMPOSE;'
+          run show_layers     'SHOW LAYERS;'
+          run stats           'STATS;'
+          ls -la france_all.trace 2>/dev/null || true
+          cp france_all.trace out/ 2>/dev/null || true
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: walk-trace-france
+          path: out/
+          retention-days: 1
