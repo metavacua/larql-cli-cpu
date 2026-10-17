@@ -43,9 +43,14 @@ jobs:
           mkdir -p out
           curl -sS "https://huggingface.co/api/models/$MODEL" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d["sha"])' | tee out/revision.txt
           target/release/larql --version | tee out/larql-version.txt
+      - name: The model snapshot (extract takes a directory, not a Hub id)
+        run: |
+          python3 -m pip install --quiet huggingface_hub
+          hf download "$MODEL" --revision "$(cat out/revision.txt)" --local-dir hf --exclude "onnx/*" --exclude "*.gguf" > /dev/null
+          find hf -maxdepth 1 -type f -printf "%s %f\n" | sort -k2
       - name: Extract the vindex (float, inference level)
         run: |
-          /usr/bin/time -v target/release/larql extract "$MODEL" -o smol.vindex --level inference > out/extract.stdout 2> out/extract.stderr || true
+          /usr/bin/time -v target/release/larql extract hf -o smol.vindex --level inference > out/extract.stdout 2> out/extract.stderr || true
           tail -n 5 out/extract.stdout; grep -E "Maximum resident|Elapsed" out/extract.stderr || true
           du -sh smol.vindex; find smol.vindex -maxdepth 1 -type f -printf "%s %f\n" | sort -k2 | head -30
       - name: The statements, each recorded whole
