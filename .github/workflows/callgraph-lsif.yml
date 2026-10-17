@@ -1,0 +1,142 @@
+# Where does the workspace touch weights, and what reaches those places?
+#
+# The whole analysis runs here, and its findings are in the job log (and the job
+# summary), not in an artifact or on anyone's machine:
+#
+#   1. ast-grep rules (analysis/rules) list every function, call site, weight-file
+#      string and Weight* type name in the sources.
+#   2. rust-analyzer lsif resolves every reference to its definition.
+#   3. analysis/weights.dl (Soufflé) joins them and computes reachability.
+#
+# rust-analyzer runs build scripts and proc macros, so this compiles: that is why
+# it runs on a runner. The Datalog program is tested first against two tiny fixtures
+# (analysis/fixtures): one where an edge must be found, one where it must not.
+
+name: callgraph-lsif
+
+on:
+  push:
+    branches: [analysis/rust-analyzer-lsif]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analysis:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Activate the pinned Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Add rust-analyzer and the standard library sources
+        run: rustup component add rust-analyzer rust-src
+
+      - name: System libraries the build scripts need
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopenblas-dev pkg-config
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: ast-grep (same pin as streaming-callback-gate)
+        run: python -m pip install --quiet 'ast-grep-cli==0.42.1'
+
+      # Soufflé is not in Ubuntu's archive; it comes from the pinned nixos-26.05
+      # binary cache. Nothing is compiled for it.
+      - uses: cachix/install-nix-action@v31
+      - name: Install Soufflé (pinned channel)
+        run: |
+          nix profile install github:NixOS/nixpkgs/nixos-26.05#souffle
+          echo "$HOME/.nix-profile/bin" >> "$GITHUB_PATH"
+
+      - name: Test the Datalog program (one edge must be found; one must not)
+        run: |
+          for d in ok wrongname; do
+            rm -rf "$RUNNER_TEMP/fx-$d"; mkdir "$RUNNER_TEMP/fx-$d"
+            souffle -F "analysis/fixtures/$d" -D "$RUNNER_TEMP/fx-$d" analysis/weights.dl
+            diff -r "analysis/fixtures/$d/expected" "$RUNNER_TEMP/fx-$d"
+            echo "fixture $d: matches expected"
+          done
+
+      - name: Index the workspace (resolved definitions and references)
+        run: /usr/bin/time -v rust-analyzer lsif . > "$RUNNER_TEMP/workspace.lsif"
+
+      - name: Facts from the sources (ast-grep rules)
+        run: |
+          mkdir -p facts
+          for r in fn call_id call_scoped call_method lit_files ty_weights; do
+            ast-grep scan -r "analysis/rules/$r.yml" --json=stream \
+              --globs '!**/tests/**' --globs '!**/benches/**' --globs '!**/examples/**' \
+              --globs '!**/tests.rs' --globs '!**/*_tests.rs' --globs '!**/*_test.rs' \
+              crates/*/src > "$RUNNER_TEMP/$r.jsonl"
+            echo "$r: $(wc -l < "$RUNNER_TEMP/$r.jsonl") matches"
+          done
+          cp analysis/entry.facts analysis/calcname.facts facts/
+          cd "$RUNNER_TEMP"
+          jq -r 'select(.text | test("fn\\s+[A-Za-z0-9_]+"))
+                 | [.file, .range.start.line, .range.end.line, (.text | capture("fn\\s+(?<n>[A-Za-z0-9_]+)").n)] | @tsv' \
+             fn.jsonl > "$GITHUB_WORKSPACE/facts/fn.facts"
+          jq -r '[.file, .range.start.line, .text] | @tsv' call_id.jsonl call_scoped.jsonl call_method.jsonl \
+             > "$GITHUB_WORKSPACE/facts/call.facts"
+          jq -r '[.file, .range.start.line] | @tsv' lit_files.jsonl > "$GITHUB_WORKSPACE/facts/lit.facts"
+          jq -r '[.file, .range.start.line] | @tsv' ty_weights.jsonl > "$GITHUB_WORKSPACE/facts/ty.facts"
+
+      - name: Facts from the index
+        run: |
+          L="$RUNNER_TEMP/workspace.lsif"
+          grep -F '"label":"range"' "$L" \
+            | jq -r '[.id, .start.line] | @tsv' > facts/lrange.facts
+          grep -F '"label":"document"' "$L" | grep -F '"type":"vertex"' \
+            | jq -r '[.id, (.uri | sub("^.*/crates/"; "crates/"))] | @tsv' > facts/doc.facts
+          grep -F '"label":"item"' "$L" | grep -F '"property":"' \
+            | jq -r '.outV as $o | .property as $p | .document as $d | .inVs[] | [$o, $p, $d, .] | @tsv' \
+            > facts/item.facts
+          wc -l facts/*.facts
+
+      - name: Gate - the index must cover the sources (a partial index would pass silently)
+        run: |
+          src=$(git ls-files 'crates/*/src/*.rs' 'crates/*/src/**/*.rs' | wc -l)
+          idx=$(grep -c -E $'^[0-9]+\tcrates/[^/]+/src/' facts/doc.facts)
+          echo "source files under crates/*/src: $src   indexed documents under crates/*/src: $idx"
+          test $((idx * 100)) -ge $((src * 90))
+
+      - name: Join and reachability (Datalog)
+        run: |
+          mkdir -p out
+          /usr/bin/time -v souffle -j 2 -F facts -D out analysis/weights.dl
+
+      - name: Findings
+        run: |
+          sort -t $'\t' -k2,2nr -k3,3nr out/cli_file.csv > "$RUNNER_TEMP/cli_file.sorted"
+          sort -t $'\t' -k2,2nr out/cli_calc.csv > "$RUNNER_TEMP/cli_calc.sorted"
+          {
+            echo "## Weight use through the call graph"
+            echo '```'
+            column -t -s $'\t' out/summary.csv
+            echo
+            echo 'functions each command needs, by crate (resolved calls from the command files):'
+            awk -F '\t' '{ split($2, p, "/"); n[$1 "\t" p[2]]++ } END { for (k in n) print k "\t" n[k] }' out/needs.csv \
+              | sort | column -t -s $'\t'
+            echo
+            echo 'larql-cli files that reach a weight-computing function (file, functions reaching):'
+            head -30 "$RUNNER_TEMP/cli_calc.sorted" | column -t -s $'\t'
+            echo
+            echo 'larql-cli files: direct weight use, reaching weights through resolved calls:'
+            head -40 "$RUNNER_TEMP/cli_file.sorted" | column -t -s $'\t'
+            echo '```'
+          } | tee "$GITHUB_STEP_SUMMARY"
+
+      - name: Gate - the join must have found edges (a gate that cannot fail is worse than none)
+        run: |
+          awk -F '\t' '$1 == "resolved caller->callee edges" { exit ($2 >= 10000 ? 0 : 1) }' out/summary.csv

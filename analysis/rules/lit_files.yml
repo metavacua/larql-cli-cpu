@@ -1,0 +1,3 @@
+id: lit_files
+language: rust
+rule: { kind: string_literal, regex: 'gate_vectors|embeddings|down_meta|attn_weights|up_weights|down_weights|lm_head|norms\.bin|weights\.bin|weight_manifest|safetensors|\.gguf|interleaved|layers/layer_|layer_weights|ple_weights' }

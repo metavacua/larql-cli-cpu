@@ -1,0 +1,3 @@
+id: ty_weights
+language: rust
+rule: { kind: type_identifier, regex: 'Weights?' }

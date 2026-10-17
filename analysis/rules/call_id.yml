@@ -1,0 +1,3 @@
+id: call_id
+language: rust
+rule: { kind: identifier, inside: { kind: call_expression, field: function } }
